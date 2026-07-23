@@ -38,6 +38,15 @@ struct FeedSource: Identifiable, Hashable {
 
     var policy: PipelinePolicy { PipelinePolicy.from(configJson: config) }
 
+    /// 全文获取模式（config.fetch_mode, 默认 summary）
+    var fetchMode: FetchMode {
+        guard let data = config.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let raw = obj["fetch_mode"] as? String,
+              let m = FetchMode(rawValue: raw) else { return .summary }
+        return m
+    }
+
     /// 该源是否可转录（播客/视频才有音频流）
     var transcribable: Bool { stype == "podcast" || stype == "youtube" }
 }
@@ -118,14 +127,39 @@ final class SourceStore: ObservableObject {
     // MARK: 增删改
 
     /// 添加订阅源（RSS/播客直接用 url；YouTube 传频道 url 或 UC id）
+    /// 添加时自动探测全文模式（仅 RSS 文章类需要; 播客/YouTube 不抓正文, 跳过探测）
     @discardableResult
-    func addSource(stype: String, name: String, identifier: String) -> Bool {
+    func addSource(stype: String, name: String, identifier: String) async -> Bool {
+        var config = "{}"
+        if stype == "rss" {
+            let mode = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
+            config = "{\"fetch_mode\":\"\(mode.rawValue)\"}"
+        }
         let ok = db.execute(
-            "INSERT OR IGNORE INTO content_source (stype, name, identifier, enabled) VALUES (?,?,?,1)",
-            params: [stype, name, identifier]
+            "INSERT OR IGNORE INTO content_source (stype, name, identifier, enabled, config) VALUES (?,?,?,1,?)",
+            params: [stype, name, identifier, config]
         )
         if ok { reload() }
         return ok
+    }
+
+    /// 手动设置某源的全文模式（GUI 覆盖）
+    func setFetchMode(id: Int64, mode: FetchMode) {
+        let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
+        var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+        obj["fetch_mode"] = mode.rawValue
+        if let data = try? JSONSerialization.data(withJSONObject: obj),
+           let str = String(data: data, encoding: .utf8) {
+            db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id])
+        }
+        reload()
+    }
+
+    /// 重新探测某源的全文模式并写回
+    func reprobeFetchMode(id: Int64) async {
+        guard let identifier = db.scalarString("SELECT identifier FROM content_source WHERE id = ?", params: [id]) else { return }
+        let mode = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
+        setFetchMode(id: id, mode: mode)
     }
 
     func removeSource(id: Int64) {
@@ -184,7 +218,17 @@ final class SourceStore: ObservableObject {
         let feed = try await FeedFetcher.fetch(urlString: src.identifier)
         var added = 0
         for entry in feed.entries {
-            if upsertContent(source: src.stype, sourceId: src.id, entry: entry) { added += 1 }
+            if let newId = upsertContent(source: src.stype, sourceId: src.id, entry: entry) {
+                added += 1
+                // 新文章: 按源的 fetch_mode 立即抓全文（仅文章类）
+                if entry.meta["audio_url"] == nil && entry.meta["video_id"] == nil {
+                    await FullTextFetcher.shared.fetchAndStore(
+                        contentId: newId, url: entry.url,
+                        feedHtml: entry.html.isEmpty ? nil : entry.html,
+                        mode: src.fetchMode
+                    )
+                }
+            }
         }
         db.execute("UPDATE content_source SET last_fetched_at = datetime('now'), error = NULL WHERE id = ?",
                    params: [src.id])
@@ -235,12 +279,12 @@ final class SourceStore: ObservableObject {
         return list
     }
 
-    /// 把一条 feed entry 写进 content（按 source+guid 去重），返回是否新插入
-    private func upsertContent(source: String, sourceId: Int64, entry: ParsedEntry) -> Bool {
+    /// 把一条 feed entry 写进 content（按 source+guid 去重），返回新插入的 content id（已存在返回 nil）
+    private func upsertContent(source: String, sourceId: Int64, entry: ParsedEntry) -> Int64? {
         // 已存在则跳过
         if let _ = db.scalarInt("SELECT id FROM content WHERE source = ? AND guid = ?",
                                 params: [source, entry.guid]) {
-            return false
+            return nil
         }
         let ctype: String
         if entry.meta["video_id"] != nil { ctype = "video" }
@@ -251,13 +295,14 @@ final class SourceStore: ObservableObject {
         let metaJson = (try? JSONSerialization.data(withJSONObject: entry.meta))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
 
-        return db.execute(
+        let ok = db.execute(
             """
             INSERT INTO content (ctype, guid, source, source_id, title, author, url, published_at, content_html, fetch_status, meta)
             VALUES (?,?,?,?,?,?,?,?,?,0,?)
             """,
             params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url, published, entry.html, metaJson]
         )
+        return ok ? db.lastInsertId() : nil
     }
 
     // MARK: SQLite 底层（读遍历辅助）

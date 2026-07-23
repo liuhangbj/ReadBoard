@@ -181,6 +181,30 @@ struct SourceRow: View {
                         .font(.caption2)
                         .padding(.horizontal, 4).padding(.vertical, 1)
                         .background(.quaternary).clipShape(RoundedRectangle(cornerRadius: 3))
+                    // 全文模式徽标（仅文章类源显示）
+                    if src.stype == "rss" {
+                        Menu {
+                            ForEach(FetchMode.allCases, id: \.rawValue) { m in
+                                Button {
+                                    store.setFetchMode(id: src.id, mode: m)
+                                } label: {
+                                    if src.fetchMode == m { Label(m.displayName, systemImage: "checkmark") }
+                                    else { Text(m.displayName) }
+                                }
+                            }
+                            Divider()
+                            Button("重新探测") { Task { await store.reprobeFetchMode(id: src.id) } }
+                        } label: {
+                            Text(src.fetchMode.displayName)
+                                .font(.caption2)
+                                .padding(.horizontal, 4).padding(.vertical, 1)
+                                .background(fetchModeColor.opacity(0.18))
+                                .foregroundStyle(fetchModeColor)
+                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                        }
+                        .menuStyle(.borderlessButton)
+                        .help("全文获取方式（点击可修改）")
+                    }
                     if let t = src.lastFetchedAt {
                         Text("上次 \(String(t.prefix(16)))").font(.caption2).foregroundStyle(.tertiary)
                     }
@@ -254,6 +278,15 @@ struct SourceRow: View {
         default: return "📰"
         }
     }
+
+    private var fetchModeColor: Color {
+        switch src.fetchMode {
+        case .feedFull: return .green
+        case .defuddle: return .blue
+        case .cdp: return .orange
+        case .summary: return .gray
+        }
+    }
 }
 
 // MARK: 添加源
@@ -311,8 +344,14 @@ struct AddSourceSheet: View {
         Task {
             do {
                 let feed = try await FeedFetcher.fetch(urlString: url)
+                var msg = "✓ \(feed.title)：\(feed.entries.count) 条，类型 \(feed.kind.rawValue)"
+                // RSS 文章类: 探测全文模式
+                if stype == "rss" {
+                    let mode = await FullTextFetcher.shared.probeMode(feedUrl: url)
+                    msg += "，全文 \(mode.displayName)"
+                }
                 await MainActor.run {
-                    testResult = "✓ \(feed.title)：\(feed.entries.count) 条，类型 \(feed.kind.rawValue)"
+                    testResult = msg
                     if name.isEmpty { name = feed.title }
                     testing = false
                 }
@@ -338,10 +377,18 @@ struct AddSourceSheet: View {
 
     private func add() {
         let finalName = name.isEmpty ? identifier : name
-        if store.addSource(stype: stype, name: finalName, identifier: resolvedIdentifier()) {
-            dismiss()
-        } else {
-            testResult = "✗ 添加失败（可能已存在相同源）"
+        testing = true
+        testResult = ""
+        Task {
+            let ok = await store.addSource(stype: stype, name: finalName, identifier: resolvedIdentifier())
+            await MainActor.run {
+                testing = false
+                if ok {
+                    dismiss()
+                } else {
+                    testResult = "✗ 添加失败（可能已存在相同源）"
+                }
+            }
         }
     }
 }
