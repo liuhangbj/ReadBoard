@@ -2,6 +2,11 @@ import SwiftUI
 
 @main
 struct ReadBoardApp: App {
+    init() {
+        // 启动后台管线 worker（周期扫描未处理内容，按开关补跑打分/翻译/摘要/转录）
+        PipelineWorker.shared.start()
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()

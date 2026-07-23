@@ -4,6 +4,7 @@ import SwiftUI
 
 struct SourcesView: View {
     @StateObject private var store = SourceStore()
+    @ObservedObject private var worker = PipelineWorker.shared
     @State private var showAddSheet = false
     @State private var showAddFolder = false
     @State private var newFolderName = ""
@@ -42,6 +43,35 @@ struct SourcesView: View {
                     .padding(.horizontal)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+
+            // ── 后台管线 worker 状态条 ──
+            HStack(spacing: 8) {
+                Image(systemName: "gearshape.2")
+                    .foregroundStyle(.secondary)
+                if worker.isRunning {
+                    ProgressView().scaleEffect(0.6)
+                    Text("管线运行中…").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("管线空闲").font(.caption).foregroundStyle(.secondary)
+                }
+                if let t = worker.lastRunAt {
+                    Text("上次 \(t)").font(.caption2).foregroundStyle(.tertiary)
+                }
+                if !worker.lastSummary.isEmpty {
+                    Text(worker.lastSummary).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                }
+                Text("累计 \(worker.processedTotal)").font(.caption2).foregroundStyle(.tertiary)
+                Spacer()
+                Button {
+                    Task { await worker.runOnce() }
+                } label: {
+                    Label("立即扫描", systemImage: "play")
+                }
+                .disabled(worker.isRunning)
+                .controlSize(.small)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 6)
 
             Divider()
 
