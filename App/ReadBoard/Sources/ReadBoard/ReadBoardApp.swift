@@ -20,6 +20,11 @@ struct ReadBoardApp: App {
         }
         .windowStyle(.automatic)
         .defaultSize(width: 1200, height: 780)
+
+        // 独立设置窗口（⌘, 打开）
+        Settings {
+            SettingsView()
+        }
     }
 }
 
@@ -34,9 +39,6 @@ struct RootView: View {
             SourcesView()
                 .tabItem { Label("订阅源", systemImage: "dot.radiowaves.left.and.right") }
                 .tag(1)
-            SettingsView()
-                .tabItem { Label("设置", systemImage: "gearshape") }
-                .tag(2)
             ManageView()
                 .tabItem { Label("管理", systemImage: "chart.bar.doc.horizontal") }
                 .tag(3)

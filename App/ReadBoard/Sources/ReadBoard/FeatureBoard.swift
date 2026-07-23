@@ -54,10 +54,14 @@ enum FeatureBoard: String, CaseIterable, Identifiable {
 
     private var defaultsKey: String { "board.\(rawValue).enabled" }
 
-    /// 板块总开关（默认全开）
+    /// 板块总开关（默认全开）。
+    /// 读走属性；写必须走静态 set——Swift 不允许对枚举 computed property 的 setter 直接赋值。
     var enabled: Bool {
-        get { UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }
+        UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true
+    }
+
+    static func setEnabled(_ board: FeatureBoard, _ on: Bool) {
+        UserDefaults.standard.set(on, forKey: "board.\(board.rawValue).enabled")
     }
 }
 
@@ -79,10 +83,13 @@ enum AIPipeline: String, CaseIterable, Identifiable {
 
     private var defaultsKey: String { "ai.\(rawValue).enabled" }
 
-    /// 子管线开关（默认全开；但只有 ai 板块总开关开才生效）
+    /// 子管线开关（默认全开；但只有 ai 板块总开关开才生效）。写走静态 set。
     var enabled: Bool {
-        get { UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }
+        UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true
+    }
+
+    static func setEnabled(_ p: AIPipeline, _ on: Bool) {
+        UserDefaults.standard.set(on, forKey: "ai.\(p.rawValue).enabled")
     }
 
     /// 最终生效 = ai 板块总开关 && 子开关
