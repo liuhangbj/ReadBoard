@@ -5,6 +5,8 @@ struct ReadBoardApp: App {
     init() {
         // 启动后台管线 worker（周期扫描未处理内容，按开关补跑打分/翻译/摘要/转录）
         PipelineWorker.shared.start()
+        // 启动 feed 自动抓取调度（周期 syncAll，信息流源头）
+        SourceStore.shared.startAutoSync()
     }
 
     var body: some Scene {
@@ -28,6 +30,9 @@ struct RootView: View {
             SourcesView()
                 .tabItem { Label("订阅源", systemImage: "dot.radiowaves.left.and.right") }
                 .tag(1)
+            SettingsView()
+                .tabItem { Label("设置", systemImage: "gearshape") }
+                .tag(2)
         }
     }
 }

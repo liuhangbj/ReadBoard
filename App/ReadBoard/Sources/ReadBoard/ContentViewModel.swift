@@ -8,6 +8,8 @@ final class ContentViewModel: ObservableObject {
     @Published var selectedSource: String? = nil   // nil = 全部
     @Published var selectedItem: ContentItem? = nil
     @Published var minScore: Int = 0               // 评分筛选 0=不限
+    @Published var unreadOnly: Bool = false        // 只看未读
+    @Published var keyword: String = ""            // 搜索关键词（标题/正文）
     @Published var totalCount: Int = 0
     @Published var showTranslated: Bool = false    // 阅读区显示原文/翻译
 
@@ -37,7 +39,9 @@ final class ContentViewModel: ObservableObject {
 
     func reload() {
         let minS: Int? = minScore > 0 ? minScore : nil
-        items = db.fetchContents(source: selectedSource, minScore: minS, limit: 300)
+        let kw = keyword.trimmingCharacters(in: .whitespaces)
+        items = db.fetchContents(source: selectedSource, minScore: minS,
+                                 unreadOnly: unreadOnly, keyword: kw.isEmpty ? nil : kw, limit: 300)
         if let sel = selectedItem, !items.contains(sel) {
             selectedItem = nil
         }
@@ -45,6 +49,26 @@ final class ContentViewModel: ObservableObject {
 
     func selectSource(_ source: String?) {
         selectedSource = source
+        reload()
+    }
+
+    /// 打开文章：选中并标已读
+    func open(_ item: ContentItem) {
+        selectedItem = item
+        if !item.isRead {
+            db.markRead(contentId: item.id)
+            // 本地同步已读状态，避免等下次 reload
+            if let idx = items.firstIndex(where: { $0.id == item.id }) {
+                items[idx] = items[idx].markingRead()
+            }
+            selectedItem = items.first { $0.id == item.id }
+        }
+    }
+
+    /// 切换已读/未读
+    func toggleRead(_ item: ContentItem) {
+        if item.isRead { db.markUnread(contentId: item.id) }
+        else { db.markRead(contentId: item.id) }
         reload()
     }
 }

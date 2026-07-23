@@ -65,12 +65,43 @@ struct Folder: Identifiable, Hashable {
 
 @MainActor
 final class SourceStore: ObservableObject {
+    /// 常驻单例：自动抓取调度挂在它上面（App 生命周期内不被释放）
+    static let shared = SourceStore()
+
     @Published var sources: [FeedSource] = []
     @Published var folders: [Folder] = []
     @Published var isSyncing = false
     @Published var lastSyncMessage = ""
 
     private let db = Database.shared
+
+    // MARK: 自动抓取调度
+
+    private var syncTimer: Timer?
+    /// 自动抓取间隔（秒），默认 15 分钟
+    var syncInterval: TimeInterval = 15 * 60
+    /// 是否开启自动抓取（默认开）
+    var autoSyncEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "sourceStore.autoSync") as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "sourceStore.autoSync")
+            if newValue { startAutoSync() } else { stopAutoSync() }
+        }
+    }
+
+    /// 启动周期自动抓取（立即跑一轮 + Timer 周期）。App 启动时调用。
+    func startAutoSync() {
+        guard autoSyncEnabled, syncTimer == nil else { return }
+        Task { await syncAll() }
+        syncTimer = Timer.scheduledTimer(withTimeInterval: syncInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.syncAll() }
+        }
+    }
+
+    func stopAutoSync() {
+        syncTimer?.invalidate()
+        syncTimer = nil
+    }
 
     func reload() {
         sources = fetchAllSources()

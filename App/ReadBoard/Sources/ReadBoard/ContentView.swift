@@ -55,7 +55,27 @@ struct ContentView: View {
     // MARK: 中栏
     private var articleList: some View {
         VStack(spacing: 0) {
-            // 评分筛选条
+            // 搜索框
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+                TextField("搜索标题 / 正文", text: $vm.keyword)
+                    .textFieldStyle(.plain)
+                    .font(.callout)
+                    .onChange(of: vm.keyword) { _, _ in vm.reload() }
+                if !vm.keyword.isEmpty {
+                    Button { vm.keyword = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.quaternary.opacity(0.5))
+
+            // 筛选条：评分 + 未读
             HStack {
                 Text("评分 ≥")
                     .font(.caption)
@@ -68,13 +88,26 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: vm.minScore) { _, _ in vm.reload() }
+                Toggle("未读", isOn: $vm.unreadOnly)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                    .controlSize(.small)
+                    .onChange(of: vm.unreadOnly) { _, _ in vm.reload() }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
 
-            List(vm.items, selection: $vm.selectedItem) { item in
-                ArticleRow(item: item)
-                    .tag(item)
+            List(selection: Binding(
+                get: { vm.selectedItem },
+                set: { if let it = $0 { vm.open(it) } }
+            )) {
+                ForEach(vm.items) { item in
+                    ArticleRow(item: item)
+                        .tag(item)
+                        .contextMenu {
+                            Button(item.isRead ? "标为未读" : "标为已读") { vm.toggleRead(item) }
+                        }
+                }
             }
             .listStyle(.plain)
         }
@@ -113,8 +146,15 @@ struct ArticleRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .top) {
+                if !item.isRead {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 7, height: 7)
+                        .padding(.top, 5)
+                }
                 Text(item.title)
                     .font(.headline)
+                    .foregroundStyle(item.isRead ? .secondary : .primary)
                     .lineLimit(2)
                 Spacer()
                 if let s = item.llmScore {

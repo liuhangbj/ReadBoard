@@ -20,6 +20,17 @@ struct ContentItem: Identifiable, Hashable {
     let fetchStatus: Int
     let feedId: Int64?
     let audioUrl: String?     // 播客/视频的音频流地址（来自 meta.audio_url）
+    let readAt: String?       // 已读时间，nil = 未读
+    var isRead: Bool { readAt != nil }
+
+    /// 返回一个标记为已读的副本（本地状态同步用）
+    func markingRead() -> ContentItem {
+        ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
+                    url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
+                    contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
+                    llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
+                    audioUrl: audioUrl, readAt: "now")
+    }
 }
 
 struct SourceGroup: Identifiable, Hashable {
@@ -153,17 +164,22 @@ final class Database: @unchecked Sendable {
         return groups
     }
 
-    /// 拉取内容列表（可按 source 过滤、按评分/时间排序）
-    func fetchContents(source: String? = nil, minScore: Int? = nil, limit: Int = 200) -> [ContentItem] {
+    /// 拉取内容列表（可按 source 过滤、评分筛选、未读过滤、关键词搜索）
+    func fetchContents(source: String? = nil, minScore: Int? = nil, unreadOnly: Bool = false,
+                       keyword: String? = nil, limit: Int = 200) -> [ContentItem] {
         guard open() else { return [] }
         var sql = """
         SELECT id, ctype, source, title, author, url, language, published_at,
-               excerpt, content_md, llm_score, llm_summary, llm_translated_md, fetch_status, feed_id, meta
+               excerpt, content_md, llm_score, llm_summary, llm_translated_md, fetch_status, feed_id, meta, read_at
         FROM content
         """
         var conds: [String] = []
         if source != nil { conds.append("source = ?") }
         if minScore != nil { conds.append("llm_score >= ?") }
+        if unreadOnly { conds.append("read_at IS NULL") }
+        if let kw = keyword, !kw.isEmpty {
+            conds.append("(title LIKE ? OR excerpt LIKE ? OR content_md LIKE ?)")
+        }
         if !conds.isEmpty { sql += " WHERE " + conds.joined(separator: " AND ") }
         // 有评分的优先，再按发布时间倒序
         sql += " ORDER BY (llm_score IS NULL), llm_score DESC, published_at DESC LIMIT ?;"
@@ -172,8 +188,15 @@ final class Database: @unchecked Sendable {
         var items: [ContentItem] = []
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             var idx: Int32 = 1
-            if let s = source { sqlite3_bind_text(stmt, idx, s, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)); idx += 1 }
+            let binder: (String) -> Void = { s in
+                sqlite3_bind_text(stmt, idx, s, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)); idx += 1
+            }
+            if let s = source { binder(s) }
             if let m = minScore { sqlite3_bind_int64(stmt, idx, Int64(m)); idx += 1 }
+            if let kw = keyword, !kw.isEmpty {
+                let like = "%\(kw)%"
+                binder(like); binder(like); binder(like)
+            }
             sqlite3_bind_int64(stmt, idx, Int64(limit))
 
             while sqlite3_step(stmt) == SQLITE_ROW {
@@ -182,6 +205,16 @@ final class Database: @unchecked Sendable {
         }
         sqlite3_finalize(stmt)
         return items
+    }
+
+    /// 标记已读（写入当前时间）
+    func markRead(contentId: Int64) {
+        execute("UPDATE content SET read_at = datetime('now') WHERE id = ?", params: [contentId])
+    }
+
+    /// 标记未读
+    func markUnread(contentId: Int64) {
+        execute("UPDATE content SET read_at = NULL WHERE id = ?", params: [contentId])
     }
 
     func totalCount() -> Int {
@@ -227,7 +260,8 @@ final class Database: @unchecked Sendable {
             llmTranslatedMd: text(12),
             fetchStatus: int64(13).map { Int($0) } ?? 0,
             feedId: int64(14),
-            audioUrl: audioUrl
+            audioUrl: audioUrl,
+            readAt: text(16)
         )
     }
 }

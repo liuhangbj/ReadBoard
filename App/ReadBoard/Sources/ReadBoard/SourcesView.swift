@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - 订阅源管理界面
 
 struct SourcesView: View {
-    @StateObject private var store = SourceStore()
+    @ObservedObject private var store = SourceStore.shared
     @ObservedObject private var worker = PipelineWorker.shared
     @State private var showAddSheet = false
     @State private var showAddFolder = false
