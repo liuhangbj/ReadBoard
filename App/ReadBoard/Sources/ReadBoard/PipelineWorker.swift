@@ -25,7 +25,30 @@ final class PipelineWorker: ObservableObject {
     /// 每轮最多处理条数（防一次跑太久）
     var batchLimit = 30
 
-    private init() {}
+    // MARK: 存量保护
+    // worker 只处理"水位线之后"的新内容, 存量一律不碰(避免全量跑历史又贵又慢)。
+    // 水位线 = 首次启动时的最大内容 id, 持久化到 UserDefaults, 重启不累加旧的。
+
+    private let watermarkKey = "pipelineWorker.watermarkId"
+
+    /// 存量水位线：小于等于此 id 的内容不处理
+    private(set) var watermark: Int64 = 0
+
+    /// 初始化水位线：已存则读，否则取当前最大 id 并持久化
+    private func initWatermark() {
+        let saved = UserDefaults.standard.integer(forKey: watermarkKey)
+        if saved > 0 {
+            watermark = Int64(saved)
+            return
+        }
+        let maxId = db.scalarInt("SELECT COALESCE(MAX(id),0) FROM content;") ?? 0
+        watermark = Int64(maxId)
+        UserDefaults.standard.set(maxId, forKey: watermarkKey)
+    }
+
+    private init() {
+        initWatermark()
+    }
 
     // MARK: Timer 生命周期
 
@@ -119,13 +142,15 @@ final class PipelineWorker: ObservableObject {
         var stmt: OpaquePointer?
         var out: [PendingTask] = []
         // 媒体项(podcast/video)不看 fetch_status——音频在 enclosure 里, 无正文可抓, fetch_status 恒为 0;
-        // 文章类要求 fetch_status IN (2成功, 4直入) 才有正文可打分/翻译
+        // 文章类要求 fetch_status IN (2成功, 4直入) 才有正文可打分/翻译。
+        // 只扫水位线之后的新内容(id > watermark), 存量不动。
         let sql = """
         SELECT id, source, ctype, title, url, language, content_md, excerpt,
                llm_score, llm_summary, llm_translated_md, meta
         FROM content
-        WHERE (ctype IN ('podcast','video') OR meta LIKE '%audio_url%')
-           OR fetch_status IN (2, 4)
+        WHERE id > \(watermark)
+          AND ((ctype IN ('podcast','video') OR meta LIKE '%audio_url%')
+               OR fetch_status IN (2, 4))
         ORDER BY published_at DESC
         LIMIT 2000;
         """
