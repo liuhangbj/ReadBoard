@@ -218,6 +218,14 @@ struct ReadingView: View {
                             }
                             .disabled(busy)
                         }
+                        if item.llmSummary == nil {
+                            Button {
+                                runSummarize()
+                            } label: {
+                                Label("摘要", systemImage: "text.quote")
+                            }
+                            .disabled(busy)
+                        }
                         if !isMediaItem, item.llmTranslatedMd == nil {
                             Button {
                                 runTranslate()
@@ -322,13 +330,27 @@ struct ReadingView: View {
         }
     }
 
+    private func runSummarize() {
+        let cid = item.id
+        busy = true
+        statusMsg = "摘要中…"
+        Task {
+            let ok = await pipeline.summarize(contentId: cid, title: item.title, body: contentBody)
+            await MainActor.run {
+                busy = false
+                statusMsg = ok ? "✅ 摘要完成" : "❌ 摘要失败"
+                if ok { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
+            }
+        }
+    }
+
     private func runTranscribe() {
         let cid = item.id
         busy = true
         statusMsg = "转录中（下载+识别，较长）…"
         Task {
             let ok = await transcriber.transcribe(
-                contentId: cid, audioUrl: item.audioUrl, pageUrl: item.url, language: item.language)
+                contentId: cid, title: item.title, audioUrl: item.audioUrl, pageUrl: item.url, language: item.language)
             await MainActor.run {
                 busy = false
                 statusMsg = ok ? "✅ 转录完成" : "❌ 转录失败"

@@ -32,7 +32,7 @@ final class TranscribePipeline: @unchecked Sendable {
     /// 转录单条内容（播客/视频）。audioUrl 为音频流或视频页地址。
     /// 结果写入 llm_translated_md（中文），并同步生成摘要。返回是否成功。
     @discardableResult
-    func transcribe(contentId: Int64, audioUrl: String?, pageUrl: String, language: String?) async -> Bool {
+    func transcribe(contentId: Int64, title: String = "", audioUrl: String?, pageUrl: String, language: String?) async -> Bool {
         let target = audioUrl ?? pageUrl
         guard !target.isEmpty else { await markJob(contentId: contentId, ok: false, err: "无地址"); return false }
 
@@ -63,6 +63,11 @@ final class TranscribePipeline: @unchecked Sendable {
             let ok = db.execute(
                 "UPDATE content SET llm_translated_md = ?, llm_processed_at = datetime('now') WHERE id = ?",
                 params: [text, contentId])
+            // 6. 转录稿自动补一段摘要（媒体内容没有正文，评分/摘要以转录稿为准）
+            if ok, llm.isAvailable,
+               let sum = await llm.summarizeRaw(title: title, body: text) {
+                db.execute("UPDATE content SET llm_summary = ? WHERE id = ?", params: [sum, contentId])
+            }
             await markJob(contentId: contentId, ok: ok, err: ok ? nil : "写库失败")
             return ok
         } catch {

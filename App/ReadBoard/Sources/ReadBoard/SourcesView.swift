@@ -88,6 +88,7 @@ struct SourceRow: View {
                 HStack(spacing: 14) {
                     pipelineToggle("打分", key: "auto_score", on: src.policy.autoScore)
                     pipelineToggle("翻译", key: "auto_translate", on: src.policy.autoTranslate)
+                    pipelineToggle("摘要", key: "auto_summarize", on: src.policy.autoSummarize)
                     if src.transcribable {
                         pipelineToggle("转录", key: "auto_transcribe", on: src.policy.autoTranscribe)
                     }

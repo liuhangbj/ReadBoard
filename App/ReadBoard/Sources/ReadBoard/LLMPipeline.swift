@@ -135,6 +135,44 @@ final class LLMPipeline: @unchecked Sendable {
 
     // MARK: 翻译（收编 Follo 全文翻译能力）
 
+    /// 生成单篇摘要，写入 llm_summary。返回是否成功。
+    /// 摘要管线独立于评分——不评分也能只出摘要。
+    @discardableResult
+    func summarize(contentId: Int64, title: String, body: String) async -> Bool {
+        guard isAvailable else { return false }
+        guard let text = await summarizeRaw(title: title, body: body) else { return false }
+        return db.execute(
+            "UPDATE content SET llm_summary = ?, llm_processed_at = datetime('now') WHERE id = ?",
+            params: [text, contentId])
+    }
+
+    /// 生成摘要文本（不写库），供转录等管线复用。
+    func summarizeRaw(title: String, body: String) async -> String? {
+        guard isAvailable else { return nil }
+        let truncated = body.count > 12000 ? String(body.prefix(12000)) : body
+        let prompt = """
+        你是一位专注能源、矿业、宏观经济的独立研究者，同时对影视音乐、人文历史、科学科技有广泛兴趣。
+        请为以下内容写一段中文摘要，要求：
+        - 150 字以内
+        - 提炼核心观点和关键数据，不要复述背景
+        - 直接输出摘要正文，不要"本文讲述了"这类开头
+
+        标题：\(title)
+
+        内容：
+        \(truncated)
+        """
+        do {
+            let (out, _) = try await client.chat(
+                messages: [ChatMessage(role: "user", content: prompt)],
+                temperature: 0.3, maxTokens: 512)
+            let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        } catch {
+            return nil
+        }
+    }
+
     /// 把任意文本翻译成目标语言，返回译文（不写库）。供转录管线复用。
     func translateRaw(_ text: String, targetLang: String = "中文") async -> String? {
         guard isAvailable else { return nil }

@@ -8,16 +8,19 @@ struct PipelinePolicy: Hashable {
     var autoScore = false
     var autoTranslate = false
     var autoTranscribe = false
+    var autoSummarize = false
 
     static func from(configJson: String) -> PipelinePolicy {
         guard let data = configJson.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return PipelinePolicy()
         }
+        func flag(_ k: String) -> Bool { (obj[k] as? Bool) ?? ((obj[k] as? Int) == 1) }
         return PipelinePolicy(
-            autoScore: (obj["auto_score"] as? Bool) ?? ((obj["auto_score"] as? Int) == 1),
-            autoTranslate: (obj["auto_translate"] as? Bool) ?? ((obj["auto_translate"] as? Int) == 1),
-            autoTranscribe: (obj["auto_transcribe"] as? Bool) ?? ((obj["auto_transcribe"] as? Int) == 1)
+            autoScore: flag("auto_score"),
+            autoTranslate: flag("auto_translate"),
+            autoTranscribe: flag("auto_transcribe"),
+            autoSummarize: flag("auto_summarize")
         )
     }
 }
