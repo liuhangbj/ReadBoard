@@ -1,0 +1,156 @@
+import Foundation
+import SQLite3
+
+// MARK: - 数据模型
+
+struct ContentItem: Identifiable, Hashable {
+    let id: Int64
+    let ctype: String
+    let source: String
+    let title: String
+    let author: String?
+    let url: String
+    let language: String?
+    let publishedAt: String?
+    let excerpt: String?
+    let contentMd: String?
+    let llmScore: Int?
+    let llmSummary: String?
+    let llmTranslatedMd: String?
+    let fetchStatus: Int
+    let feedId: Int64?
+}
+
+struct SourceGroup: Identifiable, Hashable {
+    var id: String { name }
+    let name: String      // source 或 feed 显示名
+    let kind: String      // rss / podcast / youtube / wechat
+    let count: Int
+}
+
+// MARK: - SQLite 只读访问
+
+final class Database: @unchecked Sendable {
+    static let shared = Database()
+    private var db: OpaquePointer?
+
+    // 默认指向迁移好的库；可用环境变量覆盖便于测试
+    private let dbPath: String = {
+        if let p = ProcessInfo.processInfo.environment["READBOARD_DB"] { return p }
+        return NSHomeDirectory() + "/readboard/Data/readboard.db"
+    }()
+
+    private init() {}
+
+    @discardableResult
+    func open() -> Bool {
+        if db != nil { return true }
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        if sqlite3_open_v2(dbPath, &db, flags, nil) == SQLITE_OK {
+            return true
+        }
+        sqlite3_close(db)
+        db = nil
+        return false
+    }
+
+    func close() {
+        sqlite3_close(db)
+        db = nil
+    }
+
+    // MARK: 查询
+
+    /// 各 source 分组及数量（用于左侧源列表）
+    func fetchSourceGroups() -> [SourceGroup] {
+        guard open() else { return [] }
+        let sql = """
+        SELECT source, ctype, COUNT(*) FROM content
+        GROUP BY source, ctype
+        ORDER BY COUNT(*) DESC;
+        """
+        var stmt: OpaquePointer?
+        var groups: [SourceGroup] = []
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let source = String(cString: sqlite3_column_text(stmt, 0))
+                let ctype = String(cString: sqlite3_column_text(stmt, 1))
+                let count = Int(sqlite3_column_int64(stmt, 2))
+                groups.append(SourceGroup(name: "\(source)·\(ctype)", kind: source, count: count))
+            }
+        }
+        sqlite3_finalize(stmt)
+        return groups
+    }
+
+    /// 拉取内容列表（可按 source 过滤、按评分/时间排序）
+    func fetchContents(source: String? = nil, minScore: Int? = nil, limit: Int = 200) -> [ContentItem] {
+        guard open() else { return [] }
+        var sql = """
+        SELECT id, ctype, source, title, author, url, language, published_at,
+               excerpt, content_md, llm_score, llm_summary, llm_translated_md, fetch_status, feed_id
+        FROM content
+        """
+        var conds: [String] = []
+        if source != nil { conds.append("source = ?") }
+        if minScore != nil { conds.append("llm_score >= ?") }
+        if !conds.isEmpty { sql += " WHERE " + conds.joined(separator: " AND ") }
+        // 有评分的优先，再按发布时间倒序
+        sql += " ORDER BY (llm_score IS NULL), llm_score DESC, published_at DESC LIMIT ?;"
+
+        var stmt: OpaquePointer?
+        var items: [ContentItem] = []
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            var idx: Int32 = 1
+            if let s = source { sqlite3_bind_text(stmt, idx, s, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)); idx += 1 }
+            if let m = minScore { sqlite3_bind_int64(stmt, idx, Int64(m)); idx += 1 }
+            sqlite3_bind_int64(stmt, idx, Int64(limit))
+
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                items.append(Self.rowToItem(stmt))
+            }
+        }
+        sqlite3_finalize(stmt)
+        return items
+    }
+
+    func totalCount() -> Int {
+        guard open() else { return 0 }
+        var stmt: OpaquePointer?
+        var n = 0
+        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM content;", -1, &stmt, nil) == SQLITE_OK {
+            if sqlite3_step(stmt) == SQLITE_ROW { n = Int(sqlite3_column_int64(stmt, 0)) }
+        }
+        sqlite3_finalize(stmt)
+        return n
+    }
+
+    // MARK: 辅助
+
+    private static func rowToItem(_ stmt: OpaquePointer?) -> ContentItem {
+        func text(_ i: Int32) -> String? {
+            guard let p = sqlite3_column_text(stmt, i) else { return nil }
+            return String(cString: p)
+        }
+        func int64(_ i: Int32) -> Int64? {
+            sqlite3_column_type(stmt, i) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, i)
+        }
+        return ContentItem(
+            id: sqlite3_column_int64(stmt, 0),
+            ctype: text(1) ?? "article",
+            source: text(2) ?? "rss",
+            title: text(3) ?? "(无标题)",
+            author: text(4),
+            url: text(5) ?? "",
+            language: text(6),
+            publishedAt: text(7),
+            excerpt: text(8),
+            contentMd: text(9),
+            llmScore: int64(10).map { Int($0) },
+            llmSummary: text(11),
+            llmTranslatedMd: text(12),
+            fetchStatus: int64(13).map { Int($0) } ?? 0,
+            feedId: int64(14)
+        )
+    }
+}
