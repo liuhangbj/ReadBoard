@@ -84,7 +84,7 @@ struct ContentView: View {
                 TextField("搜索标题 / 正文", text: $vm.keyword)
                     .textFieldStyle(.plain)
                     .font(.callout)
-                    .onChange(of: vm.keyword) { _, _ in vm.reload() }
+                    .onChange(of: vm.keyword) { _, _ in vm.reloadDebounced() }
                 if !vm.keyword.isEmpty {
                     Button { vm.keyword = "" } label: {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)

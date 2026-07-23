@@ -84,29 +84,32 @@ final class PipelineWorker: ObservableObject {
 
         // 第 0 步: 全文回填——水位线后抓取失败(fetch_status=0/3)的文章按源 fetch_mode 重试,
         // 成功(fetch_status→2/4)后下一轮就能进管线。每轮限 10 条防抖。
-        refetched = await backfillFullText()
+        // fulltext 板块关则跳过回填。
+        if FeatureBoard.fulltext.enabled {
+            refetched = await backfillFullText()
+        }
 
         for t in tasks.prefix(batchLimit) {
-            // 打分
-            if t.needScore {
+            // 打分（AI 板块总开关 && 打分子开关 && 源级开关，源级已在收集时判过）
+            if t.needScore, AIPipeline.score.effective {
                 if await llm.score(contentId: t.id, title: t.title, body: t.body) {
                     scored += 1; markJob(contentId: t.id, jtype: "score", ok: true)
                 } else { markJob(contentId: t.id, jtype: "score", ok: false) }
             }
             // 翻译（仅文章；媒体走转录）
-            if t.needTranslate {
+            if t.needTranslate, AIPipeline.translate.effective {
                 if await llm.translate(contentId: t.id, title: t.title, body: t.body) {
                     translated += 1; markJob(contentId: t.id, jtype: "translate", ok: true)
                 } else { markJob(contentId: t.id, jtype: "translate", ok: false) }
             }
             // 摘要（独立管线；若打分已带摘要则跳过）
-            if t.needSummary {
+            if t.needSummary, AIPipeline.summarize.effective {
                 if await llm.summarize(contentId: t.id, title: t.title, body: t.body) {
                     summarized += 1; markJob(contentId: t.id, jtype: "summarize", ok: true)
                 } else { markJob(contentId: t.id, jtype: "summarize", ok: false) }
             }
             // 转录（媒体）
-            if t.needTranscribe {
+            if t.needTranscribe, AIPipeline.transcribe.effective {
                 let ok = await transcriber.transcribe(
                     contentId: t.id, title: t.title, audioUrl: t.audioUrl, pageUrl: t.url, language: t.language)
                 if ok { transcribed += 1 }  // transcribe 内部已记 job

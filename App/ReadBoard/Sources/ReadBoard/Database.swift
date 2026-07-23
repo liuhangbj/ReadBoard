@@ -51,6 +51,15 @@ struct ContentItem: Identifiable, Hashable {
                     llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
                     audioUrl: audioUrl, readAt: readAt, starred: starred, archived: !archived)
     }
+
+    /// 填充正文的副本（点开阅读时 fetchContentBody 补大字段）
+    func withBody(contentMd: String?, llmTranslatedMd: String?, audioUrl: String?) -> ContentItem {
+        ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
+                    url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
+                    contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
+                    llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
+                    audioUrl: audioUrl, readAt: readAt, starred: starred, archived: archived)
+    }
 }
 
 struct SourceGroup: Identifiable, Hashable {
@@ -64,7 +73,10 @@ struct SourceGroup: Identifiable, Hashable {
 
 final class Database: @unchecked Sendable {
     static let shared = Database()
+    /// 读连接：供 UI 查询（fetchContents/fetchSourceGroups/queryRows 等）
     private var db: OpaquePointer?
+    /// 写连接：供写入（execute/upsertContent/markJob 等）。WAL 下读写并发互不阻塞
+    private var wdb: OpaquePointer?
 
     // 默认指向迁移好的库；可用环境变量覆盖便于测试
     private let dbPath: String = {
@@ -74,35 +86,161 @@ final class Database: @unchecked Sendable {
 
     private init() {}
 
+    /// 配置一条连接的 pragma（WAL/同步级别/忙等）
+    private func configure(_ handle: OpaquePointer?) {
+        var stmt: OpaquePointer?
+        for sql in ["PRAGMA journal_mode=WAL;", "PRAGMA synchronous=NORMAL;", "PRAGMA busy_timeout=5000;"] {
+            if sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+            stmt = nil
+        }
+    }
+
     @discardableResult
     func open() -> Bool {
-        if db != nil { return true }
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        if sqlite3_open_v2(dbPath, &db, flags, nil) == SQLITE_OK {
-            return true
+        // 读连接
+        if db == nil {
+            if sqlite3_open_v2(dbPath, &db, flags, nil) != SQLITE_OK {
+                sqlite3_close(db); db = nil
+            } else {
+                configure(db)
+                runMigrations()
+            }
         }
-        sqlite3_close(db)
-        db = nil
-        return false
+        // 写连接
+        if wdb == nil {
+            if sqlite3_open_v2(dbPath, &wdb, flags, nil) != SQLITE_OK {
+                sqlite3_close(wdb); wdb = nil
+            } else {
+                configure(wdb)
+            }
+        }
+        return db != nil && wdb != nil
+    }
+
+    // MARK: 迁移机制（PRAGMA user_version 版本化执行 Data/migrations/*.sql）
+    // 每次启动检查版本，按文件名顺序补跑未执行的迁移。WAL/FTS/索引/export 表都走这里挂载。
+
+    private func runMigrations() {
+        guard let handle = db else { return }
+        let current = intVal(handle, "PRAGMA user_version;") ?? 0
+        let migDir = NSHomeDirectory() + "/readboard/Data/migrations"
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: migDir)
+            .filter({ $0.hasSuffix(".sql") }).sorted() else { return }
+        var version = current
+        for file in files {
+            // 文件名形如 009_export.sql → 版本号 9
+            let numStr = file.split(separator: "_").first.map(String.init) ?? "0"
+            guard let num = Int(numStr), num > current else { continue }
+            guard let sql = try? String(contentsOfFile: "\(migDir)/\(file)", encoding: .utf8) else { continue }
+            for statement in Self.splitSQLStatements(sql) {
+                execRaw(handle, statement)
+            }
+            version = max(version, num)
+        }
+        if version != current {
+            execRaw(handle, "PRAGMA user_version = \(version);")
+        }
+    }
+
+    @discardableResult
+    private func execRaw(_ handle: OpaquePointer?, _ sql: String) -> Bool {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        let rc = sqlite3_step(stmt)   // 只 step 一次（DDL→DONE；INSERT rebuild→DONE；查询类→ROW 也只取首步）
+        sqlite3_finalize(stmt)
+        return rc == SQLITE_DONE || rc == SQLITE_ROW
+    }
+
+    private func intVal(_ handle: OpaquePointer?, _ sql: String) -> Int? {
+        var stmt: OpaquePointer?
+        var r: Int?
+        if sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK {
+            if sqlite3_step(stmt) == SQLITE_ROW { r = Int(sqlite3_column_int64(stmt, 0)) }
+        }
+        sqlite3_finalize(stmt)
+        return r
+    }
+
+    /// 把迁移 .sql 按语句边界切分。普通语句以 ; 结尾；
+    /// CREATE TRIGGER ... BEGIN ... END 是块，块内 ; 不是结束，整块到 END; 才算一条。
+    static func splitSQLStatements(_ sql: String) -> [String] {
+        var statements: [String] = []
+        var current = ""
+        var inTrigger = false
+        // 去掉 -- 行注释，避免注释里的 ; 干扰
+        let lines = sql.components(separatedBy: "\n").map { line -> String in
+            if let range = line.range(of: "--") { return String(line[..<range.lowerBound]) }
+            return line
+        }
+        let cleaned = lines.joined(separator: "\n")
+        for rawLine in cleaned.components(separatedBy: "\n") {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            let upper = trimmed.uppercased()
+            if upper.hasPrefix("CREATE TRIGGER") || upper.hasPrefix("CREATE TEMP TRIGGER") {
+                inTrigger = true
+            }
+            current += rawLine + "\n"
+            if inTrigger {
+                // 触发器块以 END; 收尾
+                if upper.hasPrefix("END") && trimmed.hasSuffix(";") {
+                    let s = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !s.isEmpty { statements.append(s) }
+                    current = ""
+                    inTrigger = false
+                }
+            } else if trimmed.hasSuffix(";") {
+                let s = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !s.isEmpty { statements.append(s) }
+                current = ""
+            }
+        }
+        let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty { statements.append(tail) }
+        // 去掉结尾分号（execRaw 单条 prepare 不需要）
+        return statements.map { $0.hasSuffix(";") ? String($0.dropLast()) : $0 }
     }
 
     func close() {
-        sqlite3_close(db)
-        db = nil
+        sqlite3_close(db); db = nil
+        sqlite3_close(wdb); wdb = nil
+    }
+
+    // MARK: 事务（写连接）
+
+    /// 把多条写操作包进一个事务（BEGIN IMMEDIATE），任一步失败回滚
+    func transaction(_ block: () -> Bool) -> Bool {
+        guard open() else { return false }
+        execRaw(wdb, "BEGIN IMMEDIATE;")
+        if block() {
+            execRaw(wdb, "COMMIT;")
+            return true
+        } else {
+            execRaw(wdb, "ROLLBACK;")
+            return false
+        }
     }
 
     // MARK: 写操作
 
-    /// 执行无返回值的写 SQL（带参数绑定）
+    /// 执行无返回值的写 SQL（带参数绑定，走写连接）
     @discardableResult
     func execute(_ sql: String, params: [Any?] = []) -> Bool {
         guard open() else { return false }
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        guard sqlite3_prepare_v2(wdb, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
         bindParams(stmt, params)
         let ok = sqlite3_step(stmt) == SQLITE_DONE
         sqlite3_finalize(stmt)
         return ok
+    }
+
+    /// 写连接上的 changes()（紧跟 execute 调用，返回刚影响的行数）
+    func writeChanges() -> Int {
+        intVal(wdb, "SELECT changes();") ?? 0
     }
 
     /// 查询单个 Int 值
@@ -153,9 +291,9 @@ final class Database: @unchecked Sendable {
         return out
     }
 
-    /// 最后插入行的 rowid
+    /// 最后插入行的 rowid（写连接）
     func lastInsertId() -> Int64 {
-        sqlite3_last_insert_rowid(db)
+        sqlite3_last_insert_rowid(wdb)
     }
 
     /// 暴露 prepare 供 SourceStore 等做只读遍历
@@ -204,28 +342,40 @@ final class Database: @unchecked Sendable {
         return groups
     }
 
-    /// 拉取内容列表（可按 source 过滤、评分筛选、未读过滤、关键词搜索、星标/归档筛选）
+    /// 拉取内容列表（轻列，不取正文 content_md/llm_translated_md/meta —— 正文点开再按 id 查）
+    /// 可按 source 过滤、评分筛选、未读过滤、关键词搜索(FTS5)、星标/归档筛选
     func fetchContents(source: String? = nil, minScore: Int? = nil, unreadOnly: Bool = false,
                        keyword: String? = nil, starredOnly: Bool = false,
                        archived: Bool = false, limit: Int = 200) -> [ContentItem] {
         guard open() else { return [] }
-        var sql = """
-        SELECT id, ctype, source, title, author, url, language, published_at,
-               excerpt, content_md, llm_score, llm_summary, llm_translated_md, fetch_status, feed_id, meta, read_at,
-               starred, is_archived
-        FROM content
-        """
-        var conds: [String] = ["is_archived = \(archived ? 1 : 0)"]
-        if source != nil { conds.append("source = ?") }
-        if minScore != nil { conds.append("llm_score >= ?") }
-        if unreadOnly { conds.append("read_at IS NULL") }
-        if starredOnly { conds.append("starred = 1") }
-        if let kw = keyword, !kw.isEmpty {
-            conds.append("(title LIKE ? OR excerpt LIKE ? OR content_md LIKE ?)")
+        let useFTS = (keyword?.isEmpty == false) && ftsAvailable()
+        // 轻列：列表渲染够用，不扛正文。列序固定见 rowToListItem
+        var sql: String
+        if useFTS {
+            sql = """
+            SELECT c.id, c.ctype, c.source, c.title, c.author, c.url, c.language, c.published_at,
+                   c.excerpt, c.llm_score, c.llm_summary, c.fetch_status, c.read_at, c.starred, c.is_archived
+            FROM content c JOIN content_fts f ON f.rowid = c.id
+            """
+        } else {
+            sql = """
+            SELECT id, ctype, source, title, author, url, language, published_at,
+                   excerpt, llm_score, llm_summary, fetch_status, read_at, starred, is_archived
+            FROM content
+            """
+        }
+        var conds: [String] = [useFTS ? "c.is_archived = \(archived ? 1 : 0)" : "is_archived = \(archived ? 1 : 0)"]
+        let col = useFTS ? "c." : ""
+        if source != nil { conds.append("\(col)source = ?") }
+        if minScore != nil { conds.append("\(col)llm_score >= ?") }
+        if unreadOnly { conds.append("\(col)read_at IS NULL") }
+        if starredOnly { conds.append("\(col)starred = 1") }
+        if useFTS { conds.append("content_fts MATCH ?") }
+        else if let kw = keyword, !kw.isEmpty {
+            conds.append("(\(col)title LIKE ? OR \(col)excerpt LIKE ?)")
         }
         sql += " WHERE " + conds.joined(separator: " AND ")
-        // 有评分的优先，再按发布时间倒序
-        sql += " ORDER BY (llm_score IS NULL), llm_score DESC, published_at DESC LIMIT ?;"
+        sql += " ORDER BY (\(col)llm_score IS NULL), \(col)llm_score DESC, \(col)published_at DESC LIMIT ?;"
 
         var stmt: OpaquePointer?
         var items: [ContentItem] = []
@@ -236,18 +386,59 @@ final class Database: @unchecked Sendable {
             }
             if let s = source { binder(s) }
             if let m = minScore { sqlite3_bind_int64(stmt, idx, Int64(m)); idx += 1 }
-            if let kw = keyword, !kw.isEmpty {
-                let like = "%\(kw)%"
-                binder(like); binder(like); binder(like)
+            if useFTS {
+                binder(ftsQuery(keyword!))
+            } else if let kw = keyword, !kw.isEmpty {
+                let like = "%\(kw)%"; binder(like); binder(like)
             }
             sqlite3_bind_int64(stmt, idx, Int64(limit))
 
             while sqlite3_step(stmt) == SQLITE_ROW {
-                items.append(Self.rowToItem(stmt))
+                items.append(Self.rowToListItem(stmt))
             }
         }
         sqlite3_finalize(stmt)
         return items
+    }
+
+    /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl)
+    func fetchContentBody(id: Int64) -> (contentMd: String?, llmTranslatedMd: String?, audioUrl: String?)? {
+        guard open() else { return nil }
+        var stmt: OpaquePointer?
+        var result: (String?, String?, String?)?
+        if sqlite3_prepare_v2(db, "SELECT content_md, llm_translated_md, meta FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_int64(stmt, 1, id)
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                func text(_ i: Int32) -> String? {
+                    guard let p = sqlite3_column_text(stmt, i) else { return nil }
+                    return String(cString: p)
+                }
+                var audioUrl: String? = nil
+                if let metaStr = text(2), let data = metaStr.data(using: .utf8),
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    audioUrl = (obj["audio_url"] as? String) ?? (obj["video_url"] as? String)
+                }
+                result = (text(0), text(1), audioUrl)
+            }
+        }
+        sqlite3_finalize(stmt)
+        return result
+    }
+
+    // MARK: FTS5 搜索
+
+    /// FTS 表是否已建（迁移 010 建）。未建则退回 LIKE 标题/摘要。
+    private func ftsAvailable() -> Bool {
+        intVal(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='content_fts';") == 1
+    }
+
+    /// 把用户关键词转成 FTS5 MATCH 查询（多词 AND，加前缀匹配）
+    private func ftsQuery(_ kw: String) -> String {
+        let terms = kw.split(whereSeparator: { $0 == " " || $0 == "　" })
+            .map { $0.trimmingCharacters(in: .punctuationCharacters) }
+            .filter { !$0.isEmpty }
+        guard !terms.isEmpty else { return "\"\"" }
+        return terms.map { "\"\($0)\"*" }.joined(separator: " AND ")
     }
 
     /// 标记已读（写入当前时间）
@@ -312,19 +503,15 @@ final class Database: @unchecked Sendable {
 
     // MARK: 辅助
 
-    private static func rowToItem(_ stmt: OpaquePointer?) -> ContentItem {
+    /// 轻列列表行 → ContentItem（正文/audioUrl 留空，点开时 fetchContentBody 补）
+    /// 列序：id,ctype,source,title,author,url,language,published_at,excerpt,llm_score,llm_summary,fetch_status,read_at,starred,is_archived
+    private static func rowToListItem(_ stmt: OpaquePointer?) -> ContentItem {
         func text(_ i: Int32) -> String? {
             guard let p = sqlite3_column_text(stmt, i) else { return nil }
             return String(cString: p)
         }
         func int64(_ i: Int32) -> Int64? {
             sqlite3_column_type(stmt, i) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, i)
-        }
-        // meta 是第 15 列（索引 15），解析 audio_url / video_id
-        var audioUrl: String? = nil
-        if let metaStr = text(15), let data = metaStr.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            audioUrl = (obj["audio_url"] as? String) ?? (obj["video_url"] as? String)
         }
         return ContentItem(
             id: sqlite3_column_int64(stmt, 0),
@@ -336,16 +523,16 @@ final class Database: @unchecked Sendable {
             language: text(6),
             publishedAt: text(7),
             excerpt: text(8),
-            contentMd: text(9),
-            llmScore: int64(10).map { Int($0) },
-            llmSummary: text(11),
-            llmTranslatedMd: text(12),
-            fetchStatus: int64(13).map { Int($0) } ?? 0,
-            feedId: int64(14),
-            audioUrl: audioUrl,
-            readAt: text(16),
-            starred: sqlite3_column_int(stmt, 17) == 1,
-            archived: sqlite3_column_int(stmt, 18) == 1
+            contentMd: nil,                 // 正文点开再查
+            llmScore: int64(9).map { Int($0) },
+            llmSummary: text(10),
+            llmTranslatedMd: nil,           // 译文点开再查
+            fetchStatus: int64(11).map { Int($0) } ?? 0,
+            feedId: nil,
+            audioUrl: nil,                  // 媒体地址点开再查
+            readAt: text(12),
+            starred: sqlite3_column_int(stmt, 13) == 1,
+            archived: sqlite3_column_int(stmt, 14) == 1
         )
     }
 }

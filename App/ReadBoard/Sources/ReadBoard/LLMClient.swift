@@ -82,17 +82,30 @@ struct ChatMessage {
 }
 
 final class LLMClient {
-    private let providers: [LLMProvider]
 
-    init(providers: [LLMProvider] = LLMConfig.defaultProviders()) {
-        self.providers = providers.filter { !$0.apiKey.isEmpty }
+    /// 每次调用都读当前配置（设置页改后立即生效，无需重启）。
+    /// App 内保存的配置排最前，其后是 .env 探测的 fallback 链。
+    private func activeProviders() -> [LLMProvider] {
+        var list: [LLMProvider] = []
+        let s = LLMSettings.current()
+        if s.isValid {
+            list.append(LLMProvider(name: "app", endpoint: s.baseURL, apiKey: s.apiKey, model: s.model))
+        }
+        // fallback：.env 链（去重——若和 App 配置同 endpoint+model 就不重复）
+        for p in LLMConfig.defaultProviders() where !p.apiKey.isEmpty {
+            if !list.contains(where: { $0.endpoint == p.endpoint && $0.model == p.model }) {
+                list.append(p)
+            }
+        }
+        return list
     }
 
-    var isAvailable: Bool { !providers.isEmpty }
+    var isAvailable: Bool { !activeProviders().isEmpty }
 
     /// 按 fallback 链调用，返回首个非空结果
     func chat(messages: [ChatMessage], temperature: Double = 0.3, maxTokens: Int = 4096) async throws -> (content: String, model: String) {
-        guard isAvailable else { throw LLMError.noProvider }
+        let providers = activeProviders()
+        guard !providers.isEmpty else { throw LLMError.noProvider }
         var lastError: Error = LLMError.emptyResponse
         for p in providers {
             do {
@@ -106,6 +119,20 @@ final class LLMClient {
             }
         }
         throw lastError
+    }
+
+    /// 测试连接：发一条最小请求验证 key/endpoint/model 可用，返回 (成功与否, 信息)
+    func testConnection() async -> (Bool, String) {
+        let s = LLMSettings.current()
+        guard s.isValid else { return (false, "配置不完整：baseURL / apiKey / model 都要填") }
+        do {
+            let (text, model) = try await chat(
+                messages: [ChatMessage(role: "user", content: "回复\"ok\"两个字即可")],
+                temperature: 0, maxTokens: 10)
+            return (true, "连接成功（\(model)）：\(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(30))")
+        } catch {
+            return (false, error.localizedDescription)
+        }
     }
 
     private func call(_ p: LLMProvider, messages: [ChatMessage], temperature: Double, maxTokens: Int) async throws -> String {

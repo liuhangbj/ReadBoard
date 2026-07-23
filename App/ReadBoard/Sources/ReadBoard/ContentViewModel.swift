@@ -16,6 +16,18 @@ final class ContentViewModel: ObservableObject {
     @Published var showTranslated: Bool = false    // 阅读区显示原文/翻译
 
     private let db = Database.shared
+    /// 搜索防抖：连续输入时取消上一次未执行的 reload
+    private var searchTask: Task<Void, Never>?
+
+    /// 搜索框输入时调用——300ms 防抖，避免每敲一字就全库查一次
+    func reloadDebounced() {
+        searchTask?.cancel()
+        searchTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            self?.reload()
+        }
+    }
 
     init() {
         // 评分/翻译完成后刷新列表与当前选中项
@@ -55,7 +67,7 @@ final class ContentViewModel: ObservableObject {
         reload()
     }
 
-    /// 打开文章：选中并标已读
+    /// 打开文章：选中并标已读，异步加载正文（列表是轻列，正文点开才查）
     func open(_ item: ContentItem) {
         selectedItem = item
         if !item.isRead {
@@ -65,6 +77,22 @@ final class ContentViewModel: ObservableObject {
                 items[idx] = items[idx].markingRead()
             }
             selectedItem = items.first { $0.id == item.id }
+        }
+        loadBodyIfNeeded(for: item.id)
+    }
+
+    /// 正文/译文/媒体地址按需加载：列表查询不取这些大字段，点开才查并填回 selectedItem
+    private func loadBodyIfNeeded(for id: Int64) {
+        // 已有正文则不重复查
+        if selectedItem?.id == id, selectedItem?.contentMd != nil || selectedItem?.audioUrl != nil { return }
+        let currentId = id
+        Task.detached(priority: .userInitiated) { [db] in
+            guard let body = db.fetchContentBody(id: currentId) else { return }
+            await MainActor.run { [weak self] in
+                guard let self, self.selectedItem?.id == currentId else { return }
+                self.selectedItem = self.selectedItem?.withBody(
+                    contentMd: body.contentMd, llmTranslatedMd: body.llmTranslatedMd, audioUrl: body.audioUrl)
+            }
         }
     }
 
