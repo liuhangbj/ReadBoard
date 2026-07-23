@@ -383,7 +383,13 @@ final class SourceStore: ObservableObject {
             """,
             params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url, published, entry.html, metaJson, hash, isDup, dupOf.map { Int($0) }]
         )
-        return ok ? db.lastInsertId() : nil
+        let newId = ok ? db.lastInsertId() : nil
+        // 新内容应用过滤规则（归档/标已读/加星/打标签）
+        if let cid = newId {
+            FilterService.shared.applyRules(contentId: cid, sourceId: sourceId,
+                title: entry.title, content: entry.html, author: entry.author ?? "", url: entry.url)
+        }
+        return newId
     }
 
     // MARK: 内容去重辅助

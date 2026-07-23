@@ -9,6 +9,8 @@ struct ReadBoardApp: App {
         SourceStore.shared.startAutoSync()
         // 启动 DB 自动备份（每日热备到 Data/backups/，保留最近5份）
         BackupService.shared.start()
+        // 启动数据保留策略（已读超期归档/归档超期删除，每日）
+        RetentionService.shared.start()
     }
 
     var body: some Scene {
