@@ -11,10 +11,9 @@ final class RetentionService: ObservableObject {
     @Published var lastRunSummary = ""
 
     private let db = Database.shared
-    /// 已读内容超过该天数自动归档（默认 30 天）
-    var archiveAfterDays = 30
-    /// 归档内容超过该天数自动删除（默认 90 天；0 = 不删除）
-    var deleteAfterDays = 90
+    /// 天数统一由 CacheCleanupService 持有（UserDefaults 持久化，设置页可调），这里只做只读透传
+    private var archiveAfterDays: Int { CacheCleanupService.shared.archiveAfterDays }
+    private var deleteAfterDays: Int { CacheCleanupService.shared.deleteAfterDays }
     private var timer: Timer?
 
     private init() {}

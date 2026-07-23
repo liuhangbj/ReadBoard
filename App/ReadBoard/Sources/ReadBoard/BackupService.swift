@@ -14,8 +14,8 @@ final class BackupService: ObservableObject {
 
     private let dbPath = NSHomeDirectory() + "/readboard/Data/readboard.db"
     private let backupDir = NSHomeDirectory() + "/readboard/Data/backups"
-    /// 保留最近份数
-    var keepCount = 5
+    /// 保留份数统一由 CacheCleanupService 持有（UserDefaults 持久化，设置页可调），这里只读透传
+    private var keepCount: Int { CacheCleanupService.shared.backupKeepCount }
     /// 备份间隔（每日）
     private let interval: TimeInterval = 24 * 3600
     private var timer: Timer?

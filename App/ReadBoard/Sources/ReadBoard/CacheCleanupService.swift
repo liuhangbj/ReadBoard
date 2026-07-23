@@ -1,0 +1,233 @@
+import Foundation
+import SQLite3
+
+// MARK: - 缓存清理统一服务
+// 缓存散落各处：转录临时目录、超期备份、retention 天数、抓完丢弃的全文 HTML、DB 膨胀。
+// 统一一个服务：各项可配置（UserDefaults 持久化）+ 统计占用 + 一键清理。
+// 安全红线：星标/有标签的内容 retention 不动（沿用 RetentionService 的保护）；HTML 清理只清已转 md 的；
+// 备份滚动只删超额的旧文件；临时目录只删 readboard- 前缀自己建的。
+
+@MainActor
+final class CacheCleanupService: ObservableObject {
+    static let shared = CacheCleanupService()
+
+    // 各项磁盘占用（字节）+ 条目数，供设置页展示
+    @Published var tempBytes: Int64 = 0
+    @Published var tempCount = 0
+    @Published var backupBytes: Int64 = 0
+    @Published var backupCount = 0
+    @Published var contentHtmlCount = 0          // 可清理的全文 HTML 条数（已转 md 且未读未标）
+    @Published var dbBytes: Int64 = 0
+    @Published var lastRunSummary = ""
+    @Published var isRunning = false
+
+    private let db = Database.shared
+    private let backupDir = NSHomeDirectory() + "/readboard/Data/backups"
+    private let dbPath = NSHomeDirectory() + "/readboard/Data/readboard.db"
+
+    // MARK: 可配置项（UserDefaults 持久化）
+
+    /// 已读内容超过该天数自动归档（默认 30）
+    var archiveAfterDays: Int {
+        get { let v = UserDefaults.standard.integer(forKey: "cleanup.archiveAfterDays"); return v > 0 ? v : 30 }
+        set { UserDefaults.standard.set(newValue, forKey: "cleanup.archiveAfterDays") }
+    }
+    /// 归档内容超过该天数自动删除（默认 90；0 = 不删除）
+    var deleteAfterDays: Int {
+        get { UserDefaults.standard.integer(forKey: "cleanup.deleteAfterDays") }  // 0 是合法值（不删），未设过也是 0→给默认
+        set { UserDefaults.standard.set(newValue, forKey: "cleanup.deleteAfterDays") }
+    }
+    /// deleteAfterDays 是否初始化过（区分"未设过"和"用户显式设为 0"）
+    private var deleteDaysInitialized: Bool {
+        get { UserDefaults.standard.bool(forKey: "cleanup.deleteDaysInit") }
+        set { UserDefaults.standard.set(newValue, forKey: "cleanup.deleteDaysInit") }
+    }
+    /// 备份保留份数（默认 5）
+    var backupKeepCount: Int {
+        get { let v = UserDefaults.standard.integer(forKey: "cleanup.backupKeep"); return v > 0 ? v : 5 }
+        set { UserDefaults.standard.set(newValue, forKey: "cleanup.backupKeep") }
+    }
+    /// 是否清理全文 HTML（默认开）
+    var cleanContentHtml: Bool {
+        get { UserDefaults.standard.object(forKey: "cleanup.cleanHtml") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "cleanup.cleanHtml") }
+    }
+    /// 全文 HTML 超过该天数才清（默认 7 天，给最近阅读留原文渲染）
+    var cleanHtmlAfterDays: Int {
+        get { let v = UserDefaults.standard.integer(forKey: "cleanup.cleanHtmlDays"); return v > 0 ? v : 7 }
+        set { UserDefaults.standard.set(newValue, forKey: "cleanup.cleanHtmlDays") }
+    }
+
+    private init() {
+        // 首次启动初始化 deleteAfterDays 默认 90（之后用户改 0 也是合法持久值）
+        if !deleteDaysInitialized {
+            deleteAfterDays = 90
+            deleteDaysInitialized = true
+        }
+    }
+
+    // MARK: 统计各项占用
+
+    func refreshStats() {
+        // 临时目录（readboard- 前缀）
+        var tBytes: Int64 = 0, tCount = 0
+        let tmp = NSTemporaryDirectory()
+        if let items = try? FileManager.default.contentsOfDirectory(atPath: tmp) {
+            for item in items where item.hasPrefix("readboard-") {
+                let path = tmp + item
+                tCount += 1
+                tBytes += Self.dirSize(path)
+            }
+        }
+        tempBytes = tBytes; tempCount = tCount
+
+        // 备份目录
+        var bBytes: Int64 = 0, bCount = 0
+        if let items = try? FileManager.default.contentsOfDirectory(atPath: backupDir) {
+            for item in items where item.hasPrefix("readboard-") && item.hasSuffix(".db") {
+                bCount += 1
+                if let attr = try? FileManager.default.attributesOfItem(atPath: "\(backupDir)/\(item)"),
+                   let sz = attr[.size] as? Int64 { bBytes += sz }
+            }
+        }
+        backupBytes = bBytes; backupCount = bCount
+
+        // 可清理的全文 HTML 条数
+        contentHtmlCount = db.scalarInt("""
+            SELECT COUNT(*) FROM content
+            WHERE content_html IS NOT NULL AND LENGTH(content_html) > 0
+              AND content_md IS NOT NULL AND LENGTH(content_md) > 0
+              AND read_at IS NULL AND starred = 0 AND is_archived = 0
+              AND id NOT IN (SELECT content_id FROM content_tag)
+              AND updated_at < datetime('now', '-\(cleanHtmlAfterDays) days');
+            """) ?? 0
+
+        // DB 文件大小（含 wal）
+        var dBytes: Int64 = (try? FileManager.default.attributesOfItem(atPath: dbPath)[.size] as? Int64) ?? 0
+        if let wal = try? FileManager.default.attributesOfItem(atPath: dbPath + "-wal")[.size] as? Int64 { dBytes += wal }
+        dbBytes = dBytes
+    }
+
+    // MARK: 一键全部清理
+
+    /// 按当前配置跑全套清理。返回各项结果汇总文本。
+    @discardableResult
+    func runAll() async -> String {
+        isRunning = true
+        defer { isRunning = false; refreshStats() }
+        var parts: [String] = []
+
+        // 1. 临时目录
+        let t = cleanTemp()
+        if t.count > 0 { parts.append("临时文件 \(t.count) 项（\(Self.humanBytes(t.bytes))）") }
+
+        // 2. 备份滚动
+        let b = pruneBackups()
+        if b > 0 { parts.append("旧备份 \(b) 份") }
+
+        // 3. retention（归档/删除）——复用 RetentionService 的 SQL 但用本服务的可配天数
+        let (archived, deleted) = runRetention()
+        if archived > 0 || deleted > 0 { parts.append("归档 \(archived) / 删除 \(deleted)") }
+
+        // 4. 全文 HTML 清理
+        if cleanContentHtml {
+            let h = cleanHtml()
+            if h > 0 { parts.append("全文 HTML \(h) 条") }
+        }
+
+        // 5. 增量 vacuum（不锁库，只回收空闲页；完整 VACUUM 会重写整个 800MB 库太重，不做）
+        db.execute("PRAGMA incremental_vacuum;")
+
+        lastRunSummary = parts.isEmpty ? "没有可清理的内容" : "已清理：" + parts.joined(separator:"，")
+        return lastRunSummary
+    }
+
+    // MARK: 分项清理
+
+    /// 清临时目录里 readboard- 前缀的目录（转录/下载残留）
+    @discardableResult
+    func cleanTemp() -> (count: Int, bytes: Int64) {
+        let tmp = NSTemporaryDirectory()
+        guard let items = try? FileManager.default.contentsOfDirectory(atPath: tmp) else { return (0, 0) }
+        var count = 0, bytes: Int64 = 0
+        for item in items where item.hasPrefix("readboard-") {
+            let path = tmp + item
+            bytes += Self.dirSize(path)
+            if (try? FileManager.default.removeItem(atPath: path)) != nil { count += 1 }
+        }
+        return (count, bytes)
+    }
+
+    /// 备份滚动：只保留最新 backupKeepCount 份
+    @discardableResult
+    func pruneBackups() -> Int {
+        guard let items = try? FileManager.default.contentsOfDirectory(atPath: backupDir) else { return 0 }
+        let backups = items.filter { $0.hasPrefix("readboard-") && $0.hasSuffix(".db") }.sorted()
+        let excess = backups.count - backupKeepCount
+        guard excess > 0 else { return 0 }
+        var removed = 0
+        for f in backups.prefix(excess) {
+            if (try? FileManager.default.removeItem(atPath: "\(backupDir)/\(f)")) != nil { removed += 1 }
+        }
+        return removed
+    }
+
+    /// retention：归档超期已读 + 删除超期归档（保护星标/有标签）。用本服务的可配天数。
+    @discardableResult
+    func runRetention() -> (archived: Int, deleted: Int) {
+        db.execute("""
+            UPDATE content SET is_archived = 1
+            WHERE is_archived = 0 AND starred = 0
+              AND read_at IS NOT NULL
+              AND read_at < datetime('now', '-\(archiveAfterDays) days')
+              AND id NOT IN (SELECT content_id FROM content_tag);
+            """)
+        let archived = db.scalarInt("SELECT changes()") ?? 0
+
+        var deleted = 0
+        if deleteAfterDays > 0 {
+            db.execute("""
+                DELETE FROM content
+                WHERE is_archived = 1 AND starred = 0
+                  AND updated_at < datetime('now', '-\(deleteAfterDays) days')
+                  AND id NOT IN (SELECT content_id FROM content_tag);
+                """)
+            deleted = db.scalarInt("SELECT changes()") ?? 0
+        }
+        return (archived, deleted)
+    }
+
+    /// 清全文 HTML：已转 md 且未读未标未归档、超过 cleanHtmlAfterDays 天的，置空 content_html
+    ///（md 才是长期阅读格式，HTML 只是抓取中间产物；67k 条的 HTML 是 DB 膨胀大头）
+    @discardableResult
+    func cleanHtml() -> Int {
+        db.execute("""
+            UPDATE content SET content_html = NULL
+            WHERE content_html IS NOT NULL AND LENGTH(content_html) > 0
+              AND content_md IS NOT NULL AND LENGTH(content_md) > 0
+              AND read_at IS NULL AND starred = 0 AND is_archived = 0
+              AND id NOT IN (SELECT content_id FROM content_tag)
+              AND updated_at < datetime('now', '-\(cleanHtmlAfterDays) days');
+            """)
+        return db.scalarInt("SELECT changes()") ?? 0
+    }
+
+    // MARK: 工具
+
+    static func dirSize(_ path: String) -> Int64 {
+        guard let en = FileManager.default.enumerator(atPath: path) else { return 0 }
+        var total: Int64 = 0
+        while let f = en.nextObject() as? String {
+            if let attr = try? FileManager.default.attributesOfItem(atPath: path + "/" + f),
+               let sz = attr[.size] as? Int64 { total += sz }
+        }
+        return total
+    }
+
+    static func humanBytes(_ b: Int64) -> String {
+        if b >= 1 << 30 { return String(format: "%.1f GB", Double(b) / Double(1 << 30)) }
+        if b >= 1 << 20 { return String(format: "%.1f MB", Double(b) / Double(1 << 20)) }
+        if b >= 1 << 10 { return String(format: "%.0f KB", Double(b) / Double(1 << 10)) }
+        return "\(b) B"
+    }
+}
