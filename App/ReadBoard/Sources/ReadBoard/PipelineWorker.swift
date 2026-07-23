@@ -80,7 +80,11 @@ final class PipelineWorker: ObservableObject {
 
         let tasks = collectPendingTasks()
         var done = 0
-        var scored = 0, translated = 0, summarized = 0, transcribed = 0
+        var scored = 0, translated = 0, summarized = 0, transcribed = 0, refetched = 0
+
+        // 第 0 步: 全文回填——水位线后抓取失败(fetch_status=0/3)的文章按源 fetch_mode 重试,
+        // 成功(fetch_status→2/4)后下一轮就能进管线。每轮限 10 条防抖。
+        refetched = await backfillFullText()
 
         for t in tasks.prefix(batchLimit) {
             // 打分
@@ -111,7 +115,7 @@ final class PipelineWorker: ObservableObject {
         }
 
         processedTotal += done
-        lastSummary = "本轮 \(done) 条：评分\(scored) 翻译\(translated) 摘要\(summarized) 转录\(transcribed)"
+        lastSummary = "本轮 \(done) 条：评分\(scored) 翻译\(translated) 摘要\(summarized) 转录\(transcribed) 全文补\(refetched)"
         if done > 0 {
             NotificationCenter.default.post(name: .contentUpdated, object: nil)
         }
@@ -197,10 +201,49 @@ final class PipelineWorker: ObservableObject {
         return out
     }
 
-    /// source_id → (enabled, 有效开关=源 OR 文件夹)。按具体源 id 索引, 同 stype 源互不干扰。
+    /// source_id → (enabled, 有效开关=源 OR 文件夹, fetch_mode)。按具体源 id 索引, 同 stype 源互不干扰。
     private struct SrcPolicy {
         let enabled: Bool
         let policy: PipelinePolicy
+        let fetchMode: FetchMode
+    }
+
+    /// 全文回填：水位线后抓取失败/未抓的文章(fetch_status 0/3, 非媒体)，按源 fetch_mode 重试。
+    /// 返回本轮成功补到全文的条数。每轮限 10 条防一轮跑太久。
+    private func backfillFullText() async -> Int {
+        let policies = fetchEffectivePolicies()
+        guard db.open() else { return 0 }
+        var stmt: OpaquePointer?
+        // (id, source_id, url, content_html)
+        let sql = """
+        SELECT id, source_id, url, content_html FROM content
+        WHERE id > \(watermark)
+          AND fetch_status IN (0, 3)
+          AND ctype = 'article'
+          AND source_id IS NOT NULL
+        ORDER BY id DESC LIMIT 10;
+        """
+        guard db.prepare(sql, &stmt) else { return 0 }
+        var rows: [(Int64, Int64, String, String?)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = sqlite3_column_int64(stmt, 0)
+            let sid = sqlite3_column_int64(stmt, 1)
+            let url = colText(stmt, 2) ?? ""
+            let html = colText(stmt, 3)
+            rows.append((id, sid, url, html))
+        }
+        sqlite3_finalize(stmt)
+
+        var ok = 0
+        for (id, sid, url, html) in rows {
+            guard let pol = policies[sid], pol.enabled else { continue }
+            // summary 模式不需要抓(本来就没全文), 跳过避免来回置状态
+            if pol.fetchMode == .summary { continue }
+            let success = await FullTextFetcher.shared.fetchAndStore(
+                contentId: id, url: url, feedHtml: html, mode: pol.fetchMode)
+            if success { ok += 1 }
+        }
+        return ok
     }
 
     private func fetchEffectivePolicies() -> [Int64: SrcPolicy] {
@@ -228,7 +271,13 @@ final class PipelineWorker: ObservableObject {
                 autoTranscribe: sp.autoTranscribe || fpp.autoTranscribe,
                 autoSummarize: sp.autoSummarize || fpp.autoSummarize
             )
-            map[sid] = SrcPolicy(enabled: enabled, policy: eff)
+            // 从源 config 解析 fetch_mode
+            var mode: FetchMode = .summary
+            if let data = srcCfg.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let raw = obj["fetch_mode"] as? String,
+               let m = FetchMode(rawValue: raw) { mode = m }
+            map[sid] = SrcPolicy(enabled: enabled, policy: eff, fetchMode: mode)
         }
         return map
     }
