@@ -1,5 +1,6 @@
 .DS_Store
 Data/*.db
+Data/*.bak*
 Data/*.db-journal
 Data/*.db-wal
 Data/*.db-shm
