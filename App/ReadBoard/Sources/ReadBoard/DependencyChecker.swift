@@ -18,37 +18,28 @@ struct TranscribeDependency: Identifiable {
 final class DependencyChecker: @unchecked Sendable {
     static let shared = DependencyChecker()
 
-    private let whisperBin = "/opt/homebrew/bin/whisper-cli"
-    private let ffmpegBin = "/opt/homebrew/bin/ffmpeg"
-    private let ytdlpBin = NSHomeDirectory() + "/.workbuddy/binaries/python/versions/3.13.12/bin/yt-dlp"
-    private let modelPath = NSHomeDirectory() + "/tools/whisper/models/ggml-medium.bin"
-
     private init() {}
 
-    /// 检测全部依赖，返回各项状态
+    /// 检测全部依赖，返回各项状态（路径走 DependencyPaths 解析：用户配置 > PATH > 常见位置）
     func checkAll() -> [TranscribeDependency] {
-        let fm = FileManager.default
+        func dep(_ kind: DependencyPaths.Kind, display: String, cmd: String?, hint: String) -> TranscribeDependency {
+            let (path, _) = DependencyPaths.current(kind)
+            let resolved = DependencyPaths.resolve(kind)
+            return TranscribeDependency(
+                id: kind.rawValue, displayName: display,
+                path: path ?? "未找到",
+                installed: resolved != nil,
+                installCommand: cmd, installHint: hint)
+        }
         return [
-            TranscribeDependency(
-                id: "whisper-cli", displayName: "whisper-cli（转写引擎）",
-                path: whisperBin, installed: fm.fileExists(atPath: whisperBin),
-                installCommand: "brew install whisper-cpp",
-                installHint: "brew install whisper-cpp"),
-            TranscribeDependency(
-                id: "ffmpeg", displayName: "ffmpeg（音频转码）",
-                path: ffmpegBin, installed: fm.fileExists(atPath: ffmpegBin),
-                installCommand: "brew install ffmpeg",
-                installHint: "brew install ffmpeg"),
-            TranscribeDependency(
-                id: "yt-dlp", displayName: "yt-dlp（视频抽音频）",
-                path: ytdlpBin, installed: fm.fileExists(atPath: ytdlpBin),
-                installCommand: "pip3 install yt-dlp",
-                installHint: "pip3 install yt-dlp（或 brew install yt-dlp）"),
-            TranscribeDependency(
-                id: "model", displayName: "whisper 模型 ggml-medium.bin（1.4G）",
-                path: modelPath, installed: fm.fileExists(atPath: modelPath),
-                installCommand: nil,
-                installHint: "可自动下载，点下方按钮"),
+            dep(.whisperCLI, display: "whisper-cli（转写引擎）",
+                cmd: "brew install whisper-cpp", hint: "brew install whisper-cpp，或在下方指定路径"),
+            dep(.ffmpeg, display: "ffmpeg（音频转码）",
+                cmd: "brew install ffmpeg", hint: "brew install ffmpeg，或在下方指定路径"),
+            dep(.ytdlp, display: "yt-dlp（视频抽音频）",
+                cmd: "brew install yt-dlp", hint: "brew install yt-dlp（或 pip3 install yt-dlp）"),
+            dep(.whisperModel, display: "whisper 模型 ggml-medium.bin（1.4G）",
+                cmd: nil, hint: "可自动下载，或在下方指定已有模型文件"),
         ]
     }
 
@@ -62,8 +53,8 @@ final class DependencyChecker: @unchecked Sendable {
 
     /// 模型是否缺失（可自动下载）
     var modelMissing: Bool {
-        !FileManager.default.fileExists(atPath: modelPath)
+        DependencyPaths.resolve(.whisperModel) == nil
     }
 
-    var modelPathString: String { modelPath }
+    var modelPathString: String { DependencyPaths.resolve(.whisperModel) ?? "未配置" }
 }

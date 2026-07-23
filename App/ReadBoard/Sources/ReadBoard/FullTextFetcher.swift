@@ -27,8 +27,8 @@ enum FetchMode: String, CaseIterable {
 final class FullTextFetcher: @unchecked Sendable {
     static let shared = FullTextFetcher()
 
-    /// node / CLI 脚本路径
-    private let nodeBin = "/Users/hangbits/.workbuddy/binaries/node/versions/22.22.2/bin/node"
+    /// node / CLI 脚本路径（node 走 DependencyPaths 解析，脚本在 App 资源内）
+    private var nodeBin: String { DependencyPaths.resolve(.node) ?? "node" }
     private let cliPath = NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/fetch_fulltext.js"
 
     /// 正文达到该长度视为"全文"（阈值, 与探测一致）

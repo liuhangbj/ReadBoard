@@ -169,6 +169,7 @@ struct DepsPane: View {
     @State private var deps: [TranscribeDependency] = []
     @ObservedObject private var downloader = ModelDownloader.shared
     @State private var copiedId: String? = nil
+    @State private var customPaths: [String: String] = [:]
 
     var body: some View {
         Form {
@@ -232,11 +233,47 @@ struct DepsPane: View {
                         .foregroundStyle(ready ? .green : .orange)
                 }
             }
+
+            Section("自定义路径（留空 = 自动探测 PATH 和常见位置）") {
+                ForEach(DependencyPaths.Kind.allCases) { kind in
+                    HStack {
+                        Text(kind.displayName)
+                            .frame(width: 150, alignment: .leading)
+                        TextField("自动探测", text: Binding(
+                            get: { customPaths[kind.rawValue] ?? "" },
+                            set: { v in
+                                customPaths[kind.rawValue] = v
+                                DependencyPaths.setCustom(kind, v.trimmingCharacters(in: .whitespaces))
+                            }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                        if !customPaths[kind.rawValue].isNilOrEmpty {
+                            Button("清除") {
+                                customPaths[kind.rawValue] = ""
+                                DependencyPaths.setCustom(kind, "")
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                }
+                Text("全文抓取的 node 也在此配置。改动即时生效。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .navigationTitle("依赖")
-        .onAppear { deps = DependencyChecker.shared.checkAll() }
+        .onAppear {
+            deps = DependencyChecker.shared.checkAll()
+            for kind in DependencyPaths.Kind.allCases {
+                customPaths[kind.rawValue] = UserDefaults.standard.string(forKey: kind.defaultsKey) ?? ""
+            }
+        }
     }
+}
+
+private extension Optional where Wrapped == String {
+    var isNilOrEmpty: Bool { self?.isEmpty ?? true }
 }
 
 // MARK: - 功能板块

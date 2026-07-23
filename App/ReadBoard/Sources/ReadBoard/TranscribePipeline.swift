@@ -24,10 +24,11 @@ final class TranscribePipeline: @unchecked Sendable {
     private let db = Database.shared
     private let llm = LLMPipeline()
 
-    private let whisperBin = "/opt/homebrew/bin/whisper-cli"
-    private let ffmpegBin = "/opt/homebrew/bin/ffmpeg"
-    private let ytdlpBin = NSHomeDirectory() + "/.workbuddy/binaries/python/versions/3.13.12/bin/yt-dlp"
-    private let modelPath = NSHomeDirectory() + "/tools/whisper/models/ggml-medium.bin"
+    // 依赖路径走 DependencyPaths 解析（用户配置 > PATH 探测 > 常见位置），不再硬编码
+    private var whisperBin: String { DependencyPaths.resolve(.whisperCLI) ?? "whisper-cli" }
+    private var ffmpegBin: String { DependencyPaths.resolve(.ffmpeg) ?? "ffmpeg" }
+    private var ytdlpBin: String { DependencyPaths.resolve(.ytdlp) ?? "yt-dlp" }
+    private var modelPath: String { DependencyPaths.resolve(.whisperModel) ?? "" }
 
     /// 转录单条内容（播客/视频）。audioUrl 为音频流或视频页地址。
     /// 结果写入 llm_translated_md（中文），并同步生成摘要。返回是否成功。

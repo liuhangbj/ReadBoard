@@ -13,7 +13,14 @@ final class ModelDownloader: ObservableObject {
     @Published var errorMessage: String?
 
     private let modelURL = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin")!
-    private let modelPath = NSHomeDirectory() + "/tools/whisper/models/ggml-medium.bin"
+    /// 下载目标路径：用户自定义的模型路径优先，否则默认 ~/tools/whisper/models/
+    private var modelPath: String {
+        if let custom = UserDefaults.standard.string(forKey: DependencyPaths.Kind.whisperModel.defaultsKey),
+           !custom.isEmpty {
+            return custom
+        }
+        return NSHomeDirectory() + "/tools/whisper/models/ggml-medium.bin"
+    }
 
     private init() {}
 
