@@ -184,7 +184,7 @@ final class SourceStore: ObservableObject {
         let feed = try await FeedFetcher.fetch(urlString: src.identifier)
         var added = 0
         for entry in feed.entries {
-            if upsertContent(source: src.stype, entry: entry) { added += 1 }
+            if upsertContent(source: src.stype, sourceId: src.id, entry: entry) { added += 1 }
         }
         db.execute("UPDATE content_source SET last_fetched_at = datetime('now'), error = NULL WHERE id = ?",
                    params: [src.id])
@@ -236,7 +236,7 @@ final class SourceStore: ObservableObject {
     }
 
     /// 把一条 feed entry 写进 content（按 source+guid 去重），返回是否新插入
-    private func upsertContent(source: String, entry: ParsedEntry) -> Bool {
+    private func upsertContent(source: String, sourceId: Int64, entry: ParsedEntry) -> Bool {
         // 已存在则跳过
         if let _ = db.scalarInt("SELECT id FROM content WHERE source = ? AND guid = ?",
                                 params: [source, entry.guid]) {
@@ -253,10 +253,10 @@ final class SourceStore: ObservableObject {
 
         return db.execute(
             """
-            INSERT INTO content (ctype, guid, source, title, author, url, published_at, content_html, fetch_status, meta)
-            VALUES (?,?,?,?,?,?,?,?,0,?)
+            INSERT INTO content (ctype, guid, source, source_id, title, author, url, published_at, content_html, fetch_status, meta)
+            VALUES (?,?,?,?,?,?,?,?,?,0,?)
             """,
-            params: [ctype, entry.guid, source, entry.title, entry.author, entry.url, published, entry.html, metaJson]
+            params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url, published, entry.html, metaJson]
         )
     }
 

@@ -145,7 +145,7 @@ final class PipelineWorker: ObservableObject {
         // 文章类要求 fetch_status IN (2成功, 4直入) 才有正文可打分/翻译。
         // 只扫水位线之后的新内容(id > watermark), 存量不动。
         let sql = """
-        SELECT id, source, ctype, title, url, language, content_md, excerpt,
+        SELECT id, source, source_id, ctype, title, url, language, content_md, excerpt,
                llm_score, llm_summary, llm_translated_md, meta
         FROM content
         WHERE id > \(watermark)
@@ -159,19 +159,20 @@ final class PipelineWorker: ObservableObject {
 
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
-            let source = colText(stmt, 1) ?? ""
-            let ctype = colText(stmt, 2) ?? "article"
-            let title = colText(stmt, 3) ?? ""
-            let url = colText(stmt, 4) ?? ""
-            let language = colText(stmt, 5)
-            let md = colText(stmt, 6)
-            let excerpt = colText(stmt, 7)
-            let hasScore = sqlite3_column_type(stmt, 8) != SQLITE_NULL
-            let hasSummary = sqlite3_column_type(stmt, 9) != SQLITE_NULL
-            let hasTranslated = sqlite3_column_type(stmt, 10) != SQLITE_NULL
-            let metaStr = colText(stmt, 11) ?? "{}"
+            let sourceId = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 2)
+            let ctype = colText(stmt, 3) ?? "article"
+            let title = colText(stmt, 4) ?? ""
+            let url = colText(stmt, 5) ?? ""
+            let language = colText(stmt, 6)
+            let md = colText(stmt, 7)
+            let excerpt = colText(stmt, 8)
+            let hasScore = sqlite3_column_type(stmt, 9) != SQLITE_NULL
+            let hasSummary = sqlite3_column_type(stmt, 10) != SQLITE_NULL
+            let hasTranslated = sqlite3_column_type(stmt, 11) != SQLITE_NULL
+            let metaStr = colText(stmt, 12) ?? "{}"
 
-            guard let pol = srcPolicies[source], pol.enabled else { continue }
+            // 按具体源查开关; source_id 为 NULL(存量/异常)则无开关, 跳过
+            guard let sid = sourceId, let pol = srcPolicies[sid], pol.enabled else { continue }
             let body = (md?.isEmpty == false ? md! : (excerpt ?? ""))
             let audioUrl = Self.parseAudioUrl(metaStr)
             let isMedia = ctype == "podcast" || ctype == "video" || audioUrl != nil
@@ -196,25 +197,25 @@ final class PipelineWorker: ObservableObject {
         return out
     }
 
-    /// source 名 → (stype, enabled, 有效开关=源 OR 文件夹)
+    /// source_id → (enabled, 有效开关=源 OR 文件夹)。按具体源 id 索引, 同 stype 源互不干扰。
     private struct SrcPolicy {
         let enabled: Bool
         let policy: PipelinePolicy
     }
 
-    private func fetchEffectivePolicies() -> [String: SrcPolicy] {
+    private func fetchEffectivePolicies() -> [Int64: SrcPolicy] {
         guard db.open() else { return [:] }
         var stmt: OpaquePointer?
-        var map: [String: SrcPolicy] = [:]
+        var map: [Int64: SrcPolicy] = [:]
         let sql = """
-        SELECT s.stype, s.enabled, s.config, f.config
+        SELECT s.id, s.enabled, s.config, f.config
         FROM content_source s
         LEFT JOIN folder f ON s.folder_id = f.id;
         """
         guard db.prepare(sql, &stmt) else { return [:] }
         defer { sqlite3_finalize(stmt) }
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let stype = colText(stmt, 0) ?? "rss"
+            let sid = sqlite3_column_int64(stmt, 0)
             let enabled = sqlite3_column_int64(stmt, 1) == 1
             let srcCfg = colText(stmt, 2) ?? "{}"
             let folderCfg = colText(stmt, 3) ?? "{}"
@@ -227,8 +228,7 @@ final class PipelineWorker: ObservableObject {
                 autoTranscribe: sp.autoTranscribe || fpp.autoTranscribe,
                 autoSummarize: sp.autoSummarize || fpp.autoSummarize
             )
-            // content.source 与 content_source.stype 对应（按 stype 归组）
-            map[stype] = SrcPolicy(enabled: enabled, policy: eff)
+            map[sid] = SrcPolicy(enabled: enabled, policy: eff)
         }
         return map
     }
