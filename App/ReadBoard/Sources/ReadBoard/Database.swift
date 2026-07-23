@@ -45,7 +45,7 @@ final class Database: @unchecked Sendable {
     @discardableResult
     func open() -> Bool {
         if db != nil { return true }
-        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         if sqlite3_open_v2(dbPath, &db, flags, nil) == SQLITE_OK {
             return true
         }
@@ -57,6 +57,60 @@ final class Database: @unchecked Sendable {
     func close() {
         sqlite3_close(db)
         db = nil
+    }
+
+    // MARK: 写操作
+
+    /// 执行无返回值的写 SQL（带参数绑定）
+    @discardableResult
+    func execute(_ sql: String, params: [Any?] = []) -> Bool {
+        guard open() else { return false }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        bindParams(stmt, params)
+        let ok = sqlite3_step(stmt) == SQLITE_DONE
+        sqlite3_finalize(stmt)
+        return ok
+    }
+
+    /// 查询单个 Int 值
+    func scalarInt(_ sql: String, params: [Any?] = []) -> Int? {
+        guard open() else { return nil }
+        var stmt: OpaquePointer?
+        var result: Int?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            bindParams(stmt, params)
+            if sqlite3_step(stmt) == SQLITE_ROW { result = Int(sqlite3_column_int64(stmt, 0)) }
+        }
+        sqlite3_finalize(stmt)
+        return result
+    }
+
+    /// 最后插入行的 rowid
+    func lastInsertId() -> Int64 {
+        sqlite3_last_insert_rowid(db)
+    }
+
+    /// 暴露 prepare 供 SourceStore 等做只读遍历
+    func prepare(_ sql: String, _ stmt: inout OpaquePointer?) -> Bool {
+        guard open() else { return false }
+        return sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK
+    }
+
+    private func bindParams(_ stmt: OpaquePointer?, _ params: [Any?]) {
+        for (i, p) in params.enumerated() {
+            let idx = Int32(i + 1)
+            switch p {
+            case nil: sqlite3_bind_null(stmt, idx)
+            case let v as Int: sqlite3_bind_int64(stmt, idx, Int64(v))
+            case let v as Int64: sqlite3_bind_int64(stmt, idx, v)
+            case let v as Double: sqlite3_bind_double(stmt, idx, v)
+            case let v as String: sqlite3_bind_text(stmt, idx, v, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            default:
+                if let anyV = p { sqlite3_bind_text(stmt, idx, String(describing: anyV), -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+                else { sqlite3_bind_null(stmt, idx) }
+            }
+        }
     }
 
     // MARK: 查询
