@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var vm = ContentViewModel()
+    @FocusState private var listFocused: Bool
 
     var body: some View {
         NavigationSplitView {
@@ -18,8 +19,28 @@ struct ContentView: View {
         }
         .navigationTitle("ReadBoard")
         .onAppear { vm.loadAll() }
+        .background(shortcutHandlers)
     }
 
+    // MARK: 快捷键（隐藏按钮承载键盘事件）
+    // j/k 上下篇, s 星标, a 归档, 空格已读切换, v 开原文
+    private var shortcutHandlers: some View {
+        Group {
+            Button("") { vm.selectNext() }.keyboardShortcut("j", modifiers: [])
+            Button("") { vm.selectPrev() }.keyboardShortcut("k", modifiers: [])
+            Button("") { if let it = vm.selectedItem { vm.toggleStar(it) } }.keyboardShortcut("s", modifiers: [])
+            Button("") { if let it = vm.selectedItem { vm.toggleArchive(it) } }.keyboardShortcut("a", modifiers: [])
+            Button("") { if let it = vm.selectedItem { vm.toggleRead(it) } }.keyboardShortcut(.space, modifiers: [])
+            Button("") { openOriginal() }.keyboardShortcut("v", modifiers: [])
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+    }
+
+    private func openOriginal() {
+        guard let item = vm.selectedItem, let url = URL(string: item.url), !item.url.isEmpty else { return }
+        NSWorkspace.shared.open(url)
+    }
     // MARK: 左栏
     private var sourceSidebar: some View {
         List(selection: Binding(
@@ -75,7 +96,7 @@ struct ContentView: View {
             .padding(.vertical, 6)
             .background(.quaternary.opacity(0.5))
 
-            // 筛选条：评分 + 未读
+            // 筛选条：评分 + 未读 + 星标 + 归档
             HStack {
                 Text("评分 ≥")
                     .font(.caption)
@@ -93,9 +114,37 @@ struct ContentView: View {
                     .font(.caption)
                     .controlSize(.small)
                     .onChange(of: vm.unreadOnly) { _, _ in vm.reload() }
+                Toggle("星标", isOn: $vm.starredOnly)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                    .controlSize(.small)
+                    .onChange(of: vm.starredOnly) { _, _ in vm.reload() }
+                Toggle("归档", isOn: $vm.showArchived)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                    .controlSize(.small)
+                    .onChange(of: vm.showArchived) { _, _ in vm.reload() }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
+
+            // 操作条：全部标已读 + 计数
+            HStack {
+                Text("\(vm.items.count) 条")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Spacer()
+                Button {
+                    let n = vm.markAllRead()
+                    _ = n
+                } label: {
+                    Label("全部已读", systemImage: "checkmark.circle")
+                        .font(.caption)
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderless)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
 
             List(selection: Binding(
                 get: { vm.selectedItem },
@@ -106,6 +155,8 @@ struct ContentView: View {
                         .tag(item)
                         .contextMenu {
                             Button(item.isRead ? "标为未读" : "标为已读") { vm.toggleRead(item) }
+                            Button(item.starred ? "取消星标" : "加星标") { vm.toggleStar(item) }
+                            Button(item.archived ? "取消归档" : "归档") { vm.toggleArchive(item) }
                         }
                 }
             }
@@ -156,6 +207,11 @@ struct ArticleRow: View {
                     .font(.headline)
                     .foregroundStyle(item.isRead ? .secondary : .primary)
                     .lineLimit(2)
+                if item.starred {
+                    Image(systemName: "star.fill")
+                        .foregroundStyle(.yellow)
+                        .font(.caption)
+                }
                 Spacer()
                 if let s = item.llmScore {
                     Text("\(s)")

@@ -8,6 +8,7 @@ struct SourcesView: View {
     @State private var showAddSheet = false
     @State private var showAddFolder = false
     @State private var newFolderName = ""
+    @State private var opmlMessage = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,6 +34,14 @@ struct SourcesView: View {
                     Label("添加", systemImage: "plus")
                 }
                 .keyboardShortcut("n", modifiers: .command)
+                // OPML 导入/导出
+                Menu {
+                    Button("导入 OPML…") { importOPML() }
+                    Button("导出 OPML…") { exportOPML() }
+                } label: {
+                    Label("OPML", systemImage: "square.and.arrow.up.on.square")
+                }
+                .menuStyle(.borderlessButton)
             }
             .padding()
 
@@ -40,6 +49,13 @@ struct SourcesView: View {
                 Text(store.lastSyncMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .padding(.horizontal)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if !opmlMessage.isEmpty {
+                Text(opmlMessage)
+                    .font(.caption)
+                    .foregroundStyle(.blue)
                     .padding(.horizontal)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -118,6 +134,37 @@ struct SourcesView: View {
     /// 某文件夹下的源(nil = 未分组)
     private func sources(in folderId: Int64?) -> [FeedSource] {
         store.sources.filter { $0.folderId == folderId }
+    }
+
+    // MARK: OPML 导入/导出
+
+    private func importOPML() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "opml")!, .xml]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url,
+              let xml = try? String(contentsOf: url, encoding: .utf8) else { return }
+        let result = OPMLService.shared.importOPML(xml)
+        store.reload()
+        var msg = "导入完成：新增 \(result.sourcesAdded) 源"
+        if result.foldersCreated > 0 { msg += "，\(result.foldersCreated) 文件夹" }
+        if result.sourcesSkipped > 0 { msg += "，跳过已存在 \(result.sourcesSkipped)" }
+        if !result.errors.isEmpty { msg += "，\(result.errors.count) 错误" }
+        opmlMessage = msg
+    }
+
+    private func exportOPML() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "opml")!]
+        panel.nameFieldStringValue = "readboard-subscriptions.opml"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let xml = OPMLService.shared.exportOPML()
+        do {
+            try xml.write(to: url, atomically: true, encoding: .utf8)
+            opmlMessage = "已导出 \(store.sources.count) 源到 \(url.lastPathComponent)"
+        } catch {
+            opmlMessage = "导出失败：\(error.localizedDescription)"
+        }
     }
 }
 

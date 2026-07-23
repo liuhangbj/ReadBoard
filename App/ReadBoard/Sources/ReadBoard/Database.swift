@@ -22,6 +22,8 @@ struct ContentItem: Identifiable, Hashable {
     let audioUrl: String?     // 播客/视频的音频流地址（来自 meta.audio_url）
     let readAt: String?       // 已读时间，nil = 未读
     var isRead: Bool { readAt != nil }
+    let starred: Bool         // 星标
+    let archived: Bool        // 归档
 
     /// 返回一个标记为已读的副本（本地状态同步用）
     func markingRead() -> ContentItem {
@@ -29,7 +31,25 @@ struct ContentItem: Identifiable, Hashable {
                     url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
                     contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
                     llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
-                    audioUrl: audioUrl, readAt: "now")
+                    audioUrl: audioUrl, readAt: "now", starred: starred, archived: archived)
+    }
+
+    /// 返回切换星标的副本
+    func togglingStar() -> ContentItem {
+        ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
+                    url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
+                    contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
+                    llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
+                    audioUrl: audioUrl, readAt: readAt, starred: !starred, archived: archived)
+    }
+
+    /// 返回切换归档的副本
+    func togglingArchive() -> ContentItem {
+        ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
+                    url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
+                    contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
+                    llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
+                    audioUrl: audioUrl, readAt: readAt, starred: starred, archived: !archived)
     }
 }
 
@@ -113,6 +133,26 @@ final class Database: @unchecked Sendable {
         return result
     }
 
+    /// 通用参数化多行查询：返回 [[列名: 值]]（文本化）
+    func queryRows(_ sql: String, params: [Any?] = []) -> [[String: String]] {
+        guard open() else { return [] }
+        var stmt: OpaquePointer?
+        var out: [[String: String]] = []
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        bindParams(stmt, params)
+        defer { sqlite3_finalize(stmt) }
+        let ncol = sqlite3_column_count(stmt)
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            var row: [String: String] = [:]
+            for c in 0..<ncol {
+                let name = String(cString: sqlite3_column_name(stmt, c))
+                if let p = sqlite3_column_text(stmt, c) { row[name] = String(cString: p) }
+            }
+            out.append(row)
+        }
+        return out
+    }
+
     /// 最后插入行的 rowid
     func lastInsertId() -> Int64 {
         sqlite3_last_insert_rowid(db)
@@ -164,23 +204,26 @@ final class Database: @unchecked Sendable {
         return groups
     }
 
-    /// 拉取内容列表（可按 source 过滤、评分筛选、未读过滤、关键词搜索）
+    /// 拉取内容列表（可按 source 过滤、评分筛选、未读过滤、关键词搜索、星标/归档筛选）
     func fetchContents(source: String? = nil, minScore: Int? = nil, unreadOnly: Bool = false,
-                       keyword: String? = nil, limit: Int = 200) -> [ContentItem] {
+                       keyword: String? = nil, starredOnly: Bool = false,
+                       archived: Bool = false, limit: Int = 200) -> [ContentItem] {
         guard open() else { return [] }
         var sql = """
         SELECT id, ctype, source, title, author, url, language, published_at,
-               excerpt, content_md, llm_score, llm_summary, llm_translated_md, fetch_status, feed_id, meta, read_at
+               excerpt, content_md, llm_score, llm_summary, llm_translated_md, fetch_status, feed_id, meta, read_at,
+               starred, is_archived
         FROM content
         """
-        var conds: [String] = []
+        var conds: [String] = ["is_archived = \(archived ? 1 : 0)"]
         if source != nil { conds.append("source = ?") }
         if minScore != nil { conds.append("llm_score >= ?") }
         if unreadOnly { conds.append("read_at IS NULL") }
+        if starredOnly { conds.append("starred = 1") }
         if let kw = keyword, !kw.isEmpty {
             conds.append("(title LIKE ? OR excerpt LIKE ? OR content_md LIKE ?)")
         }
-        if !conds.isEmpty { sql += " WHERE " + conds.joined(separator: " AND ") }
+        sql += " WHERE " + conds.joined(separator: " AND ")
         // 有评分的优先，再按发布时间倒序
         sql += " ORDER BY (llm_score IS NULL), llm_score DESC, published_at DESC LIMIT ?;"
 
@@ -215,6 +258,45 @@ final class Database: @unchecked Sendable {
     /// 标记未读
     func markUnread(contentId: Int64) {
         execute("UPDATE content SET read_at = NULL WHERE id = ?", params: [contentId])
+    }
+
+    /// 切换星标，返回新状态
+    @discardableResult
+    func toggleStar(contentId: Int64) -> Bool {
+        let cur = scalarInt("SELECT starred FROM content WHERE id = ?", params: [contentId]) ?? 0
+        let new = cur == 1 ? 0 : 1
+        execute("UPDATE content SET starred = ? WHERE id = ?", params: [new, contentId])
+        return new == 1
+    }
+
+    /// 切换归档，返回新状态
+    @discardableResult
+    func toggleArchive(contentId: Int64) -> Bool {
+        let cur = scalarInt("SELECT is_archived FROM content WHERE id = ?", params: [contentId]) ?? 0
+        let new = cur == 1 ? 0 : 1
+        execute("UPDATE content SET is_archived = ? WHERE id = ?", params: [new, contentId])
+        return new == 1
+    }
+
+    /// 批量标已读（按条件：source/当前筛选）。返回影响条数。
+    @discardableResult
+    func markAllRead(source: String? = nil, minScore: Int? = nil, keyword: String? = nil) -> Int {
+        var sql = "UPDATE content SET read_at = datetime('now') WHERE read_at IS NULL AND is_archived = 0"
+        var conds: [String] = []
+        if source != nil { conds.append("source = ?") }
+        if minScore != nil { conds.append("llm_score >= ?") }
+        if let kw = keyword, !kw.isEmpty { conds.append("(title LIKE ? OR excerpt LIKE ? OR content_md LIKE ?)") }
+        if !conds.isEmpty { sql += " AND " + conds.joined(separator: " AND ") }
+        execute(sql, params: buildMarkParams(source: source, minScore: minScore, keyword: keyword))
+        return scalarInt("SELECT changes()") ?? 0
+    }
+
+    private func buildMarkParams(source: String?, minScore: Int?, keyword: String?) -> [Any?] {
+        var params: [Any?] = []
+        if let s = source { params.append(s) }
+        if let m = minScore { params.append(m) }
+        if let kw = keyword, !kw.isEmpty { let like = "%\(kw)%"; params.append(like); params.append(like); params.append(like) }
+        return params
     }
 
     func totalCount() -> Int {
@@ -261,7 +343,9 @@ final class Database: @unchecked Sendable {
             fetchStatus: int64(13).map { Int($0) } ?? 0,
             feedId: int64(14),
             audioUrl: audioUrl,
-            readAt: text(16)
+            readAt: text(16),
+            starred: sqlite3_column_int(stmt, 17) == 1,
+            archived: sqlite3_column_int(stmt, 18) == 1
         )
     }
 }
