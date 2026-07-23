@@ -19,6 +19,7 @@ struct ContentItem: Identifiable, Hashable {
     let llmTranslatedMd: String?
     let fetchStatus: Int
     let feedId: Int64?
+    let audioUrl: String?     // 播客/视频的音频流地址（来自 meta.audio_url）
 }
 
 struct SourceGroup: Identifiable, Hashable {
@@ -157,7 +158,7 @@ final class Database: @unchecked Sendable {
         guard open() else { return [] }
         var sql = """
         SELECT id, ctype, source, title, author, url, language, published_at,
-               excerpt, content_md, llm_score, llm_summary, llm_translated_md, fetch_status, feed_id
+               excerpt, content_md, llm_score, llm_summary, llm_translated_md, fetch_status, feed_id, meta
         FROM content
         """
         var conds: [String] = []
@@ -204,6 +205,12 @@ final class Database: @unchecked Sendable {
         func int64(_ i: Int32) -> Int64? {
             sqlite3_column_type(stmt, i) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, i)
         }
+        // meta 是第 15 列（索引 15），解析 audio_url / video_id
+        var audioUrl: String? = nil
+        if let metaStr = text(15), let data = metaStr.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            audioUrl = (obj["audio_url"] as? String) ?? (obj["video_url"] as? String)
+        }
         return ContentItem(
             id: sqlite3_column_int64(stmt, 0),
             ctype: text(1) ?? "article",
@@ -219,7 +226,8 @@ final class Database: @unchecked Sendable {
             llmSummary: text(11),
             llmTranslatedMd: text(12),
             fetchStatus: int64(13).map { Int($0) } ?? 0,
-            feedId: int64(14)
+            feedId: int64(14),
+            audioUrl: audioUrl
         )
     }
 }

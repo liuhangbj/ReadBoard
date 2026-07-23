@@ -135,6 +135,30 @@ final class LLMPipeline: @unchecked Sendable {
 
     // MARK: 翻译（收编 Follo 全文翻译能力）
 
+    /// 把任意文本翻译成目标语言，返回译文（不写库）。供转录管线复用。
+    func translateRaw(_ text: String, targetLang: String = "中文") async -> String? {
+        guard isAvailable else { return nil }
+        let truncated = text.count > 15000 ? String(text.prefix(15000)) : text
+        let prompt = """
+        你是一位专业的翻译。请将以下内容完整翻译成\(targetLang)，要求：
+        - 保留原文的段落结构、数据、专有名词
+        - 语言流畅自然，符合中文表达习惯，不是逐字直译
+        - 直接输出译文，不要任何解释或"以下是翻译"之类的话
+
+        内容：
+        \(truncated)
+        """
+        do {
+            let (out, _) = try await client.chat(
+                messages: [ChatMessage(role: "user", content: prompt)],
+                temperature: 0.3, maxTokens: 4096)
+            let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        } catch {
+            return nil
+        }
+    }
+
     /// 把内容全文翻译成中文，写入 llm_translated_md
     @discardableResult
     func translate(contentId: Int64, title: String, body: String, targetLang: String = "中文") async -> Bool {

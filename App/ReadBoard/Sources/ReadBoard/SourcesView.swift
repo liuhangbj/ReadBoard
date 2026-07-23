@@ -84,6 +84,15 @@ struct SourceRow: View {
                         Text(err).font(.caption2).foregroundStyle(.red).lineLimit(1)
                     }
                 }
+                // ── 管线开关 ──
+                HStack(spacing: 14) {
+                    pipelineToggle("打分", key: "auto_score", on: src.policy.autoScore)
+                    pipelineToggle("翻译", key: "auto_translate", on: src.policy.autoTranslate)
+                    if src.transcribable {
+                        pipelineToggle("转录", key: "auto_transcribe", on: src.policy.autoTranscribe)
+                    }
+                }
+                .padding(.top, 2)
             }
             Spacer()
             Toggle("", isOn: Binding(
@@ -97,6 +106,17 @@ struct SourceRow: View {
             .buttonStyle(.borderless)
         }
         .padding(.vertical, 4)
+    }
+
+    /// 单个管线开关（打分/翻译/转录）
+    private func pipelineToggle(_ label: String, key: String, on: Bool) -> some View {
+        Toggle(label, isOn: Binding(
+            get: { on },
+            set: { store.setPolicy(id: src.id, key: key, value: $0) }
+        ))
+        .toggleStyle(.checkbox)
+        .font(.caption)
+        .controlSize(.small)
     }
 
     private var icon: String {

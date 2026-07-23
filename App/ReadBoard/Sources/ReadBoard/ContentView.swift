@@ -174,6 +174,7 @@ struct ReadingView: View {
     @Binding var showTranslated: Bool
 
     @State private var pipeline = LLMPipeline()
+    @State private var transcriber = TranscribePipeline()
     @State private var busy = false
     @State private var statusMsg: String?
 
@@ -193,10 +194,21 @@ struct ReadingView: View {
 
                 // ── LLM 操作条 ──
                 HStack(spacing: 10) {
+                    // 转录不依赖 LLM key（whisper 本地），单独判断
+                    if isMediaItem, item.llmTranslatedMd == nil {
+                        Button {
+                            runTranscribe()
+                        } label: {
+                            Label("转录", systemImage: "waveform")
+                        }
+                        .disabled(busy)
+                    }
                     if !pipeline.isAvailable {
-                        Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.red)
+                        if !isMediaItem {
+                            Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
                     } else {
                         if item.llmScore == nil {
                             Button {
@@ -206,7 +218,7 @@ struct ReadingView: View {
                             }
                             .disabled(busy)
                         }
-                        if item.llmTranslatedMd == nil {
+                        if !isMediaItem, item.llmTranslatedMd == nil {
                             Button {
                                 runTranslate()
                             } label: {
@@ -266,6 +278,11 @@ struct ReadingView: View {
         return item.excerpt ?? "(无内容)"
     }
 
+    /// 是否媒体项（播客/视频，可转录）
+    private var isMediaItem: Bool {
+        item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil
+    }
+
     // MARK: - LLM 操作
 
     /// 评分/翻译用的正文：优先 markdown，退回 excerpt
@@ -297,6 +314,24 @@ struct ReadingView: View {
             await MainActor.run {
                 busy = false
                 statusMsg = ok ? "✅ 翻译完成" : "❌ 翻译失败"
+                if ok {
+                    showTranslated = true
+                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
+                }
+            }
+        }
+    }
+
+    private func runTranscribe() {
+        let cid = item.id
+        busy = true
+        statusMsg = "转录中（下载+识别，较长）…"
+        Task {
+            let ok = await transcriber.transcribe(
+                contentId: cid, audioUrl: item.audioUrl, pageUrl: item.url, language: item.language)
+            await MainActor.run {
+                busy = false
+                statusMsg = ok ? "✅ 转录完成" : "❌ 转录失败"
                 if ok {
                     showTranslated = true
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)

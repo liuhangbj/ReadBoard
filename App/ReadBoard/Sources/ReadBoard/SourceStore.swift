@@ -3,6 +3,25 @@ import SQLite3
 
 // MARK: - 订阅源模型
 
+/// 管线开关（存于 content_source.config JSON，默认全关）
+struct PipelinePolicy: Hashable {
+    var autoScore = false
+    var autoTranslate = false
+    var autoTranscribe = false
+
+    static func from(configJson: String) -> PipelinePolicy {
+        guard let data = configJson.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return PipelinePolicy()
+        }
+        return PipelinePolicy(
+            autoScore: (obj["auto_score"] as? Bool) ?? ((obj["auto_score"] as? Int) == 1),
+            autoTranslate: (obj["auto_translate"] as? Bool) ?? ((obj["auto_translate"] as? Int) == 1),
+            autoTranscribe: (obj["auto_transcribe"] as? Bool) ?? ((obj["auto_transcribe"] as? Int) == 1)
+        )
+    }
+}
+
 struct FeedSource: Identifiable, Hashable {
     let id: Int64
     let stype: String          // rss / podcast / youtube / wechat
@@ -11,6 +30,12 @@ struct FeedSource: Identifiable, Hashable {
     let enabled: Bool
     let lastFetchedAt: String?
     let error: String?
+    let config: String         // JSON 原文
+
+    var policy: PipelinePolicy { PipelinePolicy.from(configJson: config) }
+
+    /// 该源是否可转录（播客/视频才有音频流）
+    var transcribable: Bool { stype == "podcast" || stype == "youtube" }
 }
 
 // MARK: - 订阅源管理（写入 + 抓取调度）
@@ -48,6 +73,20 @@ final class SourceStore: ObservableObject {
 
     func setEnabled(id: Int64, enabled: Bool) {
         db.execute("UPDATE content_source SET enabled = ? WHERE id = ?", params: [enabled ? 1 : 0, id])
+        reload()
+    }
+
+    // MARK: 管线开关
+
+    /// 切换某条管线开关，合并写回 config JSON
+    func setPolicy(id: Int64, key: String, value: Bool) {
+        let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
+        var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+        obj[key] = value
+        if let data = try? JSONSerialization.data(withJSONObject: obj),
+           let str = String(data: data, encoding: .utf8) {
+            db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id])
+        }
         reload()
     }
 
@@ -95,7 +134,7 @@ final class SourceStore: ObservableObject {
         guard db.open() else { return [] }
         var stmt: OpaquePointer?
         var list: [FeedSource] = []
-        let sql = "SELECT id, stype, name, identifier, enabled, last_fetched_at, error FROM content_source ORDER BY stype, name;"
+        let sql = "SELECT id, stype, name, identifier, enabled, last_fetched_at, error, config FROM content_source ORDER BY stype, name;"
         // 直接走 Database 的底层句柄做只读遍历
         if prepareRead(sql, &stmt) {
             while sqlite3_step(stmt) == SQLITE_ROW {
@@ -106,7 +145,8 @@ final class SourceStore: ObservableObject {
                     identifier: columnText(stmt, 3) ?? "",
                     enabled: sqlite3_column_int64(stmt, 4) == 1,
                     lastFetchedAt: columnText(stmt, 5),
-                    error: columnText(stmt, 6)
+                    error: columnText(stmt, 6),
+                    config: columnText(stmt, 7) ?? "{}"
                 ))
             }
         }
