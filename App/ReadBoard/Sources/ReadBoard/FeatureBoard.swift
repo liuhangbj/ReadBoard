@@ -89,8 +89,9 @@ enum AIPipeline: String, CaseIterable, Identifiable {
     var effective: Bool { FeatureBoard.ai.enabled && enabled }
 }
 
-// MARK: - LLM 配置（UserDefaults 持久化，设置页可改，不再依赖 .env）
-// 保留 .env 作为首次启动的默认值填充；一旦设置页保存过，以 UserDefaults 为准。
+// MARK: - LLM 配置（baseURL/model 存 UserDefaults；apiKey 存 Keychain）
+// 保留 .env 作为首次启动的默认值填充；一旦设置页保存过，以 App 内配置为准。
+// apiKey 不落 plist——明文可被其他进程读取，也会进备份/同步，统一走 Keychain。
 
 struct LLMSettings {
     var baseURL: String
@@ -117,18 +118,24 @@ struct LLMSettings {
 
     private enum K {
         static let baseURL = "llm.baseURL"
-        static let apiKey = "llm.apiKey"
+        static let apiKey = "llm.apiKey"          // UserDefaults 中的旧明文 key（仅迁移用，迁完即清）
         static let model = "llm.model"
-        static let saved = "llm.savedInApp"   // 用户是否在 App 内保存过（保存过则以 App 为准，忽略 .env）
+        static let saved = "llm.savedInApp"       // 用户是否在 App 内保存过（保存过则以 App 为准，忽略 .env）
+        static let keychainKey = "llm.apiKey"     // Keychain account
     }
 
     /// 当前生效配置：App 内保存过 → 用 App 的；否则回退 .env 探测（旧行为）
     static func current() -> LLMSettings {
         let d = UserDefaults.standard
         if d.bool(forKey: K.saved) {
+            // 一次性迁移：老版本把 apiKey 明文存在 UserDefaults，迁入 Keychain 后清除
+            if let legacy = d.string(forKey: K.apiKey), !legacy.isEmpty {
+                _ = KeychainHelper.save(legacy, forKey: K.keychainKey)
+                d.removeObject(forKey: K.apiKey)
+            }
             return LLMSettings(
                 baseURL: d.string(forKey: K.baseURL) ?? "",
-                apiKey: d.string(forKey: K.apiKey) ?? "",
+                apiKey: KeychainHelper.load(forKey: K.keychainKey) ?? "",
                 model: d.string(forKey: K.model) ?? "")
         }
         // 首次：从 .env 探测填充默认值（不写 saved 标记）
@@ -139,11 +146,16 @@ struct LLMSettings {
             model: p?.model ?? presets[0].defaultModel)
     }
 
-    /// 保存到 UserDefaults 并标记"App 内管理"
+    /// 保存：baseURL/model 进 UserDefaults，apiKey 进 Keychain，并标记"App 内管理"
     func save() {
         let d = UserDefaults.standard
         d.set(baseURL, forKey: K.baseURL)
-        d.set(apiKey, forKey: K.apiKey)
+        if apiKey.isEmpty {
+            KeychainHelper.delete(forKey: K.keychainKey)
+        } else {
+            _ = KeychainHelper.save(apiKey, forKey: K.keychainKey)
+        }
+        d.removeObject(forKey: K.apiKey)  // 确保无明文残留
         d.set(model, forKey: K.model)
         d.set(true, forKey: K.saved)
     }

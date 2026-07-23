@@ -260,7 +260,11 @@ final class SourceStore: ObservableObject {
         var total = 0
         var failed = 0
         var skipped = 0
+        // B3: 媒体板块总开关——关掉后 podcast/youtube 等媒体源整组不抓（rss 文章不受影响）
+        let mediaOn = FeatureBoard.media.enabled
+        var mediaSkipped = 0
         for src in sources where src.enabled {
+            if !mediaOn && src.transcribable { mediaSkipped += 1; continue }
             // 自动调度时按源的抓取间隔筛选：距上次抓取不足间隔的跳过
             if !manual && !src.isDue { skipped += 1; continue }
             do {
@@ -274,6 +278,7 @@ final class SourceStore: ObservableObject {
         }
         var msg = failed > 0 ? "完成：新增 \(total) 条，\(failed) 个源失败" : "完成：新增 \(total) 条"
         if skipped > 0 { msg += "（跳过未到期 \(skipped)）" }
+        if mediaSkipped > 0 { msg += "（媒体板块已关闭，跳过 \(mediaSkipped) 个媒体源）" }
         lastSyncMessage = msg
         isSyncing = false
         reload()

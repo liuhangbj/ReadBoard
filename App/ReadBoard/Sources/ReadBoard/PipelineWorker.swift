@@ -98,6 +98,7 @@ final class PipelineWorker: ObservableObject {
                 } ?? false
                 if ok { scored += 1; markJob(contentId: t.id, jtype: "score", ok: true) }
                 else { markJob(contentId: t.id, jtype: "score", ok: false) }
+                if ok { await ExportService.shared.runPending(trigger: "score", contentId: t.id) }
             }
             // 翻译（仅文章；媒体走转录）
             if t.needTranslate, AIPipeline.translate.effective {
@@ -106,6 +107,7 @@ final class PipelineWorker: ObservableObject {
                 } ?? false
                 if ok { translated += 1; markJob(contentId: t.id, jtype: "translate", ok: true) }
                 else { markJob(contentId: t.id, jtype: "translate", ok: false) }
+                if ok { await ExportService.shared.runPending(trigger: "translate", contentId: t.id) }
             }
             // 摘要（独立管线；若打分已带摘要则跳过）
             if t.needSummary, AIPipeline.summarize.effective {
@@ -122,6 +124,7 @@ final class PipelineWorker: ObservableObject {
                         contentId: t.id, title: t.title, audioUrl: t.audioUrl, pageUrl: t.url, language: t.language)
                 } ?? false
                 if ok { transcribed += 1 }  // transcribe 内部已记 job
+                if ok { await ExportService.shared.runPending(trigger: "transcribe", contentId: t.id) }
             }
             done += 1
         }
