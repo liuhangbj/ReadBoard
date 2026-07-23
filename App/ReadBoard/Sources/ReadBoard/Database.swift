@@ -86,6 +86,21 @@ final class Database: @unchecked Sendable {
         return result
     }
 
+    /// 查询单个 String 值
+    func scalarString(_ sql: String, params: [Any?] = []) -> String? {
+        guard open() else { return nil }
+        var stmt: OpaquePointer?
+        var result: String?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            bindParams(stmt, params)
+            if sqlite3_step(stmt) == SQLITE_ROW, let p = sqlite3_column_text(stmt, 0) {
+                result = String(cString: p)
+            }
+        }
+        sqlite3_finalize(stmt)
+        return result
+    }
+
     /// 最后插入行的 rowid
     func lastInsertId() -> Int64 {
         sqlite3_last_insert_rowid(db)

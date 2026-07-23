@@ -13,6 +13,22 @@ final class ContentViewModel: ObservableObject {
 
     private let db = Database.shared
 
+    init() {
+        // 评分/翻译完成后刷新列表与当前选中项
+        NotificationCenter.default.addObserver(
+            forName: .contentUpdated, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let currentId = self.selectedItem?.id
+                self.reload()
+                if let cid = currentId {
+                    self.selectedItem = self.items.first { $0.id == cid }
+                }
+            }
+        }
+    }
+
     func loadAll() {
         totalCount = db.totalCount()
         sourceGroups = db.fetchSourceGroups()

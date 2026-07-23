@@ -173,6 +173,10 @@ struct ReadingView: View {
     let item: ContentItem
     @Binding var showTranslated: Bool
 
+    @State private var pipeline = LLMPipeline()
+    @State private var busy = false
+    @State private var statusMsg: String?
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -186,6 +190,43 @@ struct ReadingView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+                // ── LLM 操作条 ──
+                HStack(spacing: 10) {
+                    if !pipeline.isAvailable {
+                        Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    } else {
+                        if item.llmScore == nil {
+                            Button {
+                                runScore()
+                            } label: {
+                                Label("AI 评分", systemImage: "star")
+                            }
+                            .disabled(busy)
+                        }
+                        if item.llmTranslatedMd == nil {
+                            Button {
+                                runTranslate()
+                            } label: {
+                                Label("AI 翻译", systemImage: "character.bubble")
+                            }
+                            .disabled(busy)
+                        }
+                        if busy {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        }
+                        if let msg = statusMsg {
+                            Text(msg)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    Spacer()
+                }
 
                 // 原文/翻译切换（有翻译时才显示）
                 if item.llmTranslatedMd != nil {
@@ -224,4 +265,47 @@ struct ReadingView: View {
         if let md = item.contentMd, !md.isEmpty { return md }
         return item.excerpt ?? "(无内容)"
     }
+
+    // MARK: - LLM 操作
+
+    /// 评分/翻译用的正文：优先 markdown，退回 excerpt
+    private var contentBody: String {
+        if let md = item.contentMd, !md.isEmpty { return md }
+        return item.excerpt ?? ""
+    }
+
+    private func runScore() {
+        let cid = item.id
+        busy = true
+        statusMsg = "评分中…"
+        Task {
+            let ok = await pipeline.score(contentId: cid, title: item.title, body: contentBody)
+            await MainActor.run {
+                busy = false
+                statusMsg = ok ? "✅ 评分完成" : "❌ 评分失败"
+                if ok { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
+            }
+        }
+    }
+
+    private func runTranslate() {
+        let cid = item.id
+        busy = true
+        statusMsg = "翻译中…"
+        Task {
+            let ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
+            await MainActor.run {
+                busy = false
+                statusMsg = ok ? "✅ 翻译完成" : "❌ 翻译失败"
+                if ok {
+                    showTranslated = true
+                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
+                }
+            }
+        }
+    }
+}
+
+extension Notification.Name {
+    static let contentUpdated = Notification.Name("contentUpdated")
 }
