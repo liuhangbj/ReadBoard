@@ -255,6 +255,26 @@ struct SourceRow: View {
                     if let t = src.lastFetchedAt {
                         Text("上次 \(String(t.prefix(16)))").font(.caption2).foregroundStyle(.tertiary)
                     }
+                    // 抓取频率徽标
+                    Menu {
+                        ForEach([5, 15, 30, 60, 360, 720], id: \.self) { m in
+                            Button {
+                                store.setFetchInterval(id: src.id, minutes: m)
+                            } label: {
+                                let label = m < 60 ? "\(m) 分钟" : "\(m/60) 小时"
+                                if src.fetchIntervalMin == m { Label(label, systemImage: "checkmark") }
+                                else { Text(label) }
+                            }
+                        }
+                    } label: {
+                        Text("⏱ \(intervalLabel(src.fetchIntervalMin))")
+                            .font(.caption2)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(.quaternary)
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .help("自动抓取间隔（点击可修改）")
                     if let err = src.error {
                         Text(err).font(.caption2).foregroundStyle(.red).lineLimit(1)
                     }
@@ -333,6 +353,10 @@ struct SourceRow: View {
         case .cdp: return .orange
         case .summary: return .gray
         }
+    }
+
+    private func intervalLabel(_ m: Int) -> String {
+        m < 60 ? "\(m)分钟" : "\(m/60)小时"
     }
 }
 

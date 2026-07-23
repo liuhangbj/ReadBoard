@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import CryptoKit
 
 // MARK: - 订阅源模型
 
@@ -47,6 +48,25 @@ struct FeedSource: Identifiable, Hashable {
         return m
     }
 
+    /// 抓取间隔（分钟，config.fetch_interval_min，默认 15）
+    var fetchIntervalMin: Int {
+        guard let data = config.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 15 }
+        if let v = obj["fetch_interval_min"] as? Int { return v }
+        if let v = obj["fetch_interval_min"] as? Double { return Int(v) }
+        return 15
+    }
+
+    /// 是否到期该抓（距 last_fetched_at 超过间隔；从未抓过 = 到期）
+    var isDue: Bool {
+        guard let t = lastFetchedAt, !t.isEmpty else { return true }
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        f.timeZone = TimeZone(identifier: "UTC")
+        guard let last = f.date(from: t) else { return true }
+        return Date().timeIntervalSince(last) >= TimeInterval(fetchIntervalMin * 60)
+    }
+
     /// 该源是否可转录（播客/视频才有音频流）
     var transcribable: Bool { stype == "podcast" || stype == "youtube" }
 }
@@ -90,11 +110,12 @@ final class SourceStore: ObservableObject {
     }
 
     /// 启动周期自动抓取（立即跑一轮 + Timer 周期）。App 启动时调用。
+    /// 自动调度走 manual=false：只抓到期的源（按各自抓取间隔）。
     func startAutoSync() {
         guard autoSyncEnabled, syncTimer == nil else { return }
-        Task { await syncAll() }
+        Task { await syncAll(manual: false) }
         syncTimer = Timer.scheduledTimer(withTimeInterval: syncInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.syncAll() }
+            Task { @MainActor in await self?.syncAll(manual: false) }
         }
     }
 
@@ -193,6 +214,18 @@ final class SourceStore: ObservableObject {
         setFetchMode(id: id, mode: mode)
     }
 
+    /// 设置某源抓取间隔（分钟）
+    func setFetchInterval(id: Int64, minutes: Int) {
+        let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
+        var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+        obj["fetch_interval_min"] = minutes
+        if let data = try? JSONSerialization.data(withJSONObject: obj),
+           let str = String(data: data, encoding: .utf8) {
+            db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id])
+        }
+        reload()
+    }
+
     func removeSource(id: Int64) {
         // 先删该源内容，再删源（content.source 与 stype 对应，guid 关联不可靠，按 source+identifier 不可靠，仅删源记录）
         db.execute("DELETE FROM content_source WHERE id = ?", params: [id])
@@ -220,13 +253,16 @@ final class SourceStore: ObservableObject {
 
     // MARK: 抓取
 
-    /// 抓取所有启用的源
-    func syncAll() async {
+    /// 抓取所有启用的源。manual=true 忽略频率限制全抓；自动调度(false)只抓到期的源。
+    func syncAll(manual: Bool = true) async {
         isSyncing = true
         lastSyncMessage = ""
         var total = 0
         var failed = 0
+        var skipped = 0
         for src in sources where src.enabled {
+            // 自动调度时按源的抓取间隔筛选：距上次抓取不足间隔的跳过
+            if !manual && !src.isDue { skipped += 1; continue }
             do {
                 let n = try await syncOne(src)
                 total += n
@@ -236,9 +272,9 @@ final class SourceStore: ObservableObject {
                            params: [error.localizedDescription, src.id])
             }
         }
-        lastSyncMessage = failed > 0
-            ? "完成：新增 \(total) 条，\(failed) 个源失败"
-            : "完成：新增 \(total) 条"
+        var msg = failed > 0 ? "完成：新增 \(total) 条，\(failed) 个源失败" : "完成：新增 \(total) 条"
+        if skipped > 0 { msg += "（跳过未到期 \(skipped)）" }
+        lastSyncMessage = msg
         isSyncing = false
         reload()
     }
@@ -310,9 +346,9 @@ final class SourceStore: ObservableObject {
         return list
     }
 
-    /// 把一条 feed entry 写进 content（按 source+guid 去重），返回新插入的 content id（已存在返回 nil）
+    /// 把一条 feed entry 写进 content（按 source+guid 去重 + 跨源内容去重），返回新插入的 content id（已存在返回 nil）
     private func upsertContent(source: String, sourceId: Int64, entry: ParsedEntry) -> Int64? {
-        // 已存在则跳过
+        // 同源同 guid 已存在则跳过
         if let _ = db.scalarInt("SELECT id FROM content WHERE source = ? AND guid = ?",
                                 params: [source, entry.guid]) {
             return nil
@@ -322,18 +358,66 @@ final class SourceStore: ObservableObject {
         else if entry.meta["audio_url"] != nil { ctype = "podcast" }
         else { ctype = "article" }
 
+        // ── 跨源内容去重：url 规范化(去追踪参数) + 标题归一化 → content_hash ──
+        // 同一文章多源转载(公众号+官网+RSS聚合)会命中相同 hash。重复的不跳过,
+        // 标 is_duplicate + duplicate_of 保留溯源, 阅读层可选择隐藏重复。
+        let normUrl = Self.normalizeUrl(entry.url)
+        let normTitle = Self.normalizeTitle(entry.title)
+        let hash = Self.contentHash(url: normUrl, title: normTitle)
+        var isDup = 0
+        var dupOf: Int64? = nil
+        if let existingId = db.scalarInt("SELECT id FROM content WHERE content_hash = ? AND is_duplicate = 0 LIMIT 1",
+                                         params: [hash]) {
+            isDup = 1
+            dupOf = Int64(existingId)
+        }
+
         let published = entry.published.map { ISO8601DateFormatter().string(from: $0) }
         let metaJson = (try? JSONSerialization.data(withJSONObject: entry.meta))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
 
         let ok = db.execute(
             """
-            INSERT INTO content (ctype, guid, source, source_id, title, author, url, published_at, content_html, fetch_status, meta)
-            VALUES (?,?,?,?,?,?,?,?,?,0,?)
+            INSERT INTO content (ctype, guid, source, source_id, title, author, url, published_at, content_html, fetch_status, meta, content_hash, is_duplicate, duplicate_of)
+            VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?)
             """,
-            params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url, published, entry.html, metaJson]
+            params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url, published, entry.html, metaJson, hash, isDup, dupOf.map { Int($0) }]
         )
         return ok ? db.lastInsertId() : nil
+    }
+
+    // MARK: 内容去重辅助
+
+    /// url 规范化：去 utm_*/fbclid/gclid 等追踪参数 + 去 fragment + 去尾斜杠 + 小写 scheme/host
+    static func normalizeUrl(_ urlString: String) -> String {
+        guard var comps = URLComponents(string: urlString) else { return urlString.lowercased() }
+        comps.scheme = comps.scheme?.lowercased()
+        comps.host = comps.host?.lowercased()
+        comps.fragment = nil
+        let trackPrefixes = ["utm_", "fbclid", "gclid", "ref", "spm", "from", "source", "mc_cid", "mc_eid"]
+        if let items = comps.queryItems {
+            comps.queryItems = items.filter { item in
+                !trackPrefixes.contains(where: { item.name.lowercased().hasPrefix($0) })
+            }
+            if comps.queryItems?.isEmpty == true { comps.queryItems = nil }
+        }
+        var s = comps.string ?? urlString
+        if s.hasSuffix("/") { s.removeLast() }
+        return s
+    }
+
+    /// 标题归一化：去空白/标点/小写，用于跨源同题判重
+    static func normalizeTitle(_ title: String) -> String {
+        title.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
+    }
+
+    /// 内容 hash：规范化 url + 归一化标题 的 SHA256（url 优先, 空 url 退化为纯标题）
+    static func contentHash(url: String, title: String) -> String {
+        let basis = url.isEmpty ? "t:\(title)" : "u:\(url)|t:\(title)"
+        let digest = SHA256.hash(data: Data(basis.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: SQLite 底层（读遍历辅助）

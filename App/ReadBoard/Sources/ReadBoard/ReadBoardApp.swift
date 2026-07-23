@@ -7,6 +7,8 @@ struct ReadBoardApp: App {
         PipelineWorker.shared.start()
         // 启动 feed 自动抓取调度（周期 syncAll，信息流源头）
         SourceStore.shared.startAutoSync()
+        // 启动 DB 自动备份（每日热备到 Data/backups/，保留最近5份）
+        BackupService.shared.start()
     }
 
     var body: some Scene {
