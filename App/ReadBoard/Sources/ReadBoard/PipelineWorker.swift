@@ -91,27 +91,36 @@ final class PipelineWorker: ObservableObject {
 
         for t in tasks.prefix(batchLimit) {
             // 打分（AI 板块总开关 && 打分子开关 && 源级开关，源级已在收集时判过）
+            // R2: 每个管线调用包单任务超时——一条挂死不再拖垮整轮 worker
             if t.needScore, AIPipeline.score.effective {
-                if await llm.score(contentId: t.id, title: t.title, body: t.body) {
-                    scored += 1; markJob(contentId: t.id, jtype: "score", ok: true)
-                } else { markJob(contentId: t.id, jtype: "score", ok: false) }
+                let ok = await Self.withTimeout(seconds: 180) {
+                    await self.llm.score(contentId: t.id, title: t.title, body: t.body)
+                } ?? false
+                if ok { scored += 1; markJob(contentId: t.id, jtype: "score", ok: true) }
+                else { markJob(contentId: t.id, jtype: "score", ok: false) }
             }
             // 翻译（仅文章；媒体走转录）
             if t.needTranslate, AIPipeline.translate.effective {
-                if await llm.translate(contentId: t.id, title: t.title, body: t.body) {
-                    translated += 1; markJob(contentId: t.id, jtype: "translate", ok: true)
-                } else { markJob(contentId: t.id, jtype: "translate", ok: false) }
+                let ok = await Self.withTimeout(seconds: 180) {
+                    await self.llm.translate(contentId: t.id, title: t.title, body: t.body)
+                } ?? false
+                if ok { translated += 1; markJob(contentId: t.id, jtype: "translate", ok: true) }
+                else { markJob(contentId: t.id, jtype: "translate", ok: false) }
             }
             // 摘要（独立管线；若打分已带摘要则跳过）
             if t.needSummary, AIPipeline.summarize.effective {
-                if await llm.summarize(contentId: t.id, title: t.title, body: t.body) {
-                    summarized += 1; markJob(contentId: t.id, jtype: "summarize", ok: true)
-                } else { markJob(contentId: t.id, jtype: "summarize", ok: false) }
+                let ok = await Self.withTimeout(seconds: 180) {
+                    await self.llm.summarize(contentId: t.id, title: t.title, body: t.body)
+                } ?? false
+                if ok { summarized += 1; markJob(contentId: t.id, jtype: "summarize", ok: true) }
+                else { markJob(contentId: t.id, jtype: "summarize", ok: false) }
             }
             // 转录（媒体）
             if t.needTranscribe, AIPipeline.transcribe.effective {
-                let ok = await transcriber.transcribe(
-                    contentId: t.id, title: t.title, audioUrl: t.audioUrl, pageUrl: t.url, language: t.language)
+                let ok = await Self.withTimeout(seconds: 600) {
+                    await self.transcriber.transcribe(
+                        contentId: t.id, title: t.title, audioUrl: t.audioUrl, pageUrl: t.url, language: t.language)
+                } ?? false
                 if ok { transcribed += 1 }  // transcribe 内部已记 job
             }
             done += 1
@@ -186,14 +195,19 @@ final class PipelineWorker: ObservableObject {
 
             var t = PendingTask(id: id, title: title, url: url, body: body,
                                 language: language, audioUrl: audioUrl)
-            // 打分：开关开 且 未打分 且 有正文
-            if pol.policy.autoScore, !hasScore, !body.isEmpty { t.needScore = true }
+            // R1: 各管线判定前先做失败退避/死信过滤——失败过多的不再反复调 LLM（治费用失控）
+            // 打分：开关开 且 未打分 且 有正文 且 未死信
+            if pol.policy.autoScore, !hasScore, !body.isEmpty,
+               !shouldSkipForFailures(contentId: id, jtype: "score") { t.needScore = true }
             // 摘要：开关开 且 未摘要 且 (有正文 或 转录后会有)；媒体等转录补摘要，跳过
-            if pol.policy.autoSummarize, !hasSummary, !body.isEmpty, !isMedia { t.needSummary = true }
+            if pol.policy.autoSummarize, !hasSummary, !body.isEmpty, !isMedia,
+               !shouldSkipForFailures(contentId: id, jtype: "summarize") { t.needSummary = true }
             // 翻译：开关开 且 未翻译 且 文章有正文（媒体走转录）
-            if pol.policy.autoTranslate, !hasTranslated, !isMedia, !body.isEmpty { t.needTranslate = true }
+            if pol.policy.autoTranslate, !hasTranslated, !isMedia, !body.isEmpty,
+               !shouldSkipForFailures(contentId: id, jtype: "translate") { t.needTranslate = true }
             // 转录：开关开 且 未转写 且 有媒体地址
-            if pol.policy.autoTranscribe, !hasTranslated, isMedia, (audioUrl != nil || !url.isEmpty) {
+            if pol.policy.autoTranscribe, !hasTranslated, isMedia, (audioUrl != nil || !url.isEmpty),
+               !shouldSkipForFailures(contentId: id, jtype: "transcribe") {
                 t.needTranscribe = true
             }
 
@@ -299,6 +313,39 @@ final class PipelineWorker: ObservableObject {
             params: [contentId, jtype, ok ? 2 : 3, ok ? nil : "failed"])
     }
 
+    // MARK: R1 失败退避 / 死信（治 LLM 费用失控：失败任务不再每 120s 无限重试）
+
+    /// 该 content+jtype 是否应跳过：
+    /// - 累计失败 >= maxFailures（3）→ 死信，永久跳过（除非手动重试）
+    /// - 最近一次失败在 backoffSeconds（1h）内 → 退避，本轮跳过
+    /// - 最近一次是成功 → 不跳（其实也不会被捞出来，因已有结果）
+    private func shouldSkipForFailures(contentId: Int64, jtype: String) -> Bool {
+        let rows = db.queryRows("""
+            SELECT status, finished_at FROM content_job
+            WHERE content_id = ? AND jtype = ?
+            ORDER BY id DESC LIMIT 20;
+            """, params: [contentId, jtype])
+        guard !rows.isEmpty else { return false }
+        // 累计失败次数（连续取最近 20 条里的 status=3）
+        let failCount = rows.filter { $0["status"] == "3" }.count
+        if failCount >= 3 { return true }   // 死信
+        // 最近一次是失败且在退避窗口内
+        if let last = rows.first, last["status"] == "3", let ts = last["finished_at"] {
+            if let lastDate = Self.utcDate(ts), Date().timeIntervalSince(lastDate) < 3600 {
+                return true   // 退避
+            }
+        }
+        return false
+    }
+
+    /// 解析 SQLite datetime('now') 的 UTC 字符串
+    private static func utcDate(_ s: String) -> Date? {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f.date(from: s)
+    }
+
     private func colText(_ stmt: OpaquePointer?, _ i: Int32) -> String? {
         guard let p = sqlite3_column_text(stmt, i) else { return nil }
         return String(cString: p)
@@ -308,5 +355,21 @@ final class PipelineWorker: ObservableObject {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
         return f.string(from: Date())
+    }
+
+    /// R2 单任务超时包装：operation 超时未返回则返回 nil（调用方据此记失败放行）。
+    /// 用竞速 TaskGroup：先到先用，超时分支返回 nil。operation 在后台继续跑也无妨（其结果被丢弃）。
+    static func withTimeout<T: Sendable>(seconds: TimeInterval,
+                                         operation: @escaping @Sendable () async -> T) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await operation() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
     }
 }

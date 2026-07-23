@@ -109,26 +109,71 @@ final class TranscribePipeline: @unchecked Sendable {
         }
     }
 
-    /// 跑外部进程，非 0 退出抛错
-    private func run(_ bin: String, _ args: [String]) async throws {
+    /// 跑外部进程，非 0 退出抛错。带超时 terminate + stdout/stderr 持续 drain。
+    /// 不修这两个会出大事：whisper/ffmpeg 挂死则 continuation 永不 resume（任务永久卡死）；
+    /// stdout 大量输出无人读会写满 pipe 缓冲区(64KB)导致子进程阻塞。
+    private func run(_ bin: String, _ args: [String], timeout: TimeInterval = 600) async throws {
+        // 可变状态封装进 @unchecked Sendable 盒子，满足 @Sendable 闭包捕获要求
+        final class Box: @unchecked Sendable {
+            let lock = NSLock()
+            var errData = Data()
+            var resumed = false
+            var watchdog: DispatchWorkItem?
+            var resume: ((Result<Void, Error>) -> Void)?
+        }
+        let box = Box()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: bin)
             p.arguments = args
             let errPipe = Pipe()
+            let outPipe = Pipe()
             p.standardError = errPipe
-            p.standardOutput = Pipe()
-            p.terminationHandler = { proc in
-                if proc.terminationStatus == 0 {
-                    cont.resume()
-                } else {
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errStr = String(data: errData, encoding: .utf8) ?? ""
-                    cont.resume(throwing: TranscribeError.whisperFailed(
-                        "\(URL(fileURLWithPath: bin).lastPathComponent) exit \(proc.terminationStatus): \(errStr.suffix(200))"))
+            p.standardOutput = outPipe
+
+            // 持续 drain 两个 pipe，防缓冲区写满阻塞子进程；stderr 攒着报错用
+            errPipe.fileHandleForReading.readabilityHandler = { fh in
+                let chunk = fh.availableData
+                if !chunk.isEmpty { box.lock.lock(); box.errData.append(chunk); box.lock.unlock() }
+            }
+            outPipe.fileHandleForReading.readabilityHandler = { fh in
+                _ = fh.availableData   // stdout 丢弃，只 drain
+            }
+
+            box.resume = { result in
+                box.lock.lock()
+                if box.resumed { box.lock.unlock(); return }
+                box.resumed = true
+                box.lock.unlock()
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                switch result {
+                case .success: cont.resume()
+                case .failure(let e): cont.resume(throwing: e)
                 }
             }
-            do { try p.run() } catch { cont.resume(throwing: error) }
+
+            // 超时看门狗：到点强杀进程
+            box.watchdog = DispatchWorkItem {
+                if p.isRunning { p.terminate() }
+            }
+            if let wd = box.watchdog {
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: wd)
+            }
+
+            p.terminationHandler = { proc in
+                box.watchdog?.cancel()
+                let status = proc.terminationStatus
+                if status == 0 {
+                    box.resume?(.success(()))
+                } else {
+                    box.lock.lock(); let errStr = String(data: box.errData, encoding: .utf8) ?? ""; box.lock.unlock()
+                    let reason = proc.terminationReason == .uncaughtSignal ? "（超时/被终止）" : ""
+                    box.resume?(.failure(TranscribeError.whisperFailed(
+                        "\(URL(fileURLWithPath: bin).lastPathComponent) exit \(status)\(reason): \(errStr.suffix(200))")))
+                }
+            }
+            do { try p.run() } catch { box.watchdog?.cancel(); box.resume?(.failure(error)) }
         }
     }
 

@@ -18,6 +18,17 @@ final class LLMPipeline: @unchecked Sendable {
 
     var isAvailable: Bool { client.isAvailable }
 
+    /// R5 截断：头尾保留 + 中段裁剪，并在拼接处标注，避免尾部信息无声丢失。
+    static func truncateKeepEnds(_ text: String, maxChars: Int) -> String {
+        guard text.count > maxChars else { return text }
+        let headCount = Int(Double(maxChars) * 0.6)
+        let tailCount = Int(Double(maxChars) * 0.3)
+        let head = text.prefix(headCount)
+        let tail = text.suffix(tailCount)
+        let omitted = text.count - headCount - tailCount
+        return "\(head)\n\n[中段已省略 \(omitted) 字]\n\n\(tail)"
+    }
+
     // MARK: 评分（移植 rss-curation v4.0-pure 三维评分）
 
     static let scorePromptTemplate = """
@@ -72,8 +83,8 @@ final class LLMPipeline: @unchecked Sendable {
     @discardableResult
     func score(contentId: Int64, title: String, body: String) async -> Bool {
         guard isAvailable else { return false }
-        // 正文过长截断（评分不需要全文，控制 token）
-        let truncated = body.count > 12000 ? String(body.prefix(12000)) : body
+        // R5 正文截断：头尾保留+中段省略（评分不需全文，控制 token 且不丢尾部）
+        let truncated = Self.truncateKeepEnds(body, maxChars: 12000)
         let prompt = Self.scorePromptTemplate
             .replacingOccurrences(of: "{title}", with: title)
             .replacingOccurrences(of: "{content}", with: truncated)
@@ -96,9 +107,16 @@ final class LLMPipeline: @unchecked Sendable {
         guard let data = jsonStr.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         func int(_ k: String) -> Int { (obj[k] as? Int) ?? (obj[k] as? Double).map { Int($0) } ?? 0 }
-        let depth = int("depth"), quality = int("quality"), readability = int("readability")
+        // R5: 维度校验——LLM 偶发幻觉会输出超上限的分值（如 depth=95），导致总分失真。
+        // 各维度钳制到 prompt 约定的上限：depth≤40 / quality≤35 / readability≤25
+        let depth = min(max(int("depth"), 0), 40)
+        let quality = min(max(int("quality"), 0), 35)
+        let readability = min(max(int("readability"), 0), 25)
         var total = int("total")
-        if total == 0 { total = depth + quality + readability }
+        // total 不可信（可能超 100 或与分项不符）时以分项之和为准
+        let sum = depth + quality + readability
+        if total <= 0 || total > 100 || abs(total - sum) > 10 { total = sum }
+        total = min(max(total, 0), 100)
         let summary = (obj["summary"] as? String) ?? ""
         return ScoreResult(depth: depth, quality: quality, readability: readability, total: total, summary: summary)
     }
@@ -149,7 +167,7 @@ final class LLMPipeline: @unchecked Sendable {
     /// 生成摘要文本（不写库），供转录等管线复用。
     func summarizeRaw(title: String, body: String) async -> String? {
         guard isAvailable else { return nil }
-        let truncated = body.count > 12000 ? String(body.prefix(12000)) : body
+        let truncated = Self.truncateKeepEnds(body, maxChars: 12000)
         let prompt = """
         你是一位专注能源、矿业、宏观经济的独立研究者，同时对影视音乐、人文历史、科学科技有广泛兴趣。
         请为以下内容写一段中文摘要，要求：
@@ -176,7 +194,7 @@ final class LLMPipeline: @unchecked Sendable {
     /// 把任意文本翻译成目标语言，返回译文（不写库）。供转录管线复用。
     func translateRaw(_ text: String, targetLang: String = "中文") async -> String? {
         guard isAvailable else { return nil }
-        let truncated = text.count > 15000 ? String(text.prefix(15000)) : text
+        let truncated = Self.truncateKeepEnds(text, maxChars: 15000)
         let prompt = """
         你是一位专业的翻译。请将以下内容完整翻译成\(targetLang)，要求：
         - 保留原文的段落结构、数据、专有名词
@@ -201,7 +219,7 @@ final class LLMPipeline: @unchecked Sendable {
     @discardableResult
     func translate(contentId: Int64, title: String, body: String, targetLang: String = "中文") async -> Bool {
         guard isAvailable else { return false }
-        let truncated = body.count > 15000 ? String(body.prefix(15000)) : body
+        let truncated = Self.truncateKeepEnds(body, maxChars: 15000)
         let prompt = """
         你是一位专业的翻译。请将以下文章完整翻译成\(targetLang)，要求：
         - 保留原文的段落结构、数据、专有名词

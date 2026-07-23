@@ -173,6 +173,7 @@ final class CacheCleanupService: ObservableObject {
     }
 
     /// retention：归档超期已读 + 删除超期归档（保护星标/有标签）。用本服务的可配天数。
+    /// R4: 物理 DELETE 前先把待删内容备份到 Data/trash/（防误配天数导致大面积丢数据）。
     @discardableResult
     func runRetention() -> (archived: Int, deleted: Int) {
         db.execute("""
@@ -186,6 +187,8 @@ final class CacheCleanupService: ObservableObject {
 
         var deleted = 0
         if deleteAfterDays > 0 {
+            // 先备份待删内容，再删
+            backupBeforeDelete(days: deleteAfterDays)
             db.execute("""
                 DELETE FROM content
                 WHERE is_archived = 1 AND starred = 0
@@ -195,6 +198,39 @@ final class CacheCleanupService: ObservableObject {
             deleted = db.scalarInt("SELECT changes()") ?? 0
         }
         return (archived, deleted)
+    }
+
+    /// R4 删除回收站：把即将物理删除的内容导出成 JSONL 存 Data/trash/YYYYMMDD/，留作后悔药。
+    private func backupBeforeDelete(days: Int) {
+        let rows = db.queryRows("""
+            SELECT id, title, url, source, author, published_at, llm_summary, llm_score, content_md
+            FROM content
+            WHERE is_archived = 1 AND starred = 0
+              AND updated_at < datetime('now', '-\(days) days')
+              AND id NOT IN (SELECT content_id FROM content_tag);
+            """)
+        guard !rows.isEmpty else { return }
+        let stamp: String = {
+            let f = DateFormatter(); f.dateFormat = "yyyyMMdd"; return f.string(from: Date())
+        }()
+        let dir = NSHomeDirectory() + "/readboard/Data/trash/\(stamp)"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        var lines: [String] = []
+        for r in rows {
+            let obj: [String: Any?] = [
+                "id": r["id"].flatMap(Int.init), "title": r["title"], "url": r["url"],
+                "source": r["source"], "author": r["author"], "published_at": r["published_at"],
+                "llm_summary": r["llm_summary"], "llm_score": r["llm_score"].flatMap(Int.init),
+                "content_md": r["content_md"],
+            ]
+            let compact = obj.compactMapValues { $0 }
+            if let data = try? JSONSerialization.data(withJSONObject: compact),
+               let line = String(data: data, encoding: .utf8) {
+                lines.append(line)
+            }
+        }
+        let file = "\(dir)/deleted-\(Int(Date().timeIntervalSince1970)).jsonl"
+        try? lines.joined(separator: "\n").write(toFile: file, atomically: true, encoding: .utf8)
     }
 
     /// 清全文 HTML：已转 md 且未读未标未归档、超过 cleanHtmlAfterDays 天的，置空 content_html

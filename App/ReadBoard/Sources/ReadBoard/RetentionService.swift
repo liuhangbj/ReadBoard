@@ -34,31 +34,11 @@ final class RetentionService: ObservableObject {
     }
 
     /// 立即执行保留策略。返回 (归档数, 删除数)。
+    /// R4: 统一委托 CacheCleanupService.runRetention()——两处 SQL 完全重复会漂移，单一实现消除风险。
     @discardableResult
     func runNow() async -> (archived: Int, deleted: Int) {
-        // 1. 已读且超期的归档（保护星标/有标签）
-        db.execute("""
-            UPDATE content SET is_archived = 1
-            WHERE is_archived = 0 AND starred = 0
-              AND read_at IS NOT NULL
-              AND read_at < datetime('now', '-\(archiveAfterDays) days')
-              AND id NOT IN (SELECT content_id FROM content_tag);
-            """)
-        let archived = db.scalarInt("SELECT changes()") ?? 0
-
-        // 2. 归档超期的删除（保护星标/有标签；0 = 不删）
-        var deleted = 0
-        if deleteAfterDays > 0 {
-            db.execute("""
-                DELETE FROM content
-                WHERE is_archived = 1 AND starred = 0
-                  AND updated_at < datetime('now', '-\(deleteAfterDays) days')
-                  AND id NOT IN (SELECT content_id FROM content_tag);
-                """)
-            deleted = db.scalarInt("SELECT changes()") ?? 0
-        }
-
-        lastRunSummary = "保留策略：归档 \(archived)，删除 \(deleted)"
-        return (archived, deleted)
+        let result = CacheCleanupService.shared.runRetention()
+        lastRunSummary = "保留策略：归档 \(result.archived)，删除 \(result.deleted)"
+        return result
     }
 }

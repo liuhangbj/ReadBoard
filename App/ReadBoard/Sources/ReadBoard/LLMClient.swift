@@ -41,9 +41,20 @@ enum LLMConfig {
         return providers
     }
 
+    // NSLock 保护下的缓存，声明 nonisolated(unsafe) 豁免 Swift 6 全局可变状态检查
+    nonisolated(unsafe) private static var cachedDotEnv: [String: String]?
+    private static let dotEnvLock = NSLock()
+
     private static func loadDotEnv() -> [String: String] {
+        // R6: .env 解析结果缓存——chat 每次调用都走 activeProviders，不能每次都读盘解析
+        dotEnvLock.lock()
+        defer { dotEnvLock.unlock() }
+        if let cached = cachedDotEnv { return cached }
         let path = NSHomeDirectory() + "/agents/projects/rss-curation/.env"
-        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return [:] }
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+            cachedDotEnv = [:]
+            return [:]
+        }
         var dict: [String: String] = [:]
         for line in content.split(separator: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -54,6 +65,7 @@ enum LLMConfig {
             v = v.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
             dict[k] = v
         }
+        cachedDotEnv = dict
         return dict
     }
 }
@@ -102,14 +114,19 @@ final class LLMClient {
 
     var isAvailable: Bool { !activeProviders().isEmpty }
 
-    /// 按 fallback 链调用，返回首个非空结果
+    /// 按 fallback 链调用，返回首个非空结果。
+    /// R6 错误分类：
+    /// - 401/403（鉴权失败）：换 key 也没用——但同链其他 provider 是不同 key，可继续 fallback；
+    ///   若链上最后一个也 401/403，抛鉴权错误而不是笼统的 emptyResponse。
+    /// - 429（限流）：同 provider 退避重试 2 次（2s/5s）再 fallback 下一个。
+    /// - 网络错误/5xx/解析错误：直接 fallback 下一个。
     func chat(messages: [ChatMessage], temperature: Double = 0.3, maxTokens: Int = 4096) async throws -> (content: String, model: String) {
         let providers = activeProviders()
         guard !providers.isEmpty else { throw LLMError.noProvider }
         var lastError: Error = LLMError.emptyResponse
         for p in providers {
             do {
-                let text = try await call(p, messages: messages, temperature: temperature, maxTokens: maxTokens)
+                let text = try await callWithRateLimitRetry(p, messages: messages, temperature: temperature, maxTokens: maxTokens)
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     return (text, p.model)
                 }
@@ -121,15 +138,36 @@ final class LLMClient {
         throw lastError
     }
 
-    /// 测试连接：发一条最小请求验证 key/endpoint/model 可用，返回 (成功与否, 信息)
+    /// 429 限流时同 provider 退避重试（最多 2 次），其余错误直接抛出走 fallback
+    private func callWithRateLimitRetry(_ p: LLMProvider, messages: [ChatMessage], temperature: Double, maxTokens: Int) async throws -> String {
+        var delays: [UInt64] = [2_000_000_000, 5_000_000_000]  // 2s, 5s
+        while true {
+            do {
+                return try await call(p, messages: messages, temperature: temperature, maxTokens: maxTokens)
+            } catch LLMError.httpError(let code, _) where code == 429 && !delays.isEmpty {
+                let d = delays.removeFirst()
+                try? await Task.sleep(nanoseconds: d)
+                continue
+            }
+        }
+    }
+
+    /// 测试连接：只测设置页当前编辑的这条配置，不走 fallback 链
+    /// （走链的话 app 配置失效会被 .env 兜底掩盖，用户误以为自己的配置通了）
     func testConnection() async -> (Bool, String) {
         let s = LLMSettings.current()
         guard s.isValid else { return (false, "配置不完整：baseURL / apiKey / model 都要填") }
+        let p = LLMProvider(name: "app", endpoint: s.baseURL, apiKey: s.apiKey, model: s.model)
         do {
-            let (text, model) = try await chat(
-                messages: [ChatMessage(role: "user", content: "回复\"ok\"两个字即可")],
+            let text = try await call(
+                p, messages: [ChatMessage(role: "user", content: "回复\"ok\"两个字即可")],
                 temperature: 0, maxTokens: 10)
-            return (true, "连接成功（\(model)）：\(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(30))")
+            let preview = text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(30)
+            return (true, "连接成功（\(p.model)）：\(preview)")
+        } catch LLMError.httpError(let code, _) where code == 401 || code == 403 {
+            return (false, "鉴权失败（HTTP \(code)）：API Key 无效或无权限，请检查 Key")
+        } catch LLMError.httpError(let code, let body) where code == 429 {
+            return (false, "限流（HTTP 429）：额度不足或触发限流，稍后再试。\(body.prefix(100))")
         } catch {
             return (false, error.localizedDescription)
         }

@@ -347,49 +347,51 @@ final class SourceStore: ObservableObject {
     }
 
     /// 把一条 feed entry 写进 content（按 source+guid 去重 + 跨源内容去重），返回新插入的 content id（已存在返回 nil）
+    /// R3: 判重+插入包进事务——Timer 调度与手动同步并发时，原来的"先 SELECT 再 INSERT"两条语句间存在竞态会重复插入。
     private func upsertContent(source: String, sourceId: Int64, entry: ParsedEntry) -> Int64? {
-        // 同源同 guid 已存在则跳过
-        if let _ = db.scalarInt("SELECT id FROM content WHERE source = ? AND guid = ?",
-                                params: [source, entry.guid]) {
-            return nil
-        }
         let ctype: String
         if entry.meta["video_id"] != nil { ctype = "video" }
         else if entry.meta["audio_url"] != nil { ctype = "podcast" }
         else { ctype = "article" }
 
         // ── 跨源内容去重：url 规范化(去追踪参数) + 标题归一化 → content_hash ──
-        // 同一文章多源转载(公众号+官网+RSS聚合)会命中相同 hash。重复的不跳过,
-        // 标 is_duplicate + duplicate_of 保留溯源, 阅读层可选择隐藏重复。
         let normUrl = Self.normalizeUrl(entry.url)
         let normTitle = Self.normalizeTitle(entry.title)
         let hash = Self.contentHash(url: normUrl, title: normTitle)
-        var isDup = 0
-        var dupOf: Int64? = nil
-        if let existingId = db.scalarInt("SELECT id FROM content WHERE content_hash = ? AND is_duplicate = 0 LIMIT 1",
-                                         params: [hash]) {
-            isDup = 1
-            dupOf = Int64(existingId)
-        }
-
         let published = entry.published.map { ISO8601DateFormatter().string(from: $0) }
         let metaJson = (try? JSONSerialization.data(withJSONObject: entry.meta))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
 
-        let ok = db.execute(
-            """
-            INSERT INTO content (ctype, guid, source, source_id, title, author, url, published_at, content_html, fetch_status, meta, content_hash, is_duplicate, duplicate_of)
-            VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?)
-            """,
-            params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url, published, entry.html, metaJson, hash, isDup, dupOf.map { Int($0) }]
-        )
-        let newId = ok ? db.lastInsertId() : nil
-        // 新内容应用过滤规则（归档/标已读/加星/打标签）
-        if let cid = newId {
-            FilterService.shared.applyRules(contentId: cid, sourceId: sourceId,
-                title: entry.title, content: entry.html, author: entry.author ?? "", url: entry.url)
+        var newId: Int64? = nil
+        // 事务内完成"查重 + 判 dup + 插入"，并发下不会出现两条重复主记录
+        let committed = db.transaction {
+            // 同源同 guid 已存在则跳过
+            if let _ = self.db.scalarInt("SELECT id FROM content WHERE source = ? AND guid = ?",
+                                         params: [source, entry.guid]) {
+                return true   // 已存在，提交空事务返回 nil
+            }
+            var isDup = 0
+            var dupOf: Int64? = nil
+            if let existingId = self.db.scalarInt("SELECT id FROM content WHERE content_hash = ? AND is_duplicate = 0 LIMIT 1",
+                                                  params: [hash]) {
+                isDup = 1
+                dupOf = Int64(existingId)
+            }
+            let ok = self.db.execute(
+                """
+                INSERT INTO content (ctype, guid, source, source_id, title, author, url, published_at, content_html, fetch_status, meta, content_hash, is_duplicate, duplicate_of)
+                VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?)
+                """,
+                params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url, published, entry.html, metaJson, hash, isDup, dupOf.map { Int($0) }]
+            )
+            if ok { newId = self.db.lastInsertId() }
+            return ok
         }
-        return newId
+        guard committed, let cid = newId else { return nil }
+        // 新内容应用过滤规则（归档/标已读/加星/打标签）——事务外，不影响原子性
+        FilterService.shared.applyRules(contentId: cid, sourceId: sourceId,
+            title: entry.title, content: entry.html, author: entry.author ?? "", url: entry.url)
+        return cid
     }
 
     // MARK: 内容去重辅助
