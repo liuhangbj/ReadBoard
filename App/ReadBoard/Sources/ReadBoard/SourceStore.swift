@@ -34,6 +34,7 @@ struct FeedSource: Identifiable, Hashable {
     let lastFetchedAt: String?
     let error: String?
     let config: String         // JSON 原文
+    let folderId: Int64?       // 所属文件夹，nil = 未分组
 
     var policy: PipelinePolicy { PipelinePolicy.from(configJson: config) }
 
@@ -41,11 +42,22 @@ struct FeedSource: Identifiable, Hashable {
     var transcribable: Bool { stype == "podcast" || stype == "youtube" }
 }
 
+// MARK: - 文件夹
+
+struct Folder: Identifiable, Hashable {
+    let id: Int64
+    let name: String
+    let config: String
+
+    var policy: PipelinePolicy { PipelinePolicy.from(configJson: config) }
+}
+
 // MARK: - 订阅源管理（写入 + 抓取调度）
 
 @MainActor
 final class SourceStore: ObservableObject {
     @Published var sources: [FeedSource] = []
+    @Published var folders: [Folder] = []
     @Published var isSyncing = false
     @Published var lastSyncMessage = ""
 
@@ -53,6 +65,54 @@ final class SourceStore: ObservableObject {
 
     func reload() {
         sources = fetchAllSources()
+        folders = fetchAllFolders()
+    }
+
+    // MARK: 文件夹 CRUD
+
+    @discardableResult
+    func addFolder(name: String) -> Bool {
+        let ok = db.execute("INSERT OR IGNORE INTO folder (name) VALUES (?)", params: [name])
+        if ok { reload() }
+        return ok
+    }
+
+    func removeFolder(id: Int64) {
+        // 该文件夹下的源 folder_id 置 NULL(ON DELETE SET NULL 兜底, 这里显式置空)
+        db.execute("UPDATE content_source SET folder_id = NULL WHERE folder_id = ?", params: [id])
+        db.execute("DELETE FROM folder WHERE id = ?", params: [id])
+        reload()
+    }
+
+    func renameFolder(id: Int64, name: String) {
+        db.execute("UPDATE folder SET name = ? WHERE id = ?", params: [name, id])
+        reload()
+    }
+
+    /// 把源指派到文件夹(nil = 移出到未分组)
+    func assignSource(sourceId: Int64, folderId: Int64?) {
+        db.execute("UPDATE content_source SET folder_id = ? WHERE id = ?",
+                   params: [folderId.map { Int($0) }, sourceId])
+        reload()
+    }
+
+    /// 文件夹级管线开关
+    func setFolderPolicy(id: Int64, key: String, value: Bool) {
+        let current = db.scalarString("SELECT config FROM folder WHERE id = ?", params: [id]) ?? "{}"
+        var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+        obj[key] = value
+        if let data = try? JSONSerialization.data(withJSONObject: obj),
+           let str = String(data: data, encoding: .utf8) {
+            db.execute("UPDATE folder SET config = ? WHERE id = ?", params: [str, id])
+        }
+        reload()
+    }
+
+    /// 查某源的文件夹开关(供生效判定)
+    func folderPolicy(for source: FeedSource) -> PipelinePolicy {
+        guard let fid = source.folderId,
+              let f = folders.first(where: { $0.id == fid }) else { return PipelinePolicy() }
+        return f.policy
     }
 
     // MARK: 增删改
@@ -137,7 +197,7 @@ final class SourceStore: ObservableObject {
         guard db.open() else { return [] }
         var stmt: OpaquePointer?
         var list: [FeedSource] = []
-        let sql = "SELECT id, stype, name, identifier, enabled, last_fetched_at, error, config FROM content_source ORDER BY stype, name;"
+        let sql = "SELECT id, stype, name, identifier, enabled, last_fetched_at, error, config, folder_id FROM content_source ORDER BY stype, name;"
         // 直接走 Database 的底层句柄做只读遍历
         if prepareRead(sql, &stmt) {
             while sqlite3_step(stmt) == SQLITE_ROW {
@@ -149,7 +209,25 @@ final class SourceStore: ObservableObject {
                     enabled: sqlite3_column_int64(stmt, 4) == 1,
                     lastFetchedAt: columnText(stmt, 5),
                     error: columnText(stmt, 6),
-                    config: columnText(stmt, 7) ?? "{}"
+                    config: columnText(stmt, 7) ?? "{}",
+                    folderId: sqlite3_column_type(stmt, 8) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 8)
+                ))
+            }
+        }
+        sqlite3_finalize(stmt)
+        return list
+    }
+
+    private func fetchAllFolders() -> [Folder] {
+        guard db.open() else { return [] }
+        var stmt: OpaquePointer?
+        var list: [Folder] = []
+        if prepareRead("SELECT id, name, config FROM folder ORDER BY name;", &stmt) {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                list.append(Folder(
+                    id: sqlite3_column_int64(stmt, 0),
+                    name: columnText(stmt, 1) ?? "",
+                    config: columnText(stmt, 2) ?? "{}"
                 ))
             }
         }

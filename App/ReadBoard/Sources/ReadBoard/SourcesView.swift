@@ -5,6 +5,8 @@ import SwiftUI
 struct SourcesView: View {
     @StateObject private var store = SourceStore()
     @State private var showAddSheet = false
+    @State private var showAddFolder = false
+    @State private var newFolderName = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,6 +25,9 @@ struct SourcesView: View {
                         Label("全部刷新", systemImage: "arrow.clockwise")
                     }
                 }
+                Button { showAddFolder = true } label: {
+                    Label("文件夹", systemImage: "folder.badge.plus")
+                }
                 Button { showAddSheet = true } label: {
                     Label("添加", systemImage: "plus")
                 }
@@ -40,10 +45,26 @@ struct SourcesView: View {
 
             Divider()
 
-            // 源列表
+            // 源列表（文件夹 → 源 两级分组）
             List {
-                ForEach(store.sources) { src in
-                    SourceRow(src: src, store: store)
+                // 各文件夹分组
+                ForEach(store.folders) { folder in
+                    Section {
+                        ForEach(sources(in: folder.id)) { src in
+                            SourceRow(src: src, store: store)
+                        }
+                    } header: {
+                        FolderHeader(folder: folder, store: store)
+                    }
+                }
+                // 未分组
+                let ungrouped = sources(in: nil)
+                if !ungrouped.isEmpty {
+                    Section(store.folders.isEmpty ? "全部源" : "未分组") {
+                        ForEach(ungrouped) { src in
+                            SourceRow(src: src, store: store)
+                        }
+                    }
                 }
             }
             .listStyle(.inset)
@@ -52,6 +73,59 @@ struct SourcesView: View {
         .sheet(isPresented: $showAddSheet) {
             AddSourceSheet(store: store)
         }
+        .alert("新建文件夹", isPresented: $showAddFolder) {
+            TextField("文件夹名称", text: $newFolderName)
+            Button("取消", role: .cancel) { newFolderName = "" }
+            Button("创建") {
+                if !newFolderName.trimmingCharacters(in: .whitespaces).isEmpty {
+                    store.addFolder(name: newFolderName.trimmingCharacters(in: .whitespaces))
+                }
+                newFolderName = ""
+            }
+        }
+    }
+
+    /// 某文件夹下的源(nil = 未分组)
+    private func sources(in folderId: Int64?) -> [FeedSource] {
+        store.sources.filter { $0.folderId == folderId }
+    }
+}
+
+// MARK: 文件夹分组头（含文件夹级管线总开关）
+
+struct FolderHeader: View {
+    let folder: Folder
+    @ObservedObject var store: SourceStore
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "folder.fill")
+                .foregroundStyle(.secondary)
+            Text(folder.name)
+                .font(.headline)
+            Spacer()
+            // 文件夹级总开关(开 = 该组全生效)
+            folderToggle("打分", key: "auto_score", on: folder.policy.autoScore)
+            folderToggle("翻译", key: "auto_translate", on: folder.policy.autoTranslate)
+            folderToggle("摘要", key: "auto_summarize", on: folder.policy.autoSummarize)
+            folderToggle("转录", key: "auto_transcribe", on: folder.policy.autoTranscribe)
+            Button(role: .destructive) { store.removeFolder(id: folder.id) } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+        }
+        .textCase(nil)
+    }
+
+    private func folderToggle(_ label: String, key: String, on: Bool) -> some View {
+        Toggle(label, isOn: Binding(
+            get: { on },
+            set: { store.setFolderPolicy(id: folder.id, key: key, value: $0) }
+        ))
+        .toggleStyle(.checkbox)
+        .font(.caption)
+        .controlSize(.small)
     }
 }
 
@@ -84,18 +158,35 @@ struct SourceRow: View {
                         Text(err).font(.caption2).foregroundStyle(.red).lineLimit(1)
                     }
                 }
-                // ── 管线开关 ──
+                // ── 管线开关（生效 = 源 OR 文件夹；文件夹已开的项标蓝）──
                 HStack(spacing: 14) {
-                    pipelineToggle("打分", key: "auto_score", on: src.policy.autoScore)
-                    pipelineToggle("翻译", key: "auto_translate", on: src.policy.autoTranslate)
-                    pipelineToggle("摘要", key: "auto_summarize", on: src.policy.autoSummarize)
+                    pipelineToggle("打分", key: "auto_score", on: src.policy.autoScore, inherited: fp.autoScore)
+                    pipelineToggle("翻译", key: "auto_translate", on: src.policy.autoTranslate, inherited: fp.autoTranslate)
+                    pipelineToggle("摘要", key: "auto_summarize", on: src.policy.autoSummarize, inherited: fp.autoSummarize)
                     if src.transcribable {
-                        pipelineToggle("转录", key: "auto_transcribe", on: src.policy.autoTranscribe)
+                        pipelineToggle("转录", key: "auto_transcribe", on: src.policy.autoTranscribe, inherited: fp.autoTranscribe)
                     }
                 }
                 .padding(.top, 2)
             }
             Spacer()
+            // 指派到文件夹
+            Menu {
+                Button("未分组") { store.assignSource(sourceId: src.id, folderId: nil) }
+                Divider()
+                ForEach(store.folders) { f in
+                    Button {
+                        store.assignSource(sourceId: src.id, folderId: f.id)
+                    } label: {
+                        if src.folderId == f.id { Label(f.name, systemImage: "checkmark") }
+                        else { Text(f.name) }
+                    }
+                }
+            } label: {
+                Image(systemName: "folder")
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 24)
             Toggle("", isOn: Binding(
                 get: { src.enabled },
                 set: { store.setEnabled(id: src.id, enabled: $0) }
@@ -109,8 +200,11 @@ struct SourceRow: View {
         .padding(.vertical, 4)
     }
 
-    /// 单个管线开关（打分/翻译/转录）
-    private func pipelineToggle(_ label: String, key: String, on: Bool) -> some View {
+    /// 该源所属文件夹的开关（用于"已继承"高亮）
+    private var fp: PipelinePolicy { store.folderPolicy(for: src) }
+
+    /// 单个管线开关（打分/翻译/转录）。inherited=true 表示文件夹层已开，标蓝提示。
+    private func pipelineToggle(_ label: String, key: String, on: Bool, inherited: Bool) -> some View {
         Toggle(label, isOn: Binding(
             get: { on },
             set: { store.setPolicy(id: src.id, key: key, value: $0) }
@@ -118,6 +212,8 @@ struct SourceRow: View {
         .toggleStyle(.checkbox)
         .font(.caption)
         .controlSize(.small)
+        .foregroundStyle(inherited ? .blue : .primary)
+        .help(inherited ? "文件夹层已开启此项，对本源生效" : "")
     }
 
     private var icon: String {
