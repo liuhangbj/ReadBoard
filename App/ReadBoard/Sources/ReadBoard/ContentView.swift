@@ -288,6 +288,9 @@ struct ReadingView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+                // ── 标签行 ──
+                TagEditorView(contentId: item.id)
+
                 // ── LLM 操作条 ──
                 HStack(spacing: 10) {
                     // 转录不依赖 LLM key（whisper 本地），单独判断
@@ -461,4 +464,46 @@ struct ReadingView: View {
 
 extension Notification.Name {
     static let contentUpdated = Notification.Name("contentUpdated")
+}
+
+// MARK: - 标签编辑（阅读区）
+// 显示当前内容标签 + 输入新标签(回车添加) + 点标签移除
+
+struct TagEditorView: View {
+    let contentId: Int64
+    @State private var tags: [Tag] = []
+    @State private var input = ""
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "tag").foregroundStyle(.secondary).font(.caption)
+            ForEach(tags) { tag in
+                Text(tag.name)
+                    .font(.caption)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(.blue.opacity(0.15)).foregroundStyle(.blue)
+                    .clipShape(Capsule())
+                    .onTapGesture {
+                        TagService.shared.untag(contentId: contentId, tagId: tag.id)
+                        reload()
+                    }
+                    .help("点击移除")
+            }
+            TextField("加标签", text: $input)
+                .textFieldStyle(.plain)
+                .font(.caption)
+                .frame(minWidth: 60)
+                .onSubmit {
+                    let t = input.trimmingCharacters(in: .whitespaces)
+                    if !t.isEmpty {
+                        TagService.shared.tag(contentId: contentId, tagName: t)
+                        input = ""
+                        reload()
+                    }
+                }
+        }
+        .onAppear { reload() }
+    }
+
+    private func reload() { tags = TagService.shared.tagsFor(contentId: contentId) }
 }

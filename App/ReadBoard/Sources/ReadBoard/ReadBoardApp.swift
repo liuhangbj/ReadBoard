@@ -37,6 +37,9 @@ struct RootView: View {
             SettingsView()
                 .tabItem { Label("设置", systemImage: "gearshape") }
                 .tag(2)
+            ManageView()
+                .tabItem { Label("管理", systemImage: "chart.bar.doc.horizontal") }
+                .tag(3)
         }
     }
 }
