@@ -391,6 +391,10 @@ public struct CleanupPane: View {
                 Text("星标 / 有标签的内容任何清理都不动。物理删除前会导出 JSONL 到 Data/trash/ 回收站。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+
+            Section("数据库备份 / 恢复") {
+                BackupRestoreView()
+            }
         }
         .formStyle(.grouped)
         .navigationTitle("缓存清理")
@@ -402,5 +406,87 @@ public struct CleanupPane: View {
             cleanHtmlDays = cleanup.cleanHtmlAfterDays
             cleanup.refreshStats()
         }
+    }
+}
+
+// MARK: - 备份/恢复（嵌进缓存清理页底部）
+
+public struct BackupRestoreView: View {
+    @State private var backups: [BackupInfo] = []
+    @State private var selectedBackup: BackupInfo? = nil
+    @State private var showRestoreConfirm = false
+    @State private var message: String = ""
+    @State private var busy = false
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button(busy ? "备份中…" : "立即备份") {
+                    busy = true
+                    message = ""
+                    Task {
+                        await BackupService.shared.backupNow()
+                        await MainActor.run {
+                            message = BackupService.shared.lastBackupError == nil
+                                ? "✅ 已备份：\(BackupService.shared.lastBackupAt ?? "")"
+                                : "❌ 备份失败：\(BackupService.shared.lastBackupError ?? "")"
+                            busy = false
+                            reload()
+                        }
+                    }
+                }
+                .controlSize(.small)
+                .disabled(busy)
+                Spacer()
+            }
+
+            if backups.isEmpty {
+                Text("暂无本地备份")
+                    .font(.caption).foregroundStyle(.tertiary)
+            } else {
+                Picker("选择备份", selection: $selectedBackup) {
+                    Text("未选择").tag(nil as BackupInfo?)
+                    ForEach(backups) { b in
+                        Text(b.displayName).tag(b as BackupInfo?)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .font(.caption)
+
+                Button("恢复所选备份…") {
+                    showRestoreConfirm = true
+                }
+                .controlSize(.small)
+                .disabled(selectedBackup == nil)
+                .foregroundStyle(.red)
+            }
+
+            if !message.isEmpty {
+                Text(message).font(.caption)
+            }
+            Text("恢复前会自动给当前库做一次安全备份。恢复完成后需重启 App。")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .onAppear(perform: reload)
+        .alert("确认恢复？", isPresented: $showRestoreConfirm) {
+            Button("取消", role: .cancel) {}
+            Button("恢复并退出 App", role: .destructive) {
+                guard let b = selectedBackup else { return }
+                do {
+                    try BackupService.shared.restore(from: b.path)
+                    // 恢复后连接句柄已失效，直接退出让用户重开
+                    NSApp.terminate(nil)
+                } catch {
+                    message = "❌ 恢复失败：\(error.localizedDescription)"
+                }
+            }
+        } message: {
+            Text("将用 \(selectedBackup?.displayName ?? "") 替换当前数据库。\n当前库会先自动备份，可随时再换回来。")
+        }
+    }
+
+    private func reload() {
+        backups = BackupService.shared.listBackups()
     }
 }

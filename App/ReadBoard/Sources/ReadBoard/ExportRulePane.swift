@@ -121,10 +121,12 @@ public struct ExportRuleEditor: View {
     let onSave: (ExportRule) -> Void
     @Environment(\.dismiss) private var dismiss
 
+    @StateObject private var sourceStore = SourceStore.shared
     @State private var minScoreText = ""
     @State private var dir = ""
     @State private var bySource = false
     @State private var webhookURL = ""
+    @State private var selectedSourceIds: Set<Int64> = []
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -151,6 +153,49 @@ public struct ExportRuleEditor: View {
                             .onChange(of: minScoreText) { _, v in
                                 rule.criteria.minScore = Int(v)
                             }
+                    }
+                    // 限定来源（不选 = 全部源）
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("限定来源")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if sourceStore.sources.isEmpty {
+                            Text("（暂无订阅源）")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                        } else {
+                            Menu {
+                                ForEach(sourceStore.sources) { src in
+                                    Button {
+                                        if selectedSourceIds.contains(src.id) {
+                                            selectedSourceIds.remove(src.id)
+                                        } else {
+                                            selectedSourceIds.insert(src.id)
+                                        }
+                                        rule.criteria.sourceIds = selectedSourceIds.isEmpty ? nil : Array(selectedSourceIds)
+                                    } label: {
+                                        HStack {
+                                            Text(src.name)
+                                            if selectedSourceIds.contains(src.id) {
+                                                Image(systemName: "checkmark")
+                                            }
+                                        }
+                                    }
+                                }
+                                if !selectedSourceIds.isEmpty {
+                                    Divider()
+                                    Button("清除全部") {
+                                        selectedSourceIds.removeAll()
+                                        rule.criteria.sourceIds = nil
+                                    }
+                                }
+                            } label: {
+                                Text(selectedSourceIds.isEmpty
+                                     ? "全部源"
+                                     : "已选 \(selectedSourceIds.count) 个源")
+                                    .font(.caption)
+                            }
+                            .menuStyle(.borderlessButton)
+                        }
                     }
                     Toggle("只导已翻译的", isOn: $rule.criteria.requireTranslated)
                     Toggle("只导已转录的（播客/视频）", isOn: $rule.criteria.requireTranscribed)
@@ -195,6 +240,8 @@ public struct ExportRuleEditor: View {
             dir = rule.targetConfig["dir"] as? String ?? ""
             bySource = rule.targetConfig["subdir_by_source"] as? Bool ?? false
             webhookURL = rule.targetConfig["url"] as? String ?? ""
+            selectedSourceIds = Set(rule.criteria.sourceIds ?? [])
+            if sourceStore.sources.isEmpty { sourceStore.reload() }
         }
     }
 

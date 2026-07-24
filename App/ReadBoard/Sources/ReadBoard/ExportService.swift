@@ -217,17 +217,35 @@ public final class ExportService: @unchecked Sendable {
         md += "# \(c.title)\n\n"
         if let sum = c.summary, !sum.isEmpty { md += "> \(sum)\n\n" }
         // 正文优先级：译文（含转录稿，TranscribePipeline 写入此字段）> 原文
+        // 剥嵌套 frontmatter：内容本身若带 --- 头（Defuddle/抓取器有时会留），
+        // 否则 Obsidian 会把内层 --- 当正文分隔，渲染出双重 frontmatter。
         if let t = c.translated, !t.isEmpty {
+            let tClean = Self.stripLeadingFrontmatter(t)
             if let orig = c.contentMd, !orig.isEmpty {
-                md += t + "\n\n---\n\n## 原文\n\n" + orig
+                md += tClean + "\n\n---\n\n## 原文\n\n" + Self.stripLeadingFrontmatter(orig)
             } else {
-                md += t
+                md += tClean
             }
         } else {
-            md += c.contentMd ?? ""
+            md += Self.stripLeadingFrontmatter(c.contentMd ?? "")
         }
         md += "\n\n[原文链接](\(c.url))\n"
         return md
+    }
+
+    /// 去掉正文开头的 YAML frontmatter 块（--- ... ---），防止导出后双重 frontmatter
+    static func stripLeadingFrontmatter(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("---") else { return text }
+        // 找第二个独立成行的 ---
+        var lines = trimmed.components(separatedBy: "\n")
+        guard lines.count > 2 else { return text }
+        lines.removeFirst()  // 开头的 ---
+        if let end = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" }) {
+            let body = lines[(end + 1)...].joined(separator: "\n")
+            return body.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
     }
 
     private func deliver(rule: ExportRule, c: ExportContent) async -> (Bool, String?, String?) {
@@ -237,7 +255,7 @@ public final class ExportService: @unchecked Sendable {
             guard let dir = rule.targetConfig["dir"] as? String, !dir.isEmpty else {
                 return (false, nil, "目标目录未配置")
             }
-            return writeMarkdown(md: md, title: c.title, source: c.source,
+            return writeMarkdown(md: md, title: c.title, source: c.source, contentId: c.id,
                                  dir: dir, bySource: rule.targetConfig["subdir_by_source"] as? Bool ?? false)
         case "webhook":
             guard let urlStr = rule.targetConfig["url"] as? String, let url = URL(string: urlStr) else {
@@ -250,7 +268,7 @@ public final class ExportService: @unchecked Sendable {
         }
     }
 
-    private func writeMarkdown(md: String, title: String, source: String, dir: String, bySource: Bool) -> (Bool, String?, String?) {
+    private func writeMarkdown(md: String, title: String, source: String, contentId: Int64, dir: String, bySource: Bool) -> (Bool, String?, String?) {
         let fm = FileManager.default
         var targetDir = dir
         if bySource && !source.isEmpty {
@@ -258,8 +276,15 @@ public final class ExportService: @unchecked Sendable {
         }
         do {
             try fm.createDirectory(atPath: targetDir, withIntermediateDirectories: true)
-            let filename = Self.sanitizeFilename(title).prefix(80) + ".md"
-            let path = targetDir + "/" + filename
+            // 同名不同内容防互相覆盖：先按纯标题写，若已存在且内容不同则追加 contentId
+            let base = String(Self.sanitizeFilename(title).prefix(80))
+            var filename = base + ".md"
+            var path = targetDir + "/" + filename
+            if fm.fileExists(atPath: path),
+               let existing = try? String(contentsOfFile: path, encoding: .utf8), existing != md {
+                filename = "\(base)-\(contentId).md"
+                path = targetDir + "/" + filename
+            }
             try md.write(toFile: path, atomically: true, encoding: .utf8)
             return (true, path, nil)
         } catch {
@@ -277,13 +302,24 @@ public final class ExportService: @unchecked Sendable {
             "score": content.score ?? 0, "markdown": md,
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-        do {
-            let (_, resp) = try await URLSession.shared.data(for: req)
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-            return (200..<300).contains(code) ? (true, "HTTP \(code)", nil) : (false, nil, "HTTP \(code)")
-        } catch {
-            return (false, nil, error.localizedDescription)
+        // 重试 3 次（1s/3s 退避）：网络抖动/临时 5xx 不至于丢导出
+        var lastErr = "未知错误"
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(attempt == 1 ? 1_000_000_000 : 3_000_000_000))
+            }
+            do {
+                let (_, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                if (200..<300).contains(code) { return (true, "HTTP \(code)", nil) }
+                lastErr = "HTTP \(code)"
+                // 4xx（除 429）是请求本身问题，重试无意义
+                if (400..<500).contains(code), code != 429 { break }
+            } catch {
+                lastErr = error.localizedDescription
+            }
         }
+        return (false, nil, lastErr)
     }
 
     /// 文件名清洗：去掉路径分隔符和文件系统保留字符

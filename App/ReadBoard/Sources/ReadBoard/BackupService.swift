@@ -1,9 +1,24 @@
 import Foundation
 import SQLite3
 
-// MARK: - SQLite 自动备份
+// MARK: - SQLite 自动备份 + 恢复
 // 805MB 单文件是单点风险。用 SQLite 在线备份 API(热备不锁库)周期备份到 Data/backups/，
 // 保留最近 N 份，滚动清理。启动时跑一次 + 每日一次。
+// 恢复：先校验候选文件合法性（能打开 + 有 content 表），再安全备份当前库后整体替换。
+
+public struct BackupInfo: Identifiable, Hashable {
+    public let id = UUID()
+    let path: String
+    let date: Date
+    let sizeBytes: Int64
+
+    var displayName: String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd HH:mm"
+        let sizeMB = String(format: "%.1f MB", Double(sizeBytes) / 1_048_576.0)
+        return "\(fmt.string(from: date))  (\(sizeMB))"
+    }
+}
 
 @MainActor
 public final class BackupService: ObservableObject {
@@ -91,6 +106,94 @@ public final class BackupService: ObservableObject {
                 } else {
                     cont.resume(throwing: BackupError.stepFailed(rc))
                 }
+            }
+        }
+    }
+
+    /// 列出已有备份（按文件名时间倒序）
+    nonisolated func listBackups() -> [BackupInfo] {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: backupDir)
+            .filter({ $0.hasPrefix("readboard-") && $0.hasSuffix(".db") })
+            .sorted().reversed() else { return [] }
+        return files.compactMap { f in
+            let p = backupDir + "/" + f
+            guard let attrs = try? fm.attributesOfItem(atPath: p) else { return nil }
+            return BackupInfo(path: p,
+                              date: attrs[.modificationDate] as? Date ?? Date.distantPast,
+                              sizeBytes: (attrs[.size] as? Int64) ?? 0)
+        }
+    }
+
+    /// 校验候选 db：能打开 + 有 content 表（只读，不动原文件）
+    nonisolated func validate(candidate path: String) -> Bool {
+        var h: OpaquePointer?
+        guard sqlite3_open_v2(path, &h, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_close(h) }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(h, "SELECT name FROM sqlite_master WHERE type='table' AND name='content';",
+                                 -1, &stmt, nil) == SQLITE_OK else { return false }
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    /// 恢复：当前库先自动安全备份（restore-from-xxx），再用候选文件整体替换。
+    /// 成功后调用方应退出 App（连接句柄已失效）。
+    func restore(from candidatePath: String) throws {
+        guard validate(candidate: candidatePath) else {
+            throw RestoreError.invalidCandidate
+        }
+        // 1. 当前库安全备份（万一恢复错了还能回来）
+        do {
+            let dest = "\(backupDir)/readboard-restore-from-\(Self.stamp()).db"
+            try fm.createDirectory(atPath: backupDir, withIntermediateDirectories: true)
+            // 同步版在线备份（恢复期间阻塞可接受，保证安全备份完成再替换）
+            try Self.onlineBackupSync(source: dbPath, dest: dest)
+        } catch {
+            throw RestoreError.safetyBackupFailed(error.localizedDescription)
+        }
+        // 2. 关连接，替换文件
+        Database.shared.close()
+        do {
+            // 删掉 wal/shm（候选是完整主文件，残留 wal 会造成错乱）
+            for suffix in ["-wal", "-shm"] {
+                try? fm.removeItem(atPath: dbPath + suffix)
+            }
+            try fm.removeItem(atPath: dbPath)
+            try fm.copyItem(atPath: candidatePath, toPath: dbPath)
+        } catch {
+            throw RestoreError.replaceFailed(error.localizedDescription)
+        }
+    }
+
+    private var fm: FileManager { FileManager.default }
+
+    /// 同步版在线备份（restore 前安全备份用，保证完成后再替换）
+    private static func onlineBackupSync(source: String, dest: String) throws {
+        var srcDB: OpaquePointer?
+        var dstDB: OpaquePointer?
+        guard sqlite3_open_v2(source, &srcDB, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+              sqlite3_open_v2(dest, &dstDB, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
+            throw BackupError.openFailed
+        }
+        defer { sqlite3_close(srcDB); sqlite3_close(dstDB) }
+        guard let backup = sqlite3_backup_init(dstDB, "main", srcDB, "main") else {
+            throw BackupError.initFailed
+        }
+        let rc = sqlite3_backup_step(backup, -1)
+        sqlite3_backup_finish(backup)
+        if rc != SQLITE_DONE { throw BackupError.stepFailed(rc) }
+    }
+
+    enum RestoreError: Error, LocalizedError {
+        case invalidCandidate
+        case safetyBackupFailed(String)
+        case replaceFailed(String)
+        var errorDescription: String? {
+            switch self {
+            case .invalidCandidate: return "所选文件不是合法的 readboard 数据库（缺少 content 表）"
+            case .safetyBackupFailed(let m): return "恢复前安全备份失败：\(m)"
+            case .replaceFailed(let m): return "文件替换失败：\(m)"
             }
         }
     }
