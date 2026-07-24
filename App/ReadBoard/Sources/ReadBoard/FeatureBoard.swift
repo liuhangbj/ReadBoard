@@ -116,7 +116,7 @@ public struct LLMSettings {
 
     static let presets: [Preset] = [
         Preset(id: "deepseek", name: "DeepSeek",
-               baseURL: "https://api.deepseek.com/v1/chat/completions", defaultModel: "deepseek-chat"),
+               baseURL: "https://api.deepseek.com/v1/chat/completions", defaultModel: "deepseek-v4-flash"),
         Preset(id: "kimi", name: "Kimi (Moonshot)",
                baseURL: "https://api.moonshot.cn/v1/chat/completions", defaultModel: "kimi-k2-0905-preview"),
         Preset(id: "openai", name: "OpenAI",

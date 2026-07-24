@@ -20,7 +20,7 @@ public enum LLMConfig {
         if let key = ProcessInfo.processInfo.environment["READBOARD_LLM_KEY"], !key.isEmpty {
             let ep = ProcessInfo.processInfo.environment["READBOARD_LLM_ENDPOINT"]
                 ?? "https://api.deepseek.com/v1/chat/completions"
-            let model = ProcessInfo.processInfo.environment["READBOARD_LLM_MODEL"] ?? "deepseek-chat"
+            let model = ProcessInfo.processInfo.environment["READBOARD_LLM_MODEL"] ?? "deepseek-v4-flash"
             providers.append(LLMProvider(name: "custom", endpoint: ep, apiKey: key, model: model))
             return providers
         }
@@ -29,7 +29,7 @@ public enum LLMConfig {
             providers.append(LLMProvider(
                 name: "deepseek",
                 endpoint: "https://api.deepseek.com/v1/chat/completions",
-                apiKey: key, model: "deepseek-chat"))
+                apiKey: key, model: "deepseek-v4-flash"))
         }
         // Kimi 作为备选（若有）
         if let key = env["KIMI_API_KEY"], !key.isEmpty {
