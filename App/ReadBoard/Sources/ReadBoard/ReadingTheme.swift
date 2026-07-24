@@ -53,7 +53,7 @@ enum ReadingTheme: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var displayName: String {
         switch self {
-        case .claude: return "Claude"
+        case .claude: return "Primary"
         case .things: return "Things"
         case .systemDefault: return "系统默认"
         }
@@ -62,33 +62,36 @@ enum ReadingTheme: String, CaseIterable, Identifiable {
     var palette: ThemePalette {
         switch self {
         case .claude:
-            // Claude 风格：暖白纸感 + 深棕灰 + 赭橙 accent + 衬线标题
+            // Primary 主题（ceciliamay/obsidian-primary 浅色，Obsidian October 2021 最佳主题）
+            // 设计语言：Bauhaus 红黄蓝 + 泛黄复古杂志页 + 斯堪的纳维亚暖木。
+            // 语义色（作者原话）：italics 蓝、bold 红、links 黄——
+            // "italics felt blue, bold felt red, and links felt yellow"
             return ThemePalette(
-                background: Color(red: 0.976, green: 0.965, blue: 0.949),   // #F9F6F2
-                backgroundAlt: Color(red: 0.945, green: 0.929, blue: 0.902), // #F1EDE6
-                codeBackground: Color(red: 0.937, green: 0.922, blue: 0.894),
-                inlineCodeBackground: Color(red: 0.92, green: 0.90, blue: 0.87),
-                text: Color(red: 0.208, green: 0.184, blue: 0.161),          // #352F29
-                textSecondary: Color(red: 0.42, green: 0.39, blue: 0.35),
-                textFaint: Color(red: 0.58, green: 0.55, blue: 0.51),
-                h1: Color(red: 0.15, green: 0.13, blue: 0.11),
-                h2: Color(red: 0.22, green: 0.19, blue: 0.16),
-                h3: Color(red: 0.30, green: 0.26, blue: 0.22),
-                h4: Color(red: 0.38, green: 0.34, blue: 0.29),
-                bold: Color(red: 0.62, green: 0.28, blue: 0.14),             // 赭棕
-                italic: Color(red: 0.50, green: 0.32, blue: 0.22),
-                inlineCode: Color(red: 0.65, green: 0.30, blue: 0.16),
-                link: Color(red: 0.72, green: 0.33, blue: 0.18),             // 赭橙
-                quoteBorder: Color(red: 0.72, green: 0.35, blue: 0.20),
-                quoteText: Color(red: 0.40, green: 0.36, blue: 0.31),
-                listMarker: Color(red: 0.72, green: 0.35, blue: 0.20),
-                divider: Color(red: 0.80, green: 0.77, blue: 0.73),
-                codeText: Color(red: 0.25, green: 0.22, blue: 0.19),
-                codeKeyword: Color(red: 0.62, green: 0.25, blue: 0.30),
-                codeString: Color(red: 0.35, green: 0.50, blue: 0.25),
-                codeComment: Color(red: 0.55, green: 0.52, blue: 0.48),
-                codeNumber: Color(red: 0.65, green: 0.45, blue: 0.15),
-                headingSerif: true
+                background: Color(red: 0.965, green: 0.945, blue: 0.894),    // #F6F1E4 泛黄杂志底
+                backgroundAlt: Color(red: 0.937, green: 0.910, blue: 0.847), // #EFE8D8 稍深
+                codeBackground: Color(red: 0.929, green: 0.898, blue: 0.831),
+                inlineCodeBackground: Color(red: 0.910, green: 0.878, blue: 0.812),
+                text: Color(red: 0.286, green: 0.247, blue: 0.208),          // #493F35 暖深棕
+                textSecondary: Color(red: 0.482, green: 0.435, blue: 0.376), // 暖中灰
+                textFaint: Color(red: 0.639, green: 0.596, blue: 0.533),     // 暖浅灰
+                h1: Color(red: 0.220, green: 0.184, blue: 0.149),            // 近黑暖棕
+                h2: Color(red: 0.769, green: 0.263, blue: 0.220),            // 红 #C44338（bold 红系延伸）
+                h3: Color(red: 0.227, green: 0.471, blue: 0.678),            // 蓝 #3A78AD（italic 蓝系延伸）
+                h4: Color(red: 0.788, green: 0.596, blue: 0.180),            // 黄 #C9982E（link 黄系延伸）
+                bold: Color(red: 0.769, green: 0.263, blue: 0.220),          // bold 红 #C44338
+                italic: Color(red: 0.227, green: 0.471, blue: 0.678),        // italic 蓝 #3A78AD
+                inlineCode: Color(red: 0.769, green: 0.263, blue: 0.220),    // 行内代码红
+                link: Color(red: 0.788, green: 0.596, blue: 0.180),          // link 黄 #C9982E
+                quoteBorder: Color(red: 0.227, green: 0.471, blue: 0.678),   // 引用蓝
+                quoteText: Color(red: 0.435, green: 0.384, blue: 0.322),
+                listMarker: Color(red: 0.769, green: 0.263, blue: 0.220),    // 列表标记红
+                divider: Color(red: 0.839, green: 0.800, blue: 0.729),
+                codeText: Color(red: 0.286, green: 0.247, blue: 0.208),
+                codeKeyword: Color(red: 0.769, green: 0.263, blue: 0.220),   // keyword 红
+                codeString: Color(red: 0.345, green: 0.553, blue: 0.310),    // string 暖绿
+                codeComment: Color(red: 0.639, green: 0.596, blue: 0.533),   // comment 暖灰
+                codeNumber: Color(red: 0.788, green: 0.596, blue: 0.180),    // number 黄
+                headingSerif: true   // Primary 配衬线标题（杂志感）
             )
         case .things:
             // Things 主题（obsidian-things 深色）：named palette 直接抄
