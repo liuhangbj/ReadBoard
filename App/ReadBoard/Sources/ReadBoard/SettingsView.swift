@@ -59,6 +59,8 @@ public struct SettingsView: View {
 
 public struct GeneralPane: View {
     @State private var proxyInput: String = FeedFetcher.globalProxy ?? ""
+    @State private var archiveDirInput: String = ""
+    @State private var archivedCount = 0
 
     public var body: some View {
         Form {
@@ -68,6 +70,31 @@ public struct GeneralPane: View {
                     set: { SourceStore.shared.autoSyncEnabled = $0 }
                 ))
                 Text("关闭后只能手动点「全部刷新」抓 feed")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("完成归档（最终 md 落盘）") {
+                TextField("归档目录（默认 ~/readboard/archive）", text: $archiveDirInput)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        let v = archiveDirInput.trimmingCharacters(in: .whitespaces)
+                        UserDefaults.standard.set(v.isEmpty ? nil : v, forKey: "archive.dir")
+                        refreshArchiveStats()
+                    }
+                HStack {
+                    Button("保存") {
+                        let v = archiveDirInput.trimmingCharacters(in: .whitespaces)
+                        UserDefaults.standard.set(v.isEmpty ? nil : v, forKey: "archive.dir")
+                        refreshArchiveStats()
+                    }
+                    Button("恢复默认") {
+                        archiveDirInput = ""
+                        UserDefaults.standard.removeObject(forKey: "archive.dir")
+                        refreshArchiveStats()
+                    }
+                }
+                Text("管线全部跑完的内容自动落成双语 md 存到这里，按源名分子目录。文件是长期归档，数据库可正常清理。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("已归档 \(archivedCount) 个文件")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("网络代理") {
@@ -93,6 +120,14 @@ public struct GeneralPane: View {
         }
         .formStyle(.grouped)
         .navigationTitle("通用")
+        .onAppear {
+            archiveDirInput = UserDefaults.standard.string(forKey: "archive.dir") ?? ""
+            refreshArchiveStats()
+        }
+    }
+
+    private func refreshArchiveStats() {
+        archivedCount = ArchiveService.shared.archivedFileCount()
     }
 }
 

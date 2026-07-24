@@ -136,6 +136,9 @@ public final class PipelineWorker: ObservableObject {
                 if ok { transcribed += 1 }  // transcribe 内部已记 job
                 if ok { await ExportService.shared.runPending(trigger: "transcribe", contentId: t.id) }
             }
+            // 归档钩子：任何管线完成后检查"该源开启的管线是否全跑完"，
+            // 齐了就把这篇落成最终双语 md 长期保存（幂等，未齐跳过）。
+            ArchiveService.shared.archiveIfComplete(contentId: t.id)
             done += 1
         }
 

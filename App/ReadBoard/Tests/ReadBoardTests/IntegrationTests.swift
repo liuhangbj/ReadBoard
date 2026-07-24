@@ -98,3 +98,38 @@ final class ExportIntegrationTests: XCTestCase {
         return result
     }
 }
+
+// MARK: - 完成归档集成测试（真实 DB）
+
+final class ArchiveIntegrationTests: XCTestCase {
+
+    /// 对真实库里已完成的内容验证：完成判定 → 落盘 → 幂等不重复
+    func testArchiveIfComplete() {
+        let svc = ArchiveService.shared
+        // 144424 = 虎嗅源（auto_score+auto_summarize），已有打分+摘要+正文，应判定完成
+        let testId: Int64 = 144424
+        // 先清掉可能的归档标记，保证测试起点干净
+        Database.shared.execute(
+            "UPDATE content SET meta = json_remove(COALESCE(meta,'{}'), '$.archived_at') WHERE id = ?",
+            params: [testId])
+
+        // 完成判定
+        let complete = svc.isComplete(contentId: testId)
+        XCTAssertTrue(complete, "144424 开了打分+摘要且都有结果，应判定完成")
+
+        // 首次落盘：应写入
+        let first = svc.archiveIfComplete(contentId: testId)
+        XCTAssertTrue(first, "首次归档应成功落盘")
+
+        // 二次调用：已归档，幂等跳过
+        let second = svc.archiveIfComplete(contentId: testId)
+        XCTAssertFalse(second, "已归档内容不应重复落盘")
+
+        // 文件确实写到了归档目录
+        let dir = svc.archiveDir + "/虎嗅"
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        XCTAssertTrue(files.contains { $0.contains("\(testId)") }, "归档目录应有该内容的 md 文件")
+        print("归档目录 \(dir)，文件 \(files.filter { $0.contains("\(testId)") })")
+    }
+}
+
