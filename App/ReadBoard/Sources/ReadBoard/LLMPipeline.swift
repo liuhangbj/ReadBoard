@@ -192,9 +192,18 @@ public final class LLMPipeline: @unchecked Sendable {
     }
 
     /// 把任意文本翻译成目标语言，返回译文（不写库）。供转录管线复用。
+    /// 短文本单次翻；长文本（>15000 字，如长转录稿）按段分块翻译再拼接，不静默截断丢内容。
     func translateRaw(_ text: String, targetLang: String = "中文") async -> String? {
         guard isAvailable else { return nil }
-        let truncated = Self.truncateKeepEnds(text, maxChars: 15000)
+        // 长文本走分块，保住全文（转录稿 1-2 小时节目轻松破 15000 字）
+        if text.count > 15000 {
+            return await translateChunked(text, targetLang: targetLang)
+        }
+        return await translateSingle(text, targetLang: targetLang)
+    }
+
+    /// 单次翻译（<=15000 字）
+    private func translateSingle(_ text: String, targetLang: String) async -> String? {
         let prompt = """
         你是一位专业的翻译。请将以下内容完整翻译成\(targetLang)，要求：
         - 保留原文的段落结构、数据、专有名词
@@ -202,7 +211,7 @@ public final class LLMPipeline: @unchecked Sendable {
         - 直接输出译文，不要任何解释或"以下是翻译"之类的话
 
         内容：
-        \(truncated)
+        \(text)
         """
         do {
             let (out, _) = try await client.chat(
@@ -213,6 +222,48 @@ public final class LLMPipeline: @unchecked Sendable {
         } catch {
             return nil
         }
+    }
+
+    /// 分块翻译：按段落边界切 ~12000 字一块，逐块翻译后拼接。单块失败则该块保留原文，
+    /// 不至于整篇丢。块间无上下文，靠段落边界保证语义相对完整。
+    private func translateChunked(_ text: String, targetLang: String) async -> String? {
+        let chunks = Self.splitByParagraph(text, maxChars: 12000)
+        guard !chunks.isEmpty else { return nil }
+        var parts: [String] = []
+        var anyOK = false
+        for (i, chunk) in chunks.enumerated() {
+            if let t = await translateSingle(chunk, targetLang: targetLang) {
+                parts.append(t)
+                anyOK = true
+            } else {
+                // 单块失败：保留原文块 + 标注，不静默丢
+                parts.append("[第 \(i + 1) 段翻译失败，保留原文]\n" + chunk)
+            }
+        }
+        return anyOK ? parts.joined(separator: "\n\n") : nil
+    }
+
+    /// 按段落（空行）切分，每块不超过 maxChars；单段超限则硬截（保头尾）
+    static func splitByParagraph(_ text: String, maxChars: Int) -> [String] {
+        let paras = text.components(separatedBy: "\n\n")
+        var chunks: [String] = []
+        var cur = ""
+        for p in paras {
+            let candidate = cur.isEmpty ? p : cur + "\n\n" + p
+            if candidate.count > maxChars {
+                if !cur.isEmpty { chunks.append(cur); cur = "" }
+                // 单段就超限：按 truncateKeepEnds 收进一块
+                if p.count > maxChars {
+                    chunks.append(truncateKeepEnds(p, maxChars: maxChars))
+                } else {
+                    cur = p
+                }
+            } else {
+                cur = candidate
+            }
+        }
+        if !cur.isEmpty { chunks.append(cur) }
+        return chunks
     }
 
     /// 把内容全文翻译成中文，写入 llm_translated_md

@@ -395,6 +395,14 @@ public struct CleanupPane: View {
             Section("数据库备份 / 恢复") {
                 BackupRestoreView()
             }
+
+            Section("回收站（删除的内容备份）") {
+                TrashRestoreView()
+            }
+
+            Section("管线死信任务") {
+                DeadLetterView()
+            }
         }
         .formStyle(.grouped)
         .navigationTitle("缓存清理")
@@ -488,5 +496,116 @@ public struct BackupRestoreView: View {
 
     private func reload() {
         backups = BackupService.shared.listBackups()
+    }
+}
+
+// MARK: - 回收站恢复（清理删除的内容可找回）
+
+public struct TrashRestoreView: View {
+    @State private var batches: [CacheCleanupService.TrashBatch] = []
+    @State private var message = ""
+    @State private var showClearConfirm = false
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if batches.isEmpty {
+                Text("回收站为空——清理删除的内容会备份到这里。")
+                    .font(.caption).foregroundStyle(.tertiary)
+            } else {
+                ForEach(batches) { b in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(b.date) · \(b.itemCount) 条")
+                                .font(.callout)
+                            Text(CacheCleanupService.humanBytes(b.sizeBytes))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("恢复") {
+                            let r = CacheCleanupService.shared.restoreTrash(batch: b)
+                            message = "✅ 恢复 \(r.restored) 条（跳过已存在 \(r.skipped)），已放回归档"
+                            reload()
+                        }
+                        .controlSize(.small)
+                        Button(role: .destructive) {
+                            CacheCleanupService.shared.deleteTrash(batch: b)
+                            reload()
+                        } label: { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                    }
+                }
+                HStack {
+                    if !message.isEmpty {
+                        Text(message).font(.caption).foregroundStyle(.green)
+                    }
+                    Spacer()
+                    Button("清空回收站…", role: .destructive) { showClearConfirm = true }
+                        .controlSize(.small)
+                }
+            }
+            Text("恢复后内容放回「归档」，可在阅读区归档筛选里查看/取消归档。")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .onAppear(perform: reload)
+        .alert("清空回收站？", isPresented: $showClearConfirm) {
+            Button("取消", role: .cancel) {}
+            Button("全部删除", role: .destructive) {
+                CacheCleanupService.shared.clearAllTrash()
+                reload()
+            }
+        } message: {
+            Text("回收站里 \(batches.reduce(0) { $0 + $1.itemCount }) 条备份将永久删除，不可找回。")
+        }
+    }
+
+    private func reload() {
+        batches = CacheCleanupService.shared.listTrash()
+    }
+}
+
+// MARK: - 死信任务管理（管线失败 >=3 被永久跳过的）
+
+public struct DeadLetterView: View {
+    @StateObject private var worker = PipelineWorker.shared
+    @State private var items: [(contentId: Int64, jtype: String, fails: Int)] = []
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if items.isEmpty {
+                Text("无死信任务——连续失败 3 次的管线任务会出现在这里。")
+                    .font(.caption).foregroundStyle(.tertiary)
+            } else {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, it in
+                    HStack {
+                        Text("内容 #\(it.contentId) · \(it.jtype)")
+                            .font(.callout)
+                        Text("失败 \(it.fails) 次")
+                            .font(.caption2).foregroundStyle(.red)
+                        Spacer()
+                        Button("重置重试") {
+                            worker.resetDeadLetter(contentId: it.contentId, jtype: it.jtype)
+                            reload()
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button("全部重置", role: .destructive) {
+                        worker.resetAllDeadLetters()
+                        reload()
+                    }
+                    .controlSize(.small)
+                }
+            }
+            Text("死信是连续失败 3 次被永久跳过的任务（防 LLM 费用失控）。重置后下轮 worker 会重新尝试。")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .onAppear(perform: reload)
+    }
+
+    private func reload() {
+        items = worker.deadLetters()
     }
 }

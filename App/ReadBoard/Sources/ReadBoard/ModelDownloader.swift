@@ -42,15 +42,35 @@ public final class ModelDownloader: ObservableObject {
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
 
             let tmpPath = modelPath + ".download"
-            try? FileManager.default.removeItem(atPath: tmpPath)
+            // 断点续传：已有部分文件则从断点接着下（Range 头），不从头再来
+            var resumeFrom: Int64 = 0
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: tmpPath),
+               let size = attrs[.size] as? Int64, size > 0 {
+                resumeFrom = size
+            }
 
-            // 后台 session 下载，URLSession 自身管理进度
-            let (asyncBytes, resp) = try await URLSession.shared.bytes(from: modelURL)
-            let total = resp.expectedContentLength   // -1 = 未知
-            FileManager.default.createFile(atPath: tmpPath, contents: nil)
+            var req = URLRequest(url: modelURL)
+            if resumeFrom > 0 {
+                req.setValue("bytes=\(resumeFrom)-", forHTTPHeaderField: "Range")
+                statusText = String(format: "从 %.0f MB 续传…", Double(resumeFrom) / 1_000_000)
+            }
+            let (asyncBytes, resp) = try await URLSession.shared.bytes(for: req)
+            let http = resp as? HTTPURLResponse
+            // 服务器不支持 Range（200 而非 206）→ 从头下，清掉旧部分文件
+            let serverResumed = resumeFrom > 0 && http?.statusCode == 206
+            if resumeFrom > 0 && http?.statusCode == 200 {
+                resumeFrom = 0   // 服务端忽略 Range，重来
+            }
+            let bodyLen = resp.expectedContentLength   // 本次响应的长度
+            let total: Int64 = serverResumed ? (resumeFrom + max(bodyLen, 0)) : bodyLen   // -1 = 未知
+
+            if !serverResumed {
+                FileManager.default.createFile(atPath: tmpPath, contents: nil)
+            }
             let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: tmpPath))
             defer { try? handle.close() }
-            var written: Int64 = 0
+            if serverResumed { try handle.seekToEnd() }
+            var written: Int64 = resumeFrom
             for try await byte in asyncBytes {
                 try handle.write(contentsOf: [byte])
                 written += 1
@@ -69,7 +89,7 @@ public final class ModelDownloader: ObservableObject {
             progress = 1
             statusText = "下载完成"
         } catch {
-            errorMessage = "模型下载失败：\(error.localizedDescription)"
+            errorMessage = "模型下载失败：\(error.localizedDescription)（重开会从断点续传）"
             statusText = "下载失败"
         }
     }

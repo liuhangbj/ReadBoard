@@ -42,11 +42,22 @@ public final class TranscribePipeline: @unchecked Sendable {
         defer { try? FileManager.default.removeItem(atPath: workDir) }
 
         do {
-            // 1. 取音频：直链音频直接下载；否则走 yt-dlp 抽音频
-            let audioPath = try await fetchAudio(target: target, workDir: workDir, direct: audioUrl != nil)
+            // 1. 取音频：直链音频直接下载；否则走 yt-dlp 抽音频。
+            //    直链若 ffmpeg 认不出格式（伪装扩展名/异常封装），回退 yt-dlp 重抽。
+            var audioPath = try await fetchAudio(target: target, workDir: workDir, direct: audioUrl != nil)
             // 2. 转 16k 单声道 wav（whisper.cpp 最稳的输入）
             let wavPath = workDir + "/audio.wav"
-            try await run(ffmpegBin, ["-y", "-i", audioPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavPath])
+            do {
+                try await run(ffmpegBin, ["-y", "-i", audioPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavPath])
+            } catch {
+                // 直链音频 ffmpeg 转码失败 → 回退 yt-dlp 重抽（有些源直链是伪装格式）
+                if audioUrl != nil {
+                    audioPath = try await fetchAudio(target: pageUrl.isEmpty ? target : pageUrl, workDir: workDir, direct: false)
+                    try await run(ffmpegBin, ["-y", "-i", audioPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavPath])
+                } else {
+                    throw error
+                }
+            }
             // 3. whisper 转写
             let lang = whisperLang(language)
             let outBase = workDir + "/transcript"

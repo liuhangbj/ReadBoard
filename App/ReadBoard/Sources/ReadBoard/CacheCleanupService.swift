@@ -18,6 +18,7 @@ public final class CacheCleanupService: ObservableObject {
     @Published var backupCount = 0
     @Published var contentHtmlCount = 0          // 可清理的全文 HTML 条数（已转 md 且未读未标）
     @Published var dbBytes: Int64 = 0
+    @Published var trashBytesPublished: Int64 = 0   // 回收站占用（供 UI 展示）
     @Published var lastRunSummary = ""
     @Published var isRunning = false
 
@@ -106,6 +107,9 @@ public final class CacheCleanupService: ObservableObject {
         var dBytes: Int64 = (try? FileManager.default.attributesOfItem(atPath: dbPath)[.size] as? Int64) ?? 0
         if let wal = try? FileManager.default.attributesOfItem(atPath: dbPath + "-wal")[.size] as? Int64 { dBytes += wal }
         dbBytes = dBytes
+
+        // 回收站占用
+        trashBytesPublished = trashBytes
     }
 
     // MARK: 一键全部清理
@@ -246,6 +250,90 @@ public final class CacheCleanupService: ObservableObject {
               AND updated_at < datetime('now', '-\(cleanHtmlAfterDays) days');
             """)
         return db.scalarInt("SELECT changes()") ?? 0
+    }
+
+    // MARK: 回收站（trash 恢复 + 统计）
+
+    /// 回收站根目录
+    private var trashDir: String { NSHomeDirectory() + "/readboard/Data/trash" }
+
+    /// 回收站批次（按日期目录 + 文件）
+    struct TrashBatch: Identifiable, Hashable {
+        let id = UUID()
+        let path: String
+        let date: String
+        let itemCount: Int
+        let sizeBytes: Int64
+    }
+
+    /// 列出回收站批次（新→旧）
+    func listTrash() -> [TrashBatch] {
+        let fm = FileManager.default
+        guard let days = try? fm.contentsOfDirectory(atPath: trashDir)
+            .filter({ !$0.hasPrefix(".") }).sorted().reversed() else { return [] }
+        var out: [TrashBatch] = []
+        for day in days {
+            let dayDir = trashDir + "/" + day
+            guard let files = try? fm.contentsOfDirectory(atPath: dayDir)
+                .filter({ $0.hasSuffix(".jsonl") }) else { continue }
+            for f in files {
+                let p = dayDir + "/" + f
+                let content = (try? String(contentsOfFile: p, encoding: .utf8)) ?? ""
+                let count = content.split(separator: "\n").filter { !$0.isEmpty }.count
+                let size = (try? fm.attributesOfItem(atPath: p)[.size] as? Int64) ?? 0
+                out.append(TrashBatch(path: p, date: day, itemCount: count, sizeBytes: size))
+            }
+        }
+        return out
+    }
+
+    /// 回收站总占用（清理统计纳入）
+    var trashBytes: Int64 { Self.dirSize(trashDir) }
+
+    /// 恢复某批次：逐行解析 JSONL 重新插入 content（幂等——id 已存在则跳过）。
+    /// 返回 (恢复条数, 跳过条数)。恢复后内容标记 is_archived=1（原本就是要删的归档），用户可手动取消。
+    @discardableResult
+    func restoreTrash(batch: TrashBatch) -> (restored: Int, skipped: Int) {
+        guard let content = try? String(contentsOfFile: batch.path, encoding: .utf8) else { return (0, 0) }
+        var restored = 0, skipped = 0
+        for line in content.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = obj["id"] as? Int else { continue }
+            // 已存在（可能清理后又被抓回来）→ 跳过
+            if db.scalarInt("SELECT id FROM content WHERE id = ?", params: [id]) != nil {
+                skipped += 1
+                continue
+            }
+            let ok = db.execute("""
+                INSERT INTO content (id, ctype, source, title, url, author, published_at,
+                                     excerpt, content_md, llm_summary, llm_score, is_archived, updated_at)
+                VALUES (?, 'article', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'));
+                """, params: [
+                    id,
+                    obj["source"] as? String ?? "",
+                    obj["title"] as? String ?? "",
+                    obj["url"] as? String ?? "",
+                    obj["author"] as? String,
+                    obj["published_at"] as? String,
+                    (obj["content_md"] as? String).map { String($0.prefix(200)) },
+                    obj["content_md"] as? String,
+                    obj["llm_summary"] as? String,
+                    obj["llm_score"] as? Int,
+                ])
+            if ok { restored += 1 } else { skipped += 1 }
+        }
+        return (restored, skipped)
+    }
+
+    /// 清空回收站某批次文件
+    func deleteTrash(batch: TrashBatch) {
+        try? FileManager.default.removeItem(atPath: batch.path)
+    }
+
+    /// 清空整个回收站
+    func clearAllTrash() {
+        try? FileManager.default.removeItem(atPath: trashDir)
     }
 
     // MARK: 工具

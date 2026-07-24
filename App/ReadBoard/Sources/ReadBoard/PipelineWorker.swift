@@ -14,6 +14,8 @@ public final class PipelineWorker: ObservableObject {
     @Published var lastRunAt: String? = nil
     @Published var lastSummary = ""
     @Published var processedTotal = 0
+    /// 死信任务数（失败 >=3 被永久跳过的）——设置页可查看并重置
+    @Published var deadLetterCount = 0
 
     private let db = Database.shared
     private let llm = LLMPipeline()
@@ -89,6 +91,14 @@ public final class PipelineWorker: ObservableObject {
             refetched = await backfillFullText()
         }
 
+        // 转录依赖一次性检查：缺依赖则本轮所有转录任务跳过（不逐条死信浪费重试），
+        // 并在 summary 里提示。用户装好依赖后下轮自动恢复。
+        let transcribeReady = DependencyChecker.shared.transcribeReady
+        let anyTranscribePending = tasks.contains { $0.needTranscribe }
+        if anyTranscribePending && !transcribeReady {
+            lastSummary = "⚠️ 转录依赖缺失（whisper/ffmpeg/模型），已跳过 \(tasks.filter { $0.needTranscribe }.count) 条转录任务。请去 设置→依赖 安装。"
+        }
+
         for t in tasks.prefix(batchLimit) {
             // 打分（AI 板块总开关 && 打分子开关 && 源级开关，源级已在收集时判过）
             // R2: 每个管线调用包单任务超时——一条挂死不再拖垮整轮 worker
@@ -117,8 +127,8 @@ public final class PipelineWorker: ObservableObject {
                 if ok { summarized += 1; markJob(contentId: t.id, jtype: "summarize", ok: true) }
                 else { markJob(contentId: t.id, jtype: "summarize", ok: false) }
             }
-            // 转录（媒体）
-            if t.needTranscribe, AIPipeline.transcribe.effective {
+            // 转录（媒体）——依赖缺失时跳过（上面已统一提示），不逐条记失败
+            if t.needTranscribe, AIPipeline.transcribe.effective, transcribeReady {
                 let ok = await Self.withTimeout(seconds: 600) {
                     await self.transcriber.transcribe(
                         contentId: t.id, title: t.title, audioUrl: t.audioUrl, pageUrl: t.url, language: t.language)
@@ -130,7 +140,11 @@ public final class PipelineWorker: ObservableObject {
         }
 
         processedTotal += done
-        lastSummary = "本轮 \(done) 条：评分\(scored) 翻译\(translated) 摘要\(summarized) 转录\(transcribed) 全文补\(refetched)"
+        deadLetterCount = countDeadLetters()
+        // 依赖缺失提示优先保留；否则正常汇总
+        if !(anyTranscribePending && !transcribeReady) {
+            lastSummary = "本轮 \(done) 条：评分\(scored) 翻译\(translated) 摘要\(summarized) 转录\(transcribed) 全文补\(refetched)"
+        }
         if done > 0 {
             NotificationCenter.default.post(name: .contentUpdated, object: nil)
         }
@@ -347,6 +361,42 @@ public final class PipelineWorker: ObservableObject {
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
         f.timeZone = TimeZone(identifier: "UTC")
         return f.date(from: s)
+    }
+
+    // MARK: 死信管理（设置页可查看/重置）
+
+    /// 死信任务数（某 content+jtype 累计失败 >=3）
+    func countDeadLetters() -> Int {
+        let rows = db.queryRows("""
+            SELECT content_id, jtype, COUNT(*) AS fails FROM content_job
+            WHERE status = 3 GROUP BY content_id, jtype HAVING fails >= 3;
+            """)
+        return rows.count
+    }
+
+    /// 死信任务明细（设置页列表）
+    func deadLetters() -> [(contentId: Int64, jtype: String, fails: Int)] {
+        db.queryRows("""
+            SELECT content_id, jtype, COUNT(*) AS fails FROM content_job
+            WHERE status = 3 GROUP BY content_id, jtype HAVING fails >= 3
+            ORDER BY fails DESC LIMIT 100;
+            """).compactMap { r in
+            guard let cid = Int64(r["content_id"] ?? ""), let jt = r["jtype"] else { return nil }
+            return (cid, jt, Int(r["fails"] ?? "0") ?? 0)
+        }
+    }
+
+    /// 重置死信：删掉该 content+jtype 的失败记录，下轮 worker 会重新尝试
+    func resetDeadLetter(contentId: Int64, jtype: String) {
+        db.execute("DELETE FROM content_job WHERE content_id = ? AND jtype = ? AND status = 3",
+                   params: [contentId, jtype])
+        deadLetterCount = countDeadLetters()
+    }
+
+    /// 一键重置全部死信
+    func resetAllDeadLetters() {
+        db.execute("DELETE FROM content_job WHERE status = 3")
+        deadLetterCount = 0
     }
 
     private func colText(_ stmt: OpaquePointer?, _ i: Int32) -> String? {
