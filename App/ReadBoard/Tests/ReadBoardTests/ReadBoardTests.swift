@@ -183,3 +183,53 @@ final class KeychainTests: XCTestCase {
         KeychainHelper.delete(forKey: key)
     }
 }
+
+// MARK: - feed 解析（content:encoded 优先级 + 嵌套 CDATA）
+
+final class FeedParseTests: XCTestCase {
+
+    /// 嵌套 CDATA 壳剥除（机器之心 feed 的双层转义）
+    func testStripNestedCDATA() {
+        XCTAssertEqual(FeedFetcher.stripNestedCDATA("<![CDATA[<p>正文</p>]]>"), "<p>正文</p>")
+        XCTAssertEqual(FeedFetcher.stripNestedCDATA("普通 html"), "普通 html")
+        XCTAssertEqual(FeedFetcher.stripNestedCDATA(""), "")
+    }
+
+    /// content:encoded 全文应覆盖 description 摘要
+    func testContentEncodedOverridesDescription() {
+        let xml = """
+        <?xml version="1.0"?>
+        <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+        <channel><title>t</title>
+        <item>
+          <title>文章</title>
+          <link>https://x.com/1</link>
+          <guid>g1</guid>
+          <description>一句话摘要</description>
+          <content:encoded>&lt;p&gt;这是完整正文，比摘要长很多很多很多很多&lt;/p&gt;</content:encoded>
+        </item>
+        </channel></rss>
+        """
+        let entries = FeedFetcher.parseFeedForTest(xml: xml)?.entries ?? []
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertTrue(entries[0].html.contains("完整正文"), "content:encoded 应覆盖 description")
+        XCTAssertFalse(entries[0].html.contains("<![CDATA"), "不应残留 CDATA 壳")
+    }
+
+    /// 嵌套 CDATA 的 content:encoded 剥壳
+    func testNestedCDATAStripped() {
+        let xml = """
+        <?xml version="1.0"?>
+        <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+        <channel><title>t</title>
+        <item>
+          <title>a</title><link>https://x.com/2</link><guid>g2</guid>
+          <content:encoded>&lt;![CDATA[&lt;p&gt;双层转义正文&lt;/p&gt;]]&gt;</content:encoded>
+        </item>
+        </channel></rss>
+        """
+        let entries = FeedFetcher.parseFeedForTest(xml: xml)?.entries ?? []
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries[0].html, "<p>双层转义正文</p>")
+    }
+}

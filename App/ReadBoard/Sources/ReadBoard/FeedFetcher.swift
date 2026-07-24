@@ -228,6 +228,23 @@ public final class FeedFetcher {
         }
         return feed
     }
+
+    // MARK: 测试辅助
+
+    /// 剥嵌套 CDATA 壳：有的 feed（机器之心）把内容双重转义——
+    /// 解析器拿到的字符串字面就是 "<![CDATA[<p>正文</p>]]>"，存库前剥掉这层壳，
+    /// 否则 content_html 是废字符串、Defuddle 也解析不了。
+    static func stripNestedCDATA(_ s: String) -> String {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.hasPrefix("<![CDATA["), t.hasSuffix("]]>") else { return s }
+        return String(t.dropFirst(9).dropLast(3))
+    }
+
+    /// 测试友好入口：直接解析 XML 字符串（绕过网络）
+    static func parseFeedForTest(xml: String) -> ParsedFeed? {
+        guard let data = xml.data(using: .utf8) else { return nil }
+        return FeedXMLParser().parse(data: data)
+    }
 }
 
 // MARK: - XML 解析（RSS 2.0 + Atom）
@@ -323,7 +340,11 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
                 if eURL.isEmpty && !text.isEmpty { eURL = text }
             case "pubdate", "published", "updated", "dc:date":
                 if ePublished == nil { ePublished = Self.parseDate(text) }
-            case "content:encoded", "content", "description", "summary":
+            case "content:encoded":
+                // 全文字段：优先于 description/summary——即使 description 先到了也用全文覆盖
+                // （机器之心等 feed：description 一句话摘要，content:encoded 才是全文）
+                if text.count > eHTML.count { eHTML = text }
+            case "content", "description", "summary":
                 if eHTML.isEmpty { eHTML = text }
             case "author", "dc:creator", "itunes:author", "name":
                 if eAuthor == nil && !text.isEmpty { eAuthor = text }
@@ -346,7 +367,7 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
         guard !guid.isEmpty else { return }
         entries.append(ParsedEntry(
             guid: guid, title: eTitle, url: eURL, published: ePublished,
-            html: eHTML, author: eAuthor, meta: eMeta
+            html: FeedFetcher.stripNestedCDATA(eHTML), author: eAuthor, meta: eMeta
         ))
     }
 
