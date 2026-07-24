@@ -1,11 +1,1 @@
-.DS_Store
-Data/*.db
-Data/*.bak*
-Data/*.db-journal
-Data/*.db-wal
-Data/*.db-shm
-xcuserdata/
-DerivedData/
-.build/
-*.xcuserstate
-Data/backups/
+archive/
