@@ -638,8 +638,20 @@ public struct ReadingView: View {
     @State private var contentWidth = ReadingLayout.contentWidth
     @State private var theme = ReadingTheme.current
     @State private var fontChoice = ReadingFont.current
+    @State private var customFontName: String = ""
     @State private var showLayoutPopover = false
     @State private var showShareSheet = false
+
+    /// 常用中文/阅读字体快捷项（系统有就显示，点击填入自定义）
+    private var commonChineseFonts: [String] {
+        let candidates = [
+            "LXGW WenKai", "LXGW WenKai Screen", "Source Han Serif SC", "Source Han Sans SC",
+            "Noto Serif CJK SC", "Noto Sans CJK SC", "PingFang SC", "Songti SC", "STSong",
+            "Kaiti SC", "Hiragino Sans GB", "Sarasa Gothic SC", "Smiley Sans",
+        ]
+        let available = Set(ReadingFont.availableFontFamilies)
+        return candidates.filter { available.contains($0) }
+    }
     /// 星标/已读状态（本地镜像，操作后即时反馈，不依赖 reload）
     @State private var isStarred = false
     @State private var isRead = false
@@ -806,6 +818,8 @@ public struct ReadingView: View {
             policy = Database.shared.effectivePolicyFor(contentId: item.id)
             isStarred = item.starred
             isRead = item.isRead
+            // 自定义字体名回填（当前是自定义类时，输入框显示当前名）
+            if case .custom(let name) = fontChoice { customFontName = name }
         }
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(item: item)
@@ -829,16 +843,58 @@ public struct ReadingView: View {
                 .onChange(of: theme) { _, v in ReadingTheme.current = v }
             }
 
-            // 字体
+            // 字体（预设 + 自定义系统字体名）
             HStack {
                 Text("字体").frame(width: 60, alignment: .leading)
                 Picker("", selection: $fontChoice) {
-                    ForEach(ReadingFont.allCases) { f in
+                    ForEach(ReadingFont.presets, id: \.self) { f in
                         Text(f.displayName).tag(f)
+                    }
+                    if case .custom = fontChoice {
+                        Text(fontChoice.displayName).tag(fontChoice)
+                    } else {
+                        Text("自定义…").tag(ReadingFont.custom(""))
                     }
                 }
                 .pickerStyle(.menu)
-                .onChange(of: fontChoice) { _, v in ReadingFont.current = v }
+                .onChange(of: fontChoice) { _, v in
+                    // 选了"自定义…"保留当前自定义名进入编辑；选预设直接存
+                    if case .custom(let n) = v, n.isEmpty {
+                        fontChoice = .custom(customFontName)
+                    } else {
+                        ReadingFont.current = v
+                    }
+                }
+            }
+            // 自定义字体名（选自定义类时显示）：系统字体列表可选 + 手输
+            if case .custom = fontChoice {
+                HStack {
+                    Text("字体名").frame(width: 60, alignment: .leading)
+                    TextField("如 LXGW WenKai / 思源宋体", text: $customFontName)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit {
+                            fontChoice = .custom(customFontName)
+                            ReadingFont.current = fontChoice
+                        }
+                }
+                // 常用中文字体快捷选择（点击填入）
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(commonChineseFonts, id: \.self) { name in
+                            Button(name) {
+                                customFontName = name
+                                fontChoice = .custom(name)
+                                ReadingFont.current = fontChoice
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(.quaternary)
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                        }
+                    }
+                }
+                .padding(.leading, 60)
             }
 
             // 字号

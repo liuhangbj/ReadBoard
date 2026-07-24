@@ -162,20 +162,27 @@ enum ReadingTheme: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - 正文字体选择
+// MARK: - 正文字体选择（预设类别 + 自定义系统字体）
 
-enum ReadingFont: String, CaseIterable, Identifiable {
-    case system, serif, sansSerif, mono
+enum ReadingFont: Hashable {
+    case system
+    case serif
+    case sansSerif
+    case mono
+    case custom(String)   // 自定义字体名（系统已安装字体）
 
-    var id: String { rawValue }
     var displayName: String {
         switch self {
         case .system: return "系统默认"
         case .serif: return "衬线（宋）"
         case .sansSerif: return "无衬线（黑）"
         case .mono: return "等宽"
+        case .custom(let name): return name
         }
     }
+
+    /// 预设项（自定义单独处理）
+    static let presets: [ReadingFont] = [.system, .serif, .sansSerif, .mono]
 
     func font(size: CGFloat) -> Font {
         switch self {
@@ -183,15 +190,45 @@ enum ReadingFont: String, CaseIterable, Identifiable {
         case .serif: return .system(size: size, design: .serif)
         case .sansSerif: return .system(size: size, design: .default)
         case .mono: return .system(size: size, design: .monospaced)
+        case .custom(let name):
+            // 系统字体按名取；取不到（名字错/未安装）回退系统默认
+            return .custom(name, size: size)
         }
     }
 
+    // MARK: 持久化（预设存 rawValue，自定义存 "custom:<name>"）
     static var current: ReadingFont {
         get {
             let raw = UserDefaults.standard.string(forKey: "reading.font") ?? "system"
-            return ReadingFont(rawValue: raw) ?? .system
+            if raw.hasPrefix("custom:") {
+                return .custom(String(raw.dropFirst(7)))
+            }
+            switch raw {
+            case "serif": return .serif
+            case "sansSerif": return .sansSerif
+            case "mono": return .mono
+            default: return .system
+            }
         }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: "reading.font") }
+        set {
+            let raw: String
+            switch newValue {
+            case .system: raw = "system"
+            case .serif: raw = "serif"
+            case .sansSerif: raw = "sansSerif"
+            case .mono: raw = "mono"
+            case .custom(let name): raw = "custom:\(name)"
+            }
+            UserDefaults.standard.set(raw, forKey: "reading.font")
+        }
+    }
+
+    // MARK: 系统字体枚举
+
+    /// 系统已安装字体族名（去重排序），供选择列表
+    static var availableFontFamilies: [String] {
+        let names = NSFontManager.shared.availableFontFamilies
+        return Array(Set(names)).sorted()
     }
 }
 
