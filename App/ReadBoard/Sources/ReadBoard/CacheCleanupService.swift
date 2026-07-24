@@ -176,8 +176,10 @@ public final class CacheCleanupService: ObservableObject {
         return removed
     }
 
-    /// retention：归档超期已读 + 删除超期归档（保护星标/有标签）。用本服务的可配天数。
+    /// retention：归档超期已读 + 删除超期归档（保护星标/有标签/已落盘归档）。用本服务的可配天数。
     /// R4: 物理 DELETE 前先把待删内容备份到 Data/trash/（防误配天数导致大面积丢数据）。
+    /// 已落盘归档（meta.archived_at）的记录保留不删——用户拍板：落盘 md 后数据库记录保留，
+    /// 只清 html 中间产物（cleanHtml A 路径），记录本身是可检索的统一视图。
     @discardableResult
     func runRetention() -> (archived: Int, deleted: Int) {
         db.execute("""
@@ -196,6 +198,7 @@ public final class CacheCleanupService: ObservableObject {
             db.execute("""
                 DELETE FROM content
                 WHERE is_archived = 1 AND starred = 0
+                  AND meta NOT LIKE '%archived_at%'
                   AND updated_at < datetime('now', '-\(deleteAfterDays) days')
                   AND id NOT IN (SELECT content_id FROM content_tag);
                 """)
@@ -251,10 +254,22 @@ public final class CacheCleanupService: ObservableObject {
         try? lines.joined(separator: "\n").write(toFile: file, atomically: true, encoding: .utf8)
     }
 
-    /// 清全文 HTML：已转 md 且未读未标未归档、超过 cleanHtmlAfterDays 天的，置空 content_html
-    ///（md 才是长期阅读格式，HTML 只是抓取中间产物；67k 条的 HTML 是 DB 膨胀大头）
+    /// 清全文 HTML（md 才是长期阅读格式，HTML 只是抓取中间产物，67k 条的 HTML 是 DB 膨胀大头）。
+    /// 两路清理：
+    ///   A. 已落盘归档的（meta.archived_at）：html 立刻可删——md 文件已落盘长期保存，
+    ///      数据库记录保留（标题/md/LLM 产出/元数据都在），html 纯冗余。不等天数、不看已读。
+    ///   B. 未归档但已转 md 且未读未标未归档、超过 cleanHtmlAfterDays 天的（原保守路径）。
     @discardableResult
     func cleanHtml() -> Int {
+        // A. 已落盘归档：立即清 html（数据库记录保留，只删中间产物）
+        db.execute("""
+            UPDATE content SET content_html = NULL
+            WHERE content_html IS NOT NULL AND LENGTH(content_html) > 0
+              AND meta LIKE '%archived_at%';
+            """)
+        let archivedCleaned = db.writeChanges()
+
+        // B. 未归档的保守路径：已转 md 且未读未标未归档、超期才清
         db.execute("""
             UPDATE content SET content_html = NULL
             WHERE content_html IS NOT NULL AND LENGTH(content_html) > 0
@@ -263,7 +278,7 @@ public final class CacheCleanupService: ObservableObject {
               AND id NOT IN (SELECT content_id FROM content_tag)
               AND updated_at < datetime('now', '-\(cleanHtmlAfterDays) days');
             """)
-        return db.writeChanges()
+        return archivedCleaned + db.writeChanges()
     }
 
     // MARK: 回收站（trash 恢复 + 统计）

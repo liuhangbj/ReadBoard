@@ -92,7 +92,7 @@ public struct GeneralPane: View {
                         refreshArchiveStats()
                     }
                 }
-                Text("管线全部跑完的内容自动落成双语 md 存到这里，按源名分子目录。文件是长期归档，数据库可正常清理。")
+                Text("管线全部跑完的内容自动落成双语 md 存到这里，按源名分子目录。数据库记录保留（可检索），只清 HTML 中间产物。")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("已归档 \(archivedCount) 个文件")
                     .font(.caption).foregroundStyle(.secondary)

@@ -1,1 +1,14 @@
+# 运行时产物
 archive/
+Data/backups/
+Data/trash/
+Data/readboard.db
+Data/readboard.db-shm
+Data/readboard.db-wal
+
+# 构建产物
+.build/
+App/ReadBoard/.build/
+
+# macOS
+.DS_Store
