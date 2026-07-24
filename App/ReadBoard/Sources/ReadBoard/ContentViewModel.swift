@@ -10,10 +10,23 @@ public final class ContentViewModel: ObservableObject {
     @Published var selectedItem: ContentItem? = nil
     @Published var minScore: Int = 0               // 评分筛选 0=不限
     @Published var includeUnscored: Bool = false   // 评分筛选时是否含未评分
-    @Published var unreadOnly: Bool = false        // 只看未读
-    @Published var starredOnly: Bool = false       // 只看星标
+    /// 阅读状态单选：all=全部 / unread=未读 / starred=星标（三选一）
+    @Published var readFilter: ReadFilter = .all
     @Published var showArchived: Bool = false      // 看归档（默认看活跃）
+    /// 处理状态筛选：nil=不限，"score"/"summary"/"translate"/"transcribe"
+    @Published var processedFilter: String? = nil
     @Published var keyword: String = ""            // 搜索关键词（标题/正文）
+
+    enum ReadFilter: String, CaseIterable {
+        case all, unread, starred
+        var display: String {
+            switch self {
+            case .all: return "全部"
+            case .unread: return "未读"
+            case .starred: return "星标"
+            }
+        }
+    }
     @Published var selectedTag: Tag? = nil         // 标签筛选 nil=不限
     @Published var tags: [Tag] = []                // 全部标签（筛选下拉）
     @Published var totalCount: Int = 0
@@ -90,9 +103,13 @@ public final class ContentViewModel: ObservableObject {
         let page = db.fetchContents(sourceId: selectedSourceId, folderId: selectedFolderId,
                                     minScore: minS,
                                     includeUnscored: includeUnscored,
-                                    unreadOnly: unreadOnly, keyword: kw.isEmpty ? nil : kw,
-                                    starredOnly: starredOnly, archived: showArchived,
-                                    tagId: selectedTag?.id, limit: Self.pageSize, offset: 0)
+                                    unreadOnly: readFilter == .unread,
+                                    keyword: kw.isEmpty ? nil : kw,
+                                    starredOnly: readFilter == .starred,
+                                    archived: showArchived,
+                                    tagId: selectedTag?.id,
+                                    processedFilter: processedFilter,
+                                    limit: Self.pageSize, offset: 0)
         items = page
         hasMore = page.count >= Self.pageSize
         if let sel = selectedItem, !items.contains(sel) {
@@ -108,9 +125,13 @@ public final class ContentViewModel: ObservableObject {
         let page = db.fetchContents(sourceId: selectedSourceId, folderId: selectedFolderId,
                                     minScore: minS,
                                     includeUnscored: includeUnscored,
-                                    unreadOnly: unreadOnly, keyword: kw.isEmpty ? nil : kw,
-                                    starredOnly: starredOnly, archived: showArchived,
-                                    tagId: selectedTag?.id, limit: Self.pageSize,
+                                    unreadOnly: readFilter == .unread,
+                                    keyword: kw.isEmpty ? nil : kw,
+                                    starredOnly: readFilter == .starred,
+                                    archived: showArchived,
+                                    tagId: selectedTag?.id,
+                                    processedFilter: processedFilter,
+                                    limit: Self.pageSize,
                                     offset: items.count)
         hasMore = page.count >= Self.pageSize
         // 去重追加（极端情况数据在两次查询间被插入，offset 可能重叠几条）

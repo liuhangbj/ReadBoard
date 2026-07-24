@@ -218,7 +218,7 @@ public struct ContentView: View {
             .padding(.vertical, 6)
             .background(.quaternary.opacity(0.5))
 
-            // 筛选条：评分(输入框) + 标签 + 未读 + 星标 + 归档
+            // 筛选条：评分(输入框) + 处理状态(选择框) + 未读/全部/星标(单选) + 归档
             HStack {
                 Text("评分 ≥")
                     .font(.caption)
@@ -236,6 +236,22 @@ public struct ContentView: View {
                         .controlSize(.small)
                         .onChange(of: vm.includeUnscored) { _, _ in vm.reload() }
                 }
+
+                // 处理状态选择框（打分/摘要/翻译/转录）
+                Picker(selection: $vm.processedFilter) {
+                    Text("处理: 全部").tag(nil as String?)
+                    Text("已打分").tag("score" as String?)
+                    Text("已摘要").tag("summary" as String?)
+                    Text("已翻译").tag("translate" as String?)
+                    Text("已转录").tag("transcribe" as String?)
+                } label: { EmptyView() }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: 110)
+                .font(.caption)
+                .controlSize(.small)
+                .onChange(of: vm.processedFilter) { _, _ in vm.reload() }
+
                 // 标签筛选
                 Picker(selection: $vm.selectedTag) {
                     Text("标签: 全部").tag(nil as Tag?)
@@ -245,20 +261,24 @@ public struct ContentView: View {
                 } label: { EmptyView() }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(maxWidth: 130)
+                .frame(maxWidth: 110)
                 .font(.caption)
                 .controlSize(.small)
                 .onChange(of: vm.selectedTag) { _, _ in vm.reload() }
-                Toggle("未读", isOn: $vm.unreadOnly)
-                    .toggleStyle(.checkbox)
-                    .font(.caption)
-                    .controlSize(.small)
-                    .onChange(of: vm.unreadOnly) { _, _ in vm.reload() }
-                Toggle("星标", isOn: $vm.starredOnly)
-                    .toggleStyle(.checkbox)
-                    .font(.caption)
-                    .controlSize(.small)
-                    .onChange(of: vm.starredOnly) { _, _ in vm.reload() }
+
+                Spacer()
+
+                // 未读/全部/星标 三选一单选（分段控件）
+                Picker("", selection: $vm.readFilter) {
+                    ForEach(ContentViewModel.ReadFilter.allCases, id: \.self) { f in
+                        Text(f.display).tag(f)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 180)
+                .controlSize(.small)
+                .onChange(of: vm.readFilter) { _, _ in vm.reload() }
+
                 Toggle("归档", isOn: $vm.showArchived)
                     .toggleStyle(.checkbox)
                     .font(.caption)

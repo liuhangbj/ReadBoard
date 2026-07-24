@@ -478,13 +478,14 @@ public final class Database: @unchecked Sendable {
     }
 
     /// 拉取内容列表（轻列，不取正文 content_md/llm_translated_md/meta —— 正文点开再按 id 查）
-    /// 可按 source/stype、sourceId、folderId 过滤 + 评分/未读/星标/归档/标签/关键词筛选
+    /// 可按 source/stype、sourceId、folderId 过滤 + 评分/未读/星标/归档/标签/关键词/处理状态筛选
     func fetchContents(source: String? = nil, sourceId: Int64? = nil, folderId: Int64? = nil,
                        minScore: Int? = nil, includeUnscored: Bool = false,
                        unreadOnly: Bool = false,
                        keyword: String? = nil, starredOnly: Bool = false,
-                       archived: Bool = false, tagId: Int64? = nil, limit: Int = 200,
-                       offset: Int = 0) -> [ContentItem] {
+                       archived: Bool = false, tagId: Int64? = nil,
+                       processedFilter: String? = nil,
+                       limit: Int = 200, offset: Int = 0) -> [ContentItem] {
         guard open() else { return [] }
         let useFTS = (keyword?.isEmpty == false) && ftsAvailable()
         // 轻列：列表渲染够用，不扛正文。列序固定见 rowToListItem
@@ -517,6 +518,17 @@ public final class Database: @unchecked Sendable {
         if starredOnly { conds.append("\(col)starred = 1") }
         if tagId != nil {
             conds.append("\(col)id IN (SELECT content_id FROM content_tag WHERE tag_id = ?)")
+        }
+        // 处理状态筛选：已打分/已摘要/已翻译/已转录
+        if let pf = processedFilter {
+            switch pf {
+            case "score": conds.append("\(col)llm_score IS NOT NULL")
+            case "summary": conds.append("\(col)llm_summary IS NOT NULL AND \(col)llm_summary != ''")
+            case "translate": conds.append("\(col)llm_translated_md IS NOT NULL AND \(col)llm_translated_md != ''")
+            case "transcribe":
+                conds.append("(\(col)ctype IN ('podcast','video') OR \(col)meta LIKE '%audio_url%') AND \(col)llm_translated_md IS NOT NULL AND \(col)llm_translated_md != ''")
+            default: break
+            }
         }
         if useFTS { conds.append("content_fts MATCH ?") }
         else if let kw = keyword, !kw.isEmpty {
