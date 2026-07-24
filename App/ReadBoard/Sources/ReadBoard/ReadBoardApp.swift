@@ -11,6 +11,12 @@ public struct ReadBoardApp: App {
         BackupService.shared.start()
         // 启动数据保留策略（已读超期归档/归档超期删除，每日）
         RetentionService.shared.start()
+        // 存量补齐：无管线源的历史内容入库即归档（纯原文 md），后台跑一次。
+        // 只跑未归档的（幂等），增量执行——每次启动只补新出现的缺口。
+        Task.detached(priority: .background) {
+            let n = ArchiveService.shared.backfillNoPipelineArchives()
+            if n > 0 { fputs("[archive] 存量补齐归档 \(n) 条（无管线源纯原文）\n", stderr) }
+        }
     }
 
     public var body: some Scene {

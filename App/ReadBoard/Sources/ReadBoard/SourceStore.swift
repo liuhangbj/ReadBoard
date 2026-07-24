@@ -396,6 +396,9 @@ public final class SourceStore: ObservableObject {
         // 新内容应用过滤规则（归档/标已读/加星/打标签）——事务外，不影响原子性
         FilterService.shared.applyRules(contentId: cid, sourceId: sourceId,
             title: entry.title, content: entry.html, author: entry.author ?? "", url: entry.url)
+        // 入库即归档：源没开任何管线 → 没有中间环节 → 立即落盘纯原文 md。
+        // 开了管线的交给 worker 管线完成后归档（双语版），这里不动。
+        ArchiveService.shared.archiveOnInsertIfNoPipeline(contentId: cid, sourceId: sourceId)
         return cid
     }
 

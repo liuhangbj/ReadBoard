@@ -27,6 +27,61 @@ public final class ArchiveService: @unchecked Sendable {
         return custom.isEmpty ? NSHomeDirectory() + "/readboard/archive" : custom
     }
 
+    // MARK: 入库即归档（无管线源）
+
+    /// 该源是否没开任何管线开关（源 AND 文件夹全关）。
+    /// 没开 = 没有中间环节 = 入库即"完成"，应立即归档纯原文 md。
+    func sourceHasNoPipeline(sourceId: Int64?) -> Bool {
+        guard let sid = sourceId else { return true }   // 存量/无源：无管线可开
+        guard let row = db.queryRows("""
+            SELECT s.config AS src_cfg, f.config AS folder_cfg
+            FROM content_source s LEFT JOIN folder f ON s.folder_id = f.id
+            WHERE s.id = ?;
+            """, params: [sid]).first else { return true }
+        let sp = PipelinePolicy.from(configJson: row["src_cfg"] ?? "{}")
+        let fp = PipelinePolicy.from(configJson: row["folder_cfg"] ?? "{}")
+        return !sp.autoScore && !sp.autoTranslate && !sp.autoSummarize && !sp.autoTranscribe
+            && !fp.autoScore && !fp.autoTranslate && !fp.autoSummarize && !fp.autoTranscribe
+    }
+
+    /// 新内容入库后调用：源没开任何管线则立即归档（纯原文）。
+    /// 开了管线的交给 worker 管线完成后归档（archiveIfComplete），这里不动。
+    func archiveOnInsertIfNoPipeline(contentId: Int64, sourceId: Int64?) {
+        guard sourceHasNoPipeline(sourceId: sourceId) else { return }
+        renderAndWrite(contentId: contentId)
+    }
+
+    /// 存量补齐：把所有"源没开任何管线 且 未归档 且 有正文"的内容立即归档。
+    /// 入库即归档只对新内容生效，本函数一次性补齐历史存量（启动时跑一次）。
+    /// 返回新归档条数。
+    @discardableResult
+    func backfillNoPipelineArchives() -> Int {
+        // 无管线源 = 源 AND 文件夹全关；source_id NULL 的存量也算（无管线可开）
+        let rows = db.queryRows("""
+            SELECT c.id FROM content c
+            LEFT JOIN content_source s ON c.source_id = s.id
+            LEFT JOIN folder f ON s.folder_id = f.id
+            WHERE c.is_duplicate = 0
+              AND c.meta NOT LIKE '%archived_at%'
+              AND (c.content_md != '' OR c.excerpt != '')
+              AND COALESCE(json_extract(s.config,'$.auto_score'),0) = 0
+              AND COALESCE(json_extract(s.config,'$.auto_translate'),0) = 0
+              AND COALESCE(json_extract(s.config,'$.auto_summarize'),0) = 0
+              AND COALESCE(json_extract(s.config,'$.auto_transcribe'),0) = 0
+              AND COALESCE(json_extract(f.config,'$.auto_score'),0) = 0
+              AND COALESCE(json_extract(f.config,'$.auto_translate'),0) = 0
+              AND COALESCE(json_extract(f.config,'$.auto_summarize'),0) = 0
+              AND COALESCE(json_extract(f.config,'$.auto_transcribe'),0) = 0;
+            """)
+        var n = 0
+        for r in rows {
+            if let idStr = r["id"], let cid = Int64(idStr) {
+                if renderAndWrite(contentId: cid) { n += 1 }
+            }
+        }
+        return n
+    }
+
     // MARK: 完成判定
 
     /// 该内容是否"全部中间环节结束"。

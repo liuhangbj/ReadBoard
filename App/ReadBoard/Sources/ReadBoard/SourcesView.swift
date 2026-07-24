@@ -174,6 +174,8 @@ public struct FolderHeader: View {
     let folder: Folder
     @ObservedObject var store: SourceStore
     @State private var showDeleteConfirm = false
+    /// 开总开关后弹"处理历史数据"选项
+    @State private var pendingBackfillKey: String? = nil
 
     public var body: some View {
         HStack(spacing: 10) {
@@ -200,12 +202,27 @@ public struct FolderHeader: View {
         } message: {
             Text("文件夹内的源不会被删除，只是移出分组（folder_id 置空）。")
         }
+        .alert("处理历史数据？", isPresented: Binding(
+            get: { pendingBackfillKey != nil },
+            set: { if !$0 { pendingBackfillKey = nil } }
+        )) {
+            Button("处理所有历史并重新归档") {
+                Task { await PipelineWorker.shared.backfillHistoryForFolder(folderId: folder.id) }
+                pendingBackfillKey = nil
+            }
+            Button("只处理新增", role: .cancel) { pendingBackfillKey = nil }
+        } message: {
+            Text("「\(folder.name)」整组的\(pendingBackfillKey ?? "")已开启。\n\n• 处理历史：组内所有源的存量文章补跑管线并刷新已归档 md（耗时很长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+        }
     }
 
     private func folderToggle(_ label: String, key: String, on: Bool) -> some View {
         Toggle(label, isOn: Binding(
             get: { on },
-            set: { store.setFolderPolicy(id: folder.id, key: key, value: $0) }
+            set: { newValue in
+                store.setFolderPolicy(id: folder.id, key: key, value: newValue)
+                if newValue { pendingBackfillKey = label }
+            }
         ))
         .toggleStyle(.checkbox)
         .font(.caption)
@@ -219,6 +236,8 @@ public struct SourceRow: View {
     let src: FeedSource
     @ObservedObject var store: SourceStore
     @State private var showDeleteConfirm = false
+    /// 开管线后弹"处理历史数据"选项（key = 刚打开的管线）
+    @State private var pendingBackfillKey: String? = nil
 
     public var body: some View {
         HStack(spacing: 10) {
@@ -339,16 +358,33 @@ public struct SourceRow: View {
     private var fp: PipelinePolicy { store.folderPolicy(for: src) }
 
     /// 单个管线开关（打分/翻译/转录）。inherited=true 表示文件夹层已开，标蓝提示。
+    /// 打开时弹选项：处理所有历史数据并重新归档（该源存量入管线刷新归档）/ 只处理新增。
     private func pipelineToggle(_ label: String, key: String, on: Bool, inherited: Bool) -> some View {
         Toggle(label, isOn: Binding(
             get: { on },
-            set: { store.setPolicy(id: src.id, key: key, value: $0) }
+            set: { newValue in
+                store.setPolicy(id: src.id, key: key, value: newValue)
+                // 关→开 才弹（关掉不需要回填）； inherited 已生效的也不弹（本就有效）
+                if newValue && !inherited { pendingBackfillKey = key }
+            }
         ))
         .toggleStyle(.checkbox)
         .font(.caption)
         .controlSize(.small)
         .foregroundStyle(inherited ? .blue : .primary)
         .help(inherited ? "文件夹层已开启此项，对本源生效" : "")
+        .alert("处理历史数据？", isPresented: Binding(
+            get: { pendingBackfillKey != nil },
+            set: { if !$0 { pendingBackfillKey = nil } }
+        )) {
+            Button("处理所有历史并重新归档") {
+                Task { await PipelineWorker.shared.backfillHistory(onlySourceId: src.id) }
+                pendingBackfillKey = nil
+            }
+            Button("只处理新增", role: .cancel) { pendingBackfillKey = nil }
+        } message: {
+            Text("「\(src.name)」的\(label)已开启。\n\n• 处理历史：存量文章补跑管线并刷新已归档的 md（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+        }
     }
 
     private var icon: String {

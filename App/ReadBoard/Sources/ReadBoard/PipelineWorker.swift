@@ -154,6 +154,85 @@ public final class PipelineWorker: ObservableObject {
         return done
     }
 
+    // MARK: 历史回填（开管线后"处理所有历史数据并重新归档"）
+
+    @Published var backfillRunning = false
+    @Published var backfillProgress = ""
+
+    /// 按文件夹回填历史：文件夹内所有源逐个 backfillHistory。
+    func backfillHistoryForFolder(folderId: Int64) async {
+        let sourceIds = db.queryRows(
+            "SELECT id FROM content_source WHERE folder_id = ? AND enabled = 1",
+            params: [folderId]).compactMap { Int64($0["id"] ?? "") }
+        for sid in sourceIds {
+            await backfillHistory(onlySourceId: sid)
+        }
+    }
+
+    /// 处理某源（或全部）的历史存量：突破水位线扫该源全部内容，
+    /// 按当前有效开关跑管线；完成的内容 rearchive 刷新归档文件
+    ///（入库即归档的纯原文 → 管线处理后的双语版）。
+    /// onlySourceId: 限定单源；nil = 所有源（慎用，67k 存量全跑很贵）。
+    func backfillHistory(onlySourceId: Int64?) async {
+        guard !backfillRunning else { return }
+        backfillRunning = true
+        defer {
+            backfillRunning = false
+            deadLetterCount = countDeadLetters()
+        }
+        var processed = 0, round = 0
+        while round < 100 {   // 轮数保险丝：每轮 batchLimit 条
+            round += 1
+            let tasks = collectPendingTasks(ignoreWatermark: true, onlySourceId: onlySourceId)
+            // 过滤掉死信/退避后还有活的才算有进展
+            guard !tasks.isEmpty else { break }
+            var anyDone = false
+            for t in tasks.prefix(batchLimit) {
+                var didSomething = false
+                if t.needScore, AIPipeline.score.effective {
+                    let ok = await Self.withTimeout(seconds: 180) {
+                        await self.llm.score(contentId: t.id, title: t.title, body: t.body)
+                    } ?? false
+                    markJob(contentId: t.id, jtype: "score", ok: ok)
+                    if ok { didSomething = true }
+                }
+                if t.needTranslate, AIPipeline.translate.effective {
+                    let ok = await Self.withTimeout(seconds: 180) {
+                        await self.llm.translate(contentId: t.id, title: t.title, body: t.body)
+                    } ?? false
+                    markJob(contentId: t.id, jtype: "translate", ok: ok)
+                    if ok { didSomething = true }
+                }
+                if t.needSummary, AIPipeline.summarize.effective {
+                    let ok = await Self.withTimeout(seconds: 180) {
+                        await self.llm.summarize(contentId: t.id, title: t.title, body: t.body)
+                    } ?? false
+                    markJob(contentId: t.id, jtype: "summarize", ok: ok)
+                    if ok { didSomething = true }
+                }
+                if t.needTranscribe, AIPipeline.transcribe.effective,
+                   DependencyChecker.shared.transcribeReady {
+                    let ok = await Self.withTimeout(seconds: 600) {
+                        await self.transcriber.transcribe(
+                            contentId: t.id, title: t.title, audioUrl: t.audioUrl,
+                            pageUrl: t.url, language: t.language)
+                    } ?? false
+                    if ok { didSomething = true }
+                }
+                if didSomething {
+                    // 管线有新产出 → 刷新归档文件（纯原文 → 双语版）
+                    ArchiveService.shared.rearchive(contentId: t.id)
+                    processed += 1
+                    anyDone = true
+                }
+                backfillProgress = "已处理 \(processed) 条（第 \(round) 轮）…"
+            }
+            if !anyDone { break }   // 本轮全死信/退避/失败，不空转
+        }
+        backfillProgress = "✅ 历史回填完成：处理 \(processed) 条"
+        NotificationCenter.default.post(name: .contentUpdated, object: nil)
+    }
+
     // MARK: 待处理任务收集
 
     private struct PendingTask {
@@ -170,7 +249,12 @@ public final class PipelineWorker: ObservableObject {
     }
 
     /// 扫描内容，对每条算有效开关(源 OR 文件夹)，挑出需要处理但还没结果的
-    private func collectPendingTasks() -> [PendingTask] {
+    /// - Parameters:
+    ///   - ignoreWatermark: true 时扫全部历史（开管线后"处理所有历史数据"回填用）；
+    ///     false 只扫水位线之后的新内容（常规轮询，存量不动）
+    ///   - onlySourceId: 限定单源回填（nil = 全部）
+    private func collectPendingTasks(ignoreWatermark: Bool = false,
+                                     onlySourceId: Int64? = nil) -> [PendingTask] {
         // 1. 源 stype/enabled/config/folder config 快照：source 名 → (stype, enabled, 有效开关)
         let srcPolicies = fetchEffectivePolicies()
         // 2. 遍历内容，只取"有全文或有音频"且该源启用、有任一管线待跑的
@@ -179,14 +263,15 @@ public final class PipelineWorker: ObservableObject {
         var out: [PendingTask] = []
         // 媒体项(podcast/video)不看 fetch_status——音频在 enclosure 里, 无正文可抓, fetch_status 恒为 0;
         // 文章类要求 fetch_status IN (2成功, 4直入) 才有正文可打分/翻译。
-        // 只扫水位线之后的新内容(id > watermark), 存量不动。
+        // 只扫水位线之后的新内容(id > watermark), 存量不动（除非 ignoreWatermark 回填）。
+        var conds = ["((ctype IN ('podcast','video') OR meta LIKE '%audio_url%') OR fetch_status IN (2, 4))"]
+        if !ignoreWatermark { conds.append("id > \(watermark)") }
+        if let sid = onlySourceId { conds.append("source_id = \(sid)") }
         let sql = """
         SELECT id, source, source_id, ctype, title, url, language, content_md, excerpt,
                llm_score, llm_summary, llm_translated_md, meta
         FROM content
-        WHERE id > \(watermark)
-          AND ((ctype IN ('podcast','video') OR meta LIKE '%audio_url%')
-               OR fetch_status IN (2, 4))
+        WHERE \(conds.joined(separator: " AND "))
         ORDER BY published_at DESC
         LIMIT 2000;
         """
