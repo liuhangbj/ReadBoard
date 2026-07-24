@@ -1053,8 +1053,9 @@ public struct ReadingView: View {
         NotificationCenter.default.post(name: .contentUpdated, object: nil)
     }
 
-    /// 正文视图模式：0=双语对照 / 1=仅原文 / 2=仅译文（默认双语，Follo 风格）
-    @State private var viewMode = 0
+    /// 正文视图模式：0=双语对照 / 1=仅原文 / 2=仅译文。
+    /// @AppStorage 持久化——你的选择记住，切文章/重启不重置。默认双语对照（Follo 风格）。
+    @AppStorage("reading.viewMode") private var viewMode = 0
 
     /// 双语对照模式（viewMode=0 且有译文）
     private var bilingualMode: Bool {
@@ -1062,10 +1063,12 @@ public struct ReadingView: View {
     }
 
     private var bodyText: String {
-        // 仅译文
-        if viewMode == 2, let t = item.llmTranslatedMd, !t.isEmpty { return t }
-        // 兼容旧 showTranslated 绑定
-        if showTranslated, let t = item.llmTranslatedMd, !t.isEmpty { return t }
+        // 仅译文：有译文显示译文；无译文（还没翻译）显示提示而非掉回原文
+        if viewMode == 2 {
+            if let t = item.llmTranslatedMd, !t.isEmpty { return t }
+            return "（本篇尚未翻译——点上方「AI 翻译」生成译文后此处显示）"
+        }
+        // 双语/仅原文：优先原文 md
         if let md = item.contentMd, !md.isEmpty { return md }
         return item.excerpt ?? "(无内容)"
     }
@@ -1116,7 +1119,8 @@ public struct ReadingView: View {
                 busy = false
                 statusMsg = ok ? "✅ 翻译完成" : "❌ 翻译失败"
                 if ok {
-                    showTranslated = true
+                    // 翻译完成：若当前是仅原文，切到双语对照让用户立刻看到译文
+                    if viewMode == 1 { viewMode = 0 }
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)
                 }
             }
@@ -1154,7 +1158,8 @@ public struct ReadingView: View {
                 busy = false
                 statusMsg = ok ? "✅ 转录完成" : "❌ 转录失败"
                 if ok {
-                    showTranslated = true
+                    // 翻译完成：若当前是仅原文，切到双语对照让用户立刻看到译文
+                    if viewMode == 1 { viewMode = 0 }
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)
                 }
             }
