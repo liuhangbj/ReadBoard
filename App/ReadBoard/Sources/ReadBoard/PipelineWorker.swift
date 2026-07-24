@@ -188,43 +188,61 @@ public final class PipelineWorker: ObservableObject {
         LIMIT 2000;
         """
         guard db.prepare(sql, &stmt) else { return [] }
-        defer { sqlite3_finalize(stmt) }
 
+        // 先收全行，再一次性算死信/退避——原实现在行循环里每行 4 次 SQL（2000 行最坏 8000 次/轮）
+        struct Row {
+            let id: Int64, sourceId: Int64?
+            let title: String, url: String, language: String?, md: String?, excerpt: String?
+            let hasScore: Bool, hasSummary: Bool, hasTranslated: Bool, isMedia: Bool
+            let audioUrl: String?
+        }
+        var rawRows: [Row] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let sourceId = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 2)
             let ctype = colText(stmt, 3) ?? "article"
-            let title = colText(stmt, 4) ?? ""
-            let url = colText(stmt, 5) ?? ""
-            let language = colText(stmt, 6)
-            let md = colText(stmt, 7)
-            let excerpt = colText(stmt, 8)
-            let hasScore = sqlite3_column_type(stmt, 9) != SQLITE_NULL
-            let hasSummary = sqlite3_column_type(stmt, 10) != SQLITE_NULL
-            let hasTranslated = sqlite3_column_type(stmt, 11) != SQLITE_NULL
             let metaStr = colText(stmt, 12) ?? "{}"
-
-            // 按具体源查开关; source_id 为 NULL(存量/异常)则无开关, 跳过
-            guard let sid = sourceId, let pol = srcPolicies[sid], pol.enabled else { continue }
-            let body = (md?.isEmpty == false ? md! : (excerpt ?? ""))
             let audioUrl = Self.parseAudioUrl(metaStr)
             let isMedia = ctype == "podcast" || ctype == "video" || audioUrl != nil
+            rawRows.append(Row(
+                id: id, sourceId: sourceId,
+                title: colText(stmt, 4) ?? "", url: colText(stmt, 5) ?? "",
+                language: colText(stmt, 6), md: colText(stmt, 7), excerpt: colText(stmt, 8),
+                hasScore: sqlite3_column_type(stmt, 9) != SQLITE_NULL,
+                hasSummary: sqlite3_column_type(stmt, 10) != SQLITE_NULL,
+                hasTranslated: sqlite3_column_type(stmt, 11) != SQLITE_NULL,
+                isMedia: isMedia, audioUrl: audioUrl))
+        }
+        sqlite3_finalize(stmt)
 
-            var t = PendingTask(id: id, title: title, url: url, body: body,
-                                language: language, audioUrl: audioUrl)
+        // 一次聚合查询算全量 content 的死信+退避状态（jtype → skip）
+        let skipMap = failureSkipMap(contentIds: rawRows.map { $0.id })
+
+        for r in rawRows {
+            let id = r.id
+
+            // 按具体源查开关; source_id 为 NULL(存量/异常)则无开关, 跳过
+            guard let sid = r.sourceId, let pol = srcPolicies[sid], pol.enabled else { continue }
+            let body = (r.md?.isEmpty == false ? r.md! : (r.excerpt ?? ""))
+            let audioUrl = r.audioUrl
+            let isMedia = r.isMedia
+            let skip = skipMap[id] ?? [:]
+
+            var t = PendingTask(id: id, title: r.title, url: r.url, body: body,
+                                language: r.language, audioUrl: audioUrl)
             // R1: 各管线判定前先做失败退避/死信过滤——失败过多的不再反复调 LLM（治费用失控）
             // 打分：开关开 且 未打分 且 有正文 且 未死信
-            if pol.policy.autoScore, !hasScore, !body.isEmpty,
-               !shouldSkipForFailures(contentId: id, jtype: "score") { t.needScore = true }
+            if pol.policy.autoScore, !r.hasScore, !body.isEmpty,
+               skip["score"] != true { t.needScore = true }
             // 摘要：开关开 且 未摘要 且 (有正文 或 转录后会有)；媒体等转录补摘要，跳过
-            if pol.policy.autoSummarize, !hasSummary, !body.isEmpty, !isMedia,
-               !shouldSkipForFailures(contentId: id, jtype: "summarize") { t.needSummary = true }
+            if pol.policy.autoSummarize, !r.hasSummary, !body.isEmpty, !isMedia,
+               skip["summarize"] != true { t.needSummary = true }
             // 翻译：开关开 且 未翻译 且 文章有正文（媒体走转录）
-            if pol.policy.autoTranslate, !hasTranslated, !isMedia, !body.isEmpty,
-               !shouldSkipForFailures(contentId: id, jtype: "translate") { t.needTranslate = true }
+            if pol.policy.autoTranslate, !r.hasTranslated, !isMedia, !body.isEmpty,
+               skip["translate"] != true { t.needTranslate = true }
             // 转录：开关开 且 未转写 且 有媒体地址
-            if pol.policy.autoTranscribe, !hasTranslated, isMedia, (audioUrl != nil || !url.isEmpty),
-               !shouldSkipForFailures(contentId: id, jtype: "transcribe") {
+            if pol.policy.autoTranscribe, !r.hasTranslated, isMedia, (audioUrl != nil || !r.url.isEmpty),
+               skip["transcribe"] != true {
                 t.needTranscribe = true
             }
 
@@ -332,27 +350,58 @@ public final class PipelineWorker: ObservableObject {
 
     // MARK: R1 失败退避 / 死信（治 LLM 费用失控：失败任务不再每 120s 无限重试）
 
-    /// 该 content+jtype 是否应跳过：
-    /// - 累计失败 >= maxFailures（3）→ 死信，永久跳过（除非手动重试）
-    /// - 最近一次失败在 backoffSeconds（1h）内 → 退避，本轮跳过
-    /// - 最近一次是成功 → 不跳（其实也不会被捞出来，因已有结果）
+    /// 该 content+jtype 是否应跳过（单条版，保留给单篇重试场景）
     private func shouldSkipForFailures(contentId: Int64, jtype: String) -> Bool {
-        let rows = db.queryRows("""
-            SELECT status, finished_at FROM content_job
-            WHERE content_id = ? AND jtype = ?
-            ORDER BY id DESC LIMIT 20;
-            """, params: [contentId, jtype])
-        guard !rows.isEmpty else { return false }
-        // 累计失败次数（连续取最近 20 条里的 status=3）
-        let failCount = rows.filter { $0["status"] == "3" }.count
-        if failCount >= 3 { return true }   // 死信
-        // 最近一次是失败且在退避窗口内
-        if let last = rows.first, last["status"] == "3", let ts = last["finished_at"] {
-            if let lastDate = Self.utcDate(ts), Date().timeIntervalSince(lastDate) < 3600 {
-                return true   // 退避
+        failureSkipMap(contentIds: [contentId])[contentId]?[jtype] == true
+    }
+
+    /// 批量算死信/退避：对一批 content 一次 SQL 取全量失败记录，内存聚合。
+    /// 返回 content_id → (jtype → 是否跳过)。规则：
+    /// - 某 jtype 累计失败 >= 3 → 死信，永久跳过（除非手动重置）
+    /// - 最近一次失败在 1h 内 → 退避，本轮跳过
+    /// 原实现逐行 4 次 SQL，2000 行最坏 8000 次/120s 轮询，DB 往返开销失控。
+    private func failureSkipMap(contentIds: [Int64]) -> [Int64: [String: Bool]] {
+        guard !contentIds.isEmpty else { return [:] }
+        // content_id 去重（同 id 不会重复，但保险）
+        let uniqueIds = Array(Set(contentIds))
+        var result: [Int64: [String: Bool]] = [:]
+        // SQLite 单查询变量上限 999，分批 IN 查询（每批 500 留余量）
+        for batch in uniqueIds.chunked(into: 500) {
+            let placeholders = batch.map { _ in "?" }.joined(separator: ",")
+            let rows = db.queryRows("""
+                SELECT content_id, jtype, status, finished_at FROM content_job
+                WHERE content_id IN (\(placeholders))
+                  AND status IN (2, 3)
+                ORDER BY content_id, jtype, id DESC;
+                """, params: batch)
+            // 内存聚合：每 (content_id, jtype) 第一行是最近一次（ORDER BY id DESC）
+            var lastStatus: [String: (status: String, finishedAt: String?)] = [:]
+            var failCount: [String: Int] = [:]
+            for r in rows {
+                guard let cidStr = r["content_id"], let cid = Int64(cidStr),
+                      let jt = r["jtype"], let st = r["status"] else { continue }
+                let key = "\(cid)|\(jt)"
+                if lastStatus[key] == nil {
+                    lastStatus[key] = (st, r["finished_at"])
+                }
+                if st == "3" { failCount[key, default: 0] += 1 }
+            }
+            for (key, last) in lastStatus {
+                let parts = key.split(separator: "|", maxSplits: 1)
+                guard let cid = Int64(parts[0]) else { continue }
+                let jt = String(parts[1])
+                var skip = false
+                if (failCount[key] ?? 0) >= 3 {
+                    skip = true   // 死信
+                } else if last.status == "3", let ts = last.finishedAt,
+                          let lastDate = Self.utcDate(ts),
+                          Date().timeIntervalSince(lastDate) < 3600 {
+                    skip = true   // 退避
+                }
+                if skip { result[cid, default: [:]][jt] = true }
             }
         }
-        return false
+        return result
     }
 
     /// 解析 SQLite datetime('now') 的 UTC 字符串
@@ -424,5 +473,19 @@ public final class PipelineWorker: ObservableObject {
             group.cancelAll()
             return first
         }
+    }
+}
+
+/// 数组分批（SQLite IN 查询变量上限 999，大批量 ID 需分片）
+extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0 else { return [self] }
+        var out: [[Element]] = []
+        var i = 0
+        while i < count {
+            out.append(Array(self[i..<Swift.min(i + size, count)]))
+            i += size
+        }
+        return out
     }
 }

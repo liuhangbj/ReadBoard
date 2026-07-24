@@ -267,33 +267,45 @@ public final class LLMPipeline: @unchecked Sendable {
     }
 
     /// 把内容全文翻译成中文，写入 llm_translated_md
+    /// 长文（>15000 字）走分块翻译，不再静默截断丢尾部（此前 truncateKeepEnds(15000) 会丢超长文的后半）
     @discardableResult
     func translate(contentId: Int64, title: String, body: String, targetLang: String = "中文") async -> Bool {
         guard isAvailable else { return false }
-        let truncated = Self.truncateKeepEnds(body, maxChars: 15000)
-        let prompt = """
-        你是一位专业的翻译。请将以下文章完整翻译成\(targetLang)，要求：
-        - 保留原文的段落结构、数据、专有名词
-        - 语言流畅自然，符合中文表达习惯，不是逐字直译
-        - 标题也一并翻译，放在第一行
-        - 直接输出译文，不要任何解释或"以下是翻译"之类的话
+        var translated: String?
+        var usedModel = ""
+        if body.count > 15000 {
+            // 分块：先翻标题（短），正文按段落切块逐块翻
+            let titleT = await translateSingle(title, targetLang: targetLang) ?? title
+            guard let bodyT = await translateChunked(body, targetLang: targetLang) else { return false }
+            translated = titleT + "\n\n" + bodyT
+        } else {
+            let truncated = Self.truncateKeepEnds(body, maxChars: 15000)
+            let prompt = """
+            你是一位专业的翻译。请将以下文章完整翻译成\(targetLang)，要求：
+            - 保留原文的段落结构、数据、专有名词
+            - 语言流畅自然，符合中文表达习惯，不是逐字直译
+            - 标题也一并翻译，放在第一行
+            - 直接输出译文，不要任何解释或"以下是翻译"之类的话
 
-        标题：\(title)
+            标题：\(title)
 
-        正文：
-        \(truncated)
-        """
-        do {
-            let (text, model) = try await client.chat(
-                messages: [ChatMessage(role: "user", content: prompt)],
-                temperature: 0.3, maxTokens: 4096)
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return false }
-            return db.execute(
-                "UPDATE content SET llm_translated_md = ?, llm_model = ?, llm_processed_at = datetime('now') WHERE id = ?",
-                params: [trimmed, model, contentId])
-        } catch {
-            return false
+            正文：
+            \(truncated)
+            """
+            do {
+                let (text, model) = try await client.chat(
+                    messages: [ChatMessage(role: "user", content: prompt)],
+                    temperature: 0.3, maxTokens: 4096)
+                let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                translated = t.isEmpty ? nil : t
+                usedModel = model
+            } catch {
+                return false
+            }
         }
+        guard let final = translated, !final.isEmpty else { return false }
+        return db.execute(
+            "UPDATE content SET llm_translated_md = ?, llm_model = ?, llm_processed_at = datetime('now') WHERE id = ?",
+            params: [final, usedModel, contentId])
     }
 }

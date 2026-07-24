@@ -531,7 +531,7 @@ public final class Database: @unchecked Sendable {
         }
         if !conds.isEmpty { sql += " AND " + conds.joined(separator: " AND ") }
         execute(sql, params: buildMarkParams(source: source, minScore: minScore, keyword: keyword, useFTS: useFTS))
-        return scalarInt("SELECT changes()") ?? 0
+        return writeChanges()
     }
 
     private func buildMarkParams(source: String?, minScore: Int?, keyword: String?, useFTS: Bool) -> [Any?] {

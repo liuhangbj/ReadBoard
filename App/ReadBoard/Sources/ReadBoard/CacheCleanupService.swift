@@ -187,7 +187,7 @@ public final class CacheCleanupService: ObservableObject {
               AND read_at < datetime('now', '-\(archiveAfterDays) days')
               AND id NOT IN (SELECT content_id FROM content_tag);
             """)
-        let archived = db.scalarInt("SELECT changes()") ?? 0
+        let archived = db.writeChanges()
 
         var deleted = 0
         if deleteAfterDays > 0 {
@@ -199,7 +199,7 @@ public final class CacheCleanupService: ObservableObject {
                   AND updated_at < datetime('now', '-\(deleteAfterDays) days')
                   AND id NOT IN (SELECT content_id FROM content_tag);
                 """)
-            deleted = db.scalarInt("SELECT changes()") ?? 0
+            deleted = db.writeChanges()
         }
         return (archived, deleted)
     }
@@ -207,7 +207,7 @@ public final class CacheCleanupService: ObservableObject {
     /// R4 删除回收站：把即将物理删除的内容导出成 JSONL 存 Data/trash/YYYYMMDD/，留作后悔药。
     private func backupBeforeDelete(days: Int) {
         let rows = db.queryRows("""
-            SELECT id, title, url, source, author, published_at, llm_summary, llm_score, content_md
+            SELECT id, guid, title, url, source, author, published_at, llm_summary, llm_score, content_md
             FROM content
             WHERE is_archived = 1 AND starred = 0
               AND updated_at < datetime('now', '-\(days) days')
@@ -222,7 +222,8 @@ public final class CacheCleanupService: ObservableObject {
         var lines: [String] = []
         for r in rows {
             let obj: [String: Any?] = [
-                "id": r["id"].flatMap(Int.init), "title": r["title"], "url": r["url"],
+                "id": r["id"].flatMap(Int.init), "guid": r["guid"],
+                "title": r["title"], "url": r["url"],
                 "source": r["source"], "author": r["author"], "published_at": r["published_at"],
                 "llm_summary": r["llm_summary"], "llm_score": r["llm_score"].flatMap(Int.init),
                 "content_md": r["content_md"],
@@ -249,7 +250,7 @@ public final class CacheCleanupService: ObservableObject {
               AND id NOT IN (SELECT content_id FROM content_tag)
               AND updated_at < datetime('now', '-\(cleanHtmlAfterDays) days');
             """)
-        return db.scalarInt("SELECT changes()") ?? 0
+        return db.writeChanges()
     }
 
     // MARK: 回收站（trash 恢复 + 统计）
@@ -305,12 +306,15 @@ public final class CacheCleanupService: ObservableObject {
                 skipped += 1
                 continue
             }
+            // guid 是 NOT NULL：旧备份没有 guid 字段时用合成值兜底（此前缺失 guid 导致 INSERT 静默全失败）
+            let guid = (obj["guid"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "restored-\(id)"
             let ok = db.execute("""
-                INSERT INTO content (id, ctype, source, title, url, author, published_at,
+                INSERT INTO content (id, guid, ctype, source, title, url, author, published_at,
                                      excerpt, content_md, llm_summary, llm_score, is_archived, updated_at)
-                VALUES (?, 'article', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'));
+                VALUES (?, ?, 'article', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'));
                 """, params: [
                     id,
+                    guid,
                     obj["source"] as? String ?? "",
                     obj["title"] as? String ?? "",
                     obj["url"] as? String ?? "",
