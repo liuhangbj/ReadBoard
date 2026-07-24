@@ -357,13 +357,13 @@ struct MarkdownBodyView: View {
     private func blockView(_ block: MdBlock) -> some View {
         switch block {
         case .heading(let level, let text):
-            Text(MarkdownRenderer.inline(text, palette: p))
+            Text(MarkdownRenderer.inline(text, palette: p, fontSize: headingSize(level)))
                 .font(headingFont(level))
                 .foregroundStyle(headingColor(level))
                 .padding(.top, level <= 2 ? 10 : 5)
 
         case .paragraph(let text):
-            Text(MarkdownRenderer.inline(text, palette: p))
+            Text(MarkdownRenderer.inline(text, palette: p, fontSize: fontSize))
                 .font(fontChoice.font(size: fontSize))
                 .lineSpacing(lineSpacing)
 
@@ -373,7 +373,7 @@ struct MarkdownBodyView: View {
                     .font(fontChoice.font(size: fontSize))
                     .foregroundStyle(p.listMarker)
                     .frame(minWidth: 20, alignment: .trailing)
-                Text(MarkdownRenderer.inline(text, palette: p))
+                Text(MarkdownRenderer.inline(text, palette: p, fontSize: fontSize))
                     .font(fontChoice.font(size: fontSize))
                     .lineSpacing(lineSpacing)
             }
@@ -382,7 +382,7 @@ struct MarkdownBodyView: View {
         case .quote(let text):
             HStack(spacing: 0) {
                 Rectangle().fill(p.quoteBorder).frame(width: 3)
-                Text(MarkdownRenderer.inline(text, palette: p))
+                Text(MarkdownRenderer.inline(text, palette: p, fontSize: fontSize))
                     .font(fontChoice.font(size: fontSize))
                     .lineSpacing(lineSpacing)
                     .foregroundStyle(p.quoteText)
@@ -394,7 +394,7 @@ struct MarkdownBodyView: View {
         case .codeBlock(_, let code):
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
-                    .font(.system(size: fontSize - 1, design: .monospaced))
+                    .font(.system(size: fontSize, design: .monospaced))
                     .foregroundStyle(p.codeText)
                     .padding(12)
             }
@@ -432,14 +432,17 @@ struct MarkdownBodyView: View {
         }
     }
 
-    private func headingFont(_ level: Int) -> Font {
-        let base: CGFloat
+    private func headingSize(_ level: Int) -> CGFloat {
         switch level {
-        case 1: base = fontSize + 10
-        case 2: base = fontSize + 6
-        case 3: base = fontSize + 3
-        default: base = fontSize + 1
+        case 1: return fontSize + 10
+        case 2: return fontSize + 6
+        case 3: return fontSize + 3
+        default: return fontSize + 1
         }
+    }
+
+    private func headingFont(_ level: Int) -> Font {
+        let base = headingSize(level)
         // 标题字体跟用户的字体选择走，不被主题强制（主题 headingSerif 只作默认提示，
         // 用户选了字体就尊重用户——此前 Primary 的 headingSerif=true 把标题强制衬线，
         // 覆盖了用户选的黑体/楷体）

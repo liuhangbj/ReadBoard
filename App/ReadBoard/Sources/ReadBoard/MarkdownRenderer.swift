@@ -134,8 +134,14 @@ struct MarkdownRenderer {
 
     /// 行内样式：加粗 **x** / 斜体 *x* / 行内代码 `x` / 链接 [t](u)
     /// 返回 AttributedString（行内级渲染，供段落/列表项/标题用）。
-    /// palette 提供各语义元素的着色（bold/italic/inlineCode/link）；不传用默认。
-    static func inline(_ text: String, palette: ThemePalette? = nil) -> AttributedString {
+    /// palette 提供各语义元素的着色；fontSize 让行内元素跟正文字号走
+    /// （此前写死 .body/.body.bold() 系统语义字号 ~13pt，比用户设的正文字号小，
+    ///  导致加粗/斜体/行内代码渲染出来字号明显变小）。
+    static func inline(_ text: String, palette: ThemePalette? = nil, fontSize: CGFloat = 0) -> AttributedString {
+        // fontSize=0 表示不指定（用系统默认，向后兼容旧调用）
+        let boldFont: Font = fontSize > 0 ? .system(size: fontSize).bold() : .body.bold()
+        let italicFont: Font = fontSize > 0 ? .system(size: fontSize).italic() : .body.italic()
+        let codeFont: Font = fontSize > 0 ? .system(size: fontSize, design: .monospaced) : .system(.body, design: .monospaced)
         var result = AttributedString()
         var buf = ""
         var i = text.startIndex
@@ -165,7 +171,7 @@ struct MarkdownRenderer {
                 flushBuf()
                 let code = String(text[text.index(after: i)..<end])
                 var codeAttr = AttributedString(code)
-                codeAttr.font = .system(.body, design: .monospaced)
+                codeAttr.font = codeFont
                 codeAttr.foregroundColor = palette?.inlineCode
                 codeAttr.backgroundColor = palette?.inlineCodeBackground ?? Color.gray.opacity(0.18)
                 result.append(codeAttr)
@@ -178,7 +184,7 @@ struct MarkdownRenderer {
                 flushBuf()
                 let bold = String(text[text.index(i, offsetBy: 2)..<close])
                 var boldAttr = AttributedString(bold)
-                boldAttr.font = .body.bold()
+                boldAttr.font = boldFont
                 boldAttr.foregroundColor = palette?.bold
                 result.append(boldAttr)
                 i = text.index(close, offsetBy: 2)
@@ -191,7 +197,7 @@ struct MarkdownRenderer {
                 let em = String(text[text.index(after: i)..<close])
                 if !em.isEmpty {
                     var emAttr = AttributedString(em)
-                    emAttr.font = .body.italic()
+                    emAttr.font = italicFont
                     emAttr.foregroundColor = palette?.italic
                     result.append(emAttr)
                     i = text.index(after: close)
