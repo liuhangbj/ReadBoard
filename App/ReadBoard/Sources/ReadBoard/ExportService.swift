@@ -138,23 +138,33 @@ public final class ExportService: @unchecked Sendable {
     // MARK: 执行
 
     private func runFor(rule: ExportRule, contentId: Int64?) async {
-        let candidates = matchingContents(rule: rule, contentId: contentId)
-        guard !candidates.isEmpty else { return }
-        for c in candidates {
-            let (ok, dest, err) = await deliver(rule: rule, c: c)
-            db.execute("""
-                INSERT OR REPLACE INTO export_record (rule_id, content_id, status, destination, error)
-                VALUES (?,?,?,?,?)
-                """, params: [rule.id, c.id, ok ? "delivered" : "failed", dest, err])
+        // 分页跑完所有候选（此前 LIMIT 200 + 失败项重查 → 游标永不前进，积压 >200 时只反复处理同一批）
+        var beforeId: Int64? = nil
+        var totalProcessed = 0
+        while totalProcessed < 2000 {   // 单轮总量保险丝
+            let candidates = matchingContents(rule: rule, contentId: contentId, beforeId: beforeId)
+            guard !candidates.isEmpty else { break }
+            for c in candidates {
+                let (ok, dest, err) = await deliver(rule: rule, c: c)
+                db.execute("""
+                    INSERT OR REPLACE INTO export_record (rule_id, content_id, status, destination, error)
+                    VALUES (?,?,?,?,?)
+                    """, params: [rule.id, c.id, ok ? "delivered" : "failed", dest, err])
+            }
+            beforeId = candidates.last?.id
+            totalProcessed += candidates.count
+            // 失败项会重复出现（record 只挡 delivered），靠 beforeId 翻页保证不重查同一页
         }
         db.execute("UPDATE export_rule SET last_run_at = datetime('now') WHERE id = ?", params: [rule.id])
     }
 
-    /// 按 criteria 组装 SQL，只取还没被这条规则成功导出过的内容
-    private func matchingContents(rule: ExportRule, contentId: Int64?) -> [ExportContent] {
+    /// 按 criteria 组装 SQL，只取还没被这条规则成功导出过的内容。
+    /// beforeId 翻页游标：取 id < beforeId 的下一页（配合 ORDER BY id DESC）。
+    private func matchingContents(rule: ExportRule, contentId: Int64?, beforeId: Int64? = nil) -> [ExportContent] {
         var whereClauses = ["is_duplicate = 0"]
         var params: [Any?] = []
         if let cid = contentId { whereClauses.append("id = ?"); params.append(cid) }
+        if let bid = beforeId { whereClauses.append("id < ?"); params.append(bid) }
         if let minScore = rule.criteria.minScore { whereClauses.append("llm_score >= ?"); params.append(minScore) }
         if let ids = rule.criteria.sourceIds, !ids.isEmpty {
             whereClauses.append("source_id IN (\(ids.map { String($0) }.joined(separator: ",")))")
@@ -206,11 +216,20 @@ public final class ExportService: @unchecked Sendable {
 
     // MARK: 渲染 + 交付
 
+    /// YAML 字符串安全化：转义引号 + 压平换行（标题带换行会破坏 frontmatter 结构）
+    private static func yamlEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+    }
+
     private func render(rule: ExportRule, c: ExportContent) -> String {
         var md = "---\n"
-        md += "title: \"\(c.title.replacingOccurrences(of: "\"", with: "\\\""))\"\n"
-        md += "source: \"\(c.source)\"\n"
-        md += "url: \"\(c.url)\"\n"
+        md += "title: \"\(Self.yamlEscape(c.title))\"\n"
+        md += "source: \"\(Self.yamlEscape(c.source))\"\n"
+        md += "url: \"\(Self.yamlEscape(c.url))\"\n"
         if let s = c.score { md += "score: \(s)\n" }
         md += "published: \"\(c.publishedAt)\"\n"
         md += "rule: \"\(rule.name)\"\n---\n\n"
@@ -297,9 +316,15 @@ public final class ExportService: @unchecked Sendable {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        // webhook 体积上限：多数接收端（飞书/Slack/n8n）对单条 payload 有 1-4MB 限制，
+        // 超长转录稿直接打满会被整包拒收。截断正文 + 标注，保住元信息送达。
+        let maxBody = 900_000   // ~900KB markdown 上限
+        let mdCapped = md.count > maxBody
+            ? String(md.prefix(maxBody)) + "\n\n[...正文过长，已截断，完整版见应用内]"
+            : md
         let payload: [String: Any] = [
             "title": content.title, "url": content.url, "source": content.source,
-            "score": content.score ?? 0, "markdown": md,
+            "score": content.score ?? 0, "markdown": mdCapped,
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         // 重试 3 次（1s/3s 退避）：网络抖动/临时 5xx 不至于丢导出

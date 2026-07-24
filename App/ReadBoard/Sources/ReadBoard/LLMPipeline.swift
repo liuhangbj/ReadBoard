@@ -273,11 +273,13 @@ public final class LLMPipeline: @unchecked Sendable {
         guard isAvailable else { return false }
         var translated: String?
         var usedModel = ""
+        var partial = false   // 分块翻译有块失败保留原文 → 译文不完整，标记到 meta 供 UI/导出判断
         if body.count > 15000 {
             // 分块：先翻标题（短），正文按段落切块逐块翻
             let titleT = await translateSingle(title, targetLang: targetLang) ?? title
             guard let bodyT = await translateChunked(body, targetLang: targetLang) else { return false }
             translated = titleT + "\n\n" + bodyT
+            partial = bodyT.contains("[第 ") && bodyT.contains(" 段翻译失败，保留原文]")
         } else {
             let truncated = Self.truncateKeepEnds(body, maxChars: 15000)
             let prompt = """
@@ -304,8 +306,17 @@ public final class LLMPipeline: @unchecked Sendable {
             }
         }
         guard let final = translated, !final.isEmpty else { return false }
-        return db.execute(
+        let ok = db.execute(
             "UPDATE content SET llm_translated_md = ?, llm_model = ?, llm_processed_at = datetime('now') WHERE id = ?",
             params: [final, usedModel, contentId])
+        if ok, partial {
+            // 部分翻译标记：meta.translation_partial=1（不改变 hasTranslated 判定，
+            // 但 UI/导出可提示"此译文不完整"）
+            db.execute("""
+                UPDATE content SET meta = json_set(COALESCE(meta, '{}'), '$.translation_partial', 1)
+                WHERE id = ?;
+                """, params: [contentId])
+        }
+        return ok
     }
 }

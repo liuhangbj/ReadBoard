@@ -8,6 +8,7 @@ public struct ExportRulePane: View {
     @State private var editing: ExportRule? = nil
     @State private var showEditor = false
     @State private var runningId: Int64? = nil
+    @State private var deletingRule: ExportRule? = nil
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -80,8 +81,7 @@ public struct ExportRulePane: View {
                             .buttonStyle(.borderless)
 
                             Button(role: .destructive) {
-                                ExportService.shared.deleteRule(id: rule.id)
-                                reload()
+                                deletingRule = rule
                             } label: { Image(systemName: "trash") }
                             .buttonStyle(.borderless)
                         }
@@ -100,6 +100,21 @@ public struct ExportRulePane: View {
                 showEditor = false
                 reload()
             }
+        }
+        .alert("删除导出规则", isPresented: Binding(
+            get: { deletingRule != nil },
+            set: { if !$0 { deletingRule = nil } }
+        )) {
+            Button("删除", role: .destructive) {
+                if let r = deletingRule {
+                    ExportService.shared.deleteRule(id: r.id)
+                    reload()
+                }
+                deletingRule = nil
+            }
+            Button("取消", role: .cancel) { deletingRule = nil }
+        } message: {
+            Text("将删除规则「\(deletingRule?.name ?? "")」。已导出的文件不受影响，但导出记录会一并清除。")
         }
         .onAppear(perform: reload)
     }

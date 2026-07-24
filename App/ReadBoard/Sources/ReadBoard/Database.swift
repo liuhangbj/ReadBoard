@@ -86,10 +86,13 @@ public final class Database: @unchecked Sendable {
 
     private init() {}
 
-    /// 配置一条连接的 pragma（WAL/同步级别/忙等）
+    /// 配置一条连接的 pragma（WAL/同步级别/忙等/外键）
     private func configure(_ handle: OpaquePointer?) {
         var stmt: OpaquePointer?
-        for sql in ["PRAGMA journal_mode=WAL;", "PRAGMA synchronous=NORMAL;", "PRAGMA busy_timeout=5000;"] {
+        // foreign_keys：content_source.folder_id / content.source_id 有 ON DELETE SET NULL 声明，
+        // 不开 pragma 外键不生效（SQLite 默认关），删文件夹/源时子行外键悬挂
+        for sql in ["PRAGMA journal_mode=WAL;", "PRAGMA synchronous=NORMAL;",
+                    "PRAGMA busy_timeout=5000;", "PRAGMA foreign_keys=ON;"] {
             if sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK {
                 sqlite3_step(stmt)
             }
@@ -128,8 +131,14 @@ public final class Database: @unchecked Sendable {
         guard let handle = db else { return }
         let current = intVal(handle, "PRAGMA user_version;") ?? 0
         let migDir = NSHomeDirectory() + "/readboard/Data/migrations"
+        // 按数字前缀排序而非字典序——字典序下 100_xxx 会排到 99_xxx 前面导致断裂
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: migDir)
-            .filter({ $0.hasSuffix(".sql") }).sorted() else { return }
+            .filter({ $0.hasSuffix(".sql") })
+            .sorted(by: { f1, f2 in
+                let n1 = Int(f1.split(separator: "_").first ?? "") ?? 0
+                let n2 = Int(f2.split(separator: "_").first ?? "") ?? 0
+                return n1 != n2 ? n1 < n2 : f1 < f2
+            }) else { return }
         var version = current
         for file in files {
             // 文件名形如 009_export.sql → 版本号 9

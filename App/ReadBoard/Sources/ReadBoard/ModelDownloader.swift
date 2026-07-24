@@ -85,12 +85,31 @@ public final class ModelDownloader: ObservableObject {
                     }
                 }
             }
+            // 完整性校验：Content-Length 已知时核对最终文件大小（网络中断静默截断
+            // 会产生"能下载完但 whisper 加载即崩"的残模型，不如当场报错误删重下）
+            if total > 0,
+               let finalSize = (try? FileManager.default.attributesOfItem(atPath: tmpPath))?[.size] as? Int64,
+               finalSize != total {
+                try? FileManager.default.removeItem(atPath: tmpPath)
+                throw DownloadError.sizeMismatch(expected: total, got: finalSize)
+            }
             try FileManager.default.moveItem(atPath: tmpPath, toPath: modelPath)
             progress = 1
             statusText = "下载完成"
         } catch {
             errorMessage = "模型下载失败：\(error.localizedDescription)（重开会从断点续传）"
             statusText = "下载失败"
+        }
+    }
+
+    enum DownloadError: Error, LocalizedError {
+        case sizeMismatch(expected: Int64, got: Int64)
+        var errorDescription: String? {
+            switch self {
+            case .sizeMismatch(let e, let g):
+                return String(format: "文件不完整（期望 %.0f MB，实际 %.0f MB），已删除请重试",
+                              Double(e) / 1_000_000, Double(g) / 1_000_000)
+            }
         }
     }
 }

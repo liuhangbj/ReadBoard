@@ -173,6 +173,7 @@ public struct SourcesView: View {
 public struct FolderHeader: View {
     let folder: Folder
     @ObservedObject var store: SourceStore
+    @State private var showDeleteConfirm = false
 
     public var body: some View {
         HStack(spacing: 10) {
@@ -186,13 +187,19 @@ public struct FolderHeader: View {
             folderToggle("翻译", key: "auto_translate", on: folder.policy.autoTranslate)
             folderToggle("摘要", key: "auto_summarize", on: folder.policy.autoSummarize)
             folderToggle("转录", key: "auto_transcribe", on: folder.policy.autoTranscribe)
-            Button(role: .destructive) { store.removeFolder(id: folder.id) } label: {
+            Button(role: .destructive) { showDeleteConfirm = true } label: {
                 Image(systemName: "trash")
             }
             .buttonStyle(.borderless)
             .font(.caption)
         }
         .textCase(nil)
+        .alert("删除文件夹「\(folder.name)」？", isPresented: $showDeleteConfirm) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) { store.removeFolder(id: folder.id) }
+        } message: {
+            Text("文件夹内的源不会被删除，只是移出分组（folder_id 置空）。")
+        }
     }
 
     private func folderToggle(_ label: String, key: String, on: Bool) -> some View {

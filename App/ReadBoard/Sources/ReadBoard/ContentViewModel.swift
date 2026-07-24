@@ -33,9 +33,15 @@ public final class ContentViewModel: ObservableObject {
         }
     }
 
+    /// NotificationCenter observer token——block-based addObserver 的返回值须持有并在 deinit 移除，
+    /// 否则 ViewModel 释放后 observer 注册泄漏（weak self 防崩溃但注册表越积越多）。
+    /// nonisolated(unsafe)：NSObjectProtocol 非 Sendable，@MainActor 类的 deinit 是非隔离的，
+    /// 直接访问存储属性会被 Swift 6 并发检查拦。observer token 本身线程安全（removeObserver 可任意线程调）。
+    private nonisolated(unsafe) var updateObserver: NSObjectProtocol?
+
     init() {
         // 评分/翻译完成后刷新列表与当前选中项
-        NotificationCenter.default.addObserver(
+        updateObserver = NotificationCenter.default.addObserver(
             forName: .contentUpdated, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -46,6 +52,12 @@ public final class ContentViewModel: ObservableObject {
                     self.selectedItem = self.items.first { $0.id == cid }
                 }
             }
+        }
+    }
+
+    deinit {
+        if let obs = updateObserver {
+            NotificationCenter.default.removeObserver(obs)
         }
     }
 

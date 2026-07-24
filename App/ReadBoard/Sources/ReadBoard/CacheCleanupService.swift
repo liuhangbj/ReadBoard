@@ -206,6 +206,14 @@ public final class CacheCleanupService: ObservableObject {
         // 只留最近 30 天（死信统计只看失败次数，历史成功记录无价值）。
         db.execute("DELETE FROM content_job WHERE finished_at < datetime('now', '-30 days');")
 
+        // 孤儿内容归档：source_id 指向已删除源的内容，worker 永远不会处理（policies 查不到），
+        // 留在未归档区只会堆积。归档之（不删——内容本身可能还有阅读价值）。
+        db.execute("""
+            UPDATE content SET is_archived = 1
+            WHERE is_archived = 0 AND source_id IS NOT NULL
+              AND source_id NOT IN (SELECT id FROM content_source);
+            """)
+
         return (archived, deleted)
     }
 

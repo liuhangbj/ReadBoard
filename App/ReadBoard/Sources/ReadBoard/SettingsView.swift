@@ -558,7 +558,11 @@ public struct TrashRestoreView: View {
                         Spacer()
                         Button("恢复") {
                             let r = CacheCleanupService.shared.restoreTrash(batch: b)
-                            message = "✅ 恢复 \(r.restored) 条（跳过已存在 \(r.skipped)），已放回归档"
+                            // 全部条目都已在库里（恢复成功 + 本就存在）→ 备份文件已无价值，删掉防残留
+                            if r.restored + r.skipped > 0 {
+                                CacheCleanupService.shared.deleteTrash(batch: b)
+                            }
+                            message = "✅ 恢复 \(r.restored) 条（跳过已存在 \(r.skipped)），已放回归档，备份文件已清理"
                             reload()
                         }
                         .controlSize(.small)

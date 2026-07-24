@@ -96,6 +96,11 @@ public final class TranscribePipeline: @unchecked Sendable {
         guard let l = language?.lowercased() else { return "auto" }
         if l.hasPrefix("zh") || l == "cn" { return "zh" }
         if l.hasPrefix("en") { return "en" }
+        // 常见语言精确映射（whisper -l 用 ISO-639-1）：feed 里 language 字段可能是
+        // ja/ja-jp/de-de 等形式，auto 检测在多语言混合内容里不稳，能定就定死
+        let map: [String: String] = ["ja": "ja", "ko": "ko", "fr": "fr", "de": "de",
+                                     "es": "es", "it": "it", "pt": "pt", "ru": "ru"]
+        for (prefix, code) in map where l.hasPrefix(prefix) { return code }
         return "auto"
     }
 
