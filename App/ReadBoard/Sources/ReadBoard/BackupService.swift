@@ -6,7 +6,7 @@ import SQLite3
 // 保留最近 N 份，滚动清理。启动时跑一次 + 每日一次。
 
 @MainActor
-final class BackupService: ObservableObject {
+public final class BackupService: ObservableObject {
     static let shared = BackupService()
 
     @Published var lastBackupAt: String? = nil

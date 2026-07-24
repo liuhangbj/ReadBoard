@@ -4,13 +4,13 @@ import Foundation
 // 流程: 下载音频(yt-dlp/直链) → ffmpeg 转 16k wav → whisper-cli(medium) 转写 →
 //       非中文用 LLM 全文翻译成中文 → 写 llm_translated_md + 记 content_job
 
-enum TranscribeError: Error, LocalizedError {
+public enum TranscribeError: Error, LocalizedError {
     case noAudioUrl
     case downloadFailed(String)
     case whisperFailed(String)
     case emptyTranscript
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .noAudioUrl: return "无音频地址"
         case .downloadFailed(let m): return "下载失败: \(m)"
@@ -20,7 +20,7 @@ enum TranscribeError: Error, LocalizedError {
     }
 }
 
-final class TranscribePipeline: @unchecked Sendable {
+public final class TranscribePipeline: @unchecked Sendable {
     private let db = Database.shared
     private let llm = LLMPipeline()
 

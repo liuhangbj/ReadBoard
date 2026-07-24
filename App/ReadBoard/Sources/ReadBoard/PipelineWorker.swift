@@ -7,7 +7,7 @@ import SQLite3
 // App 内常驻 Timer 驱动, 自包含, 无 launchd/CLI。
 
 @MainActor
-final class PipelineWorker: ObservableObject {
+public final class PipelineWorker: ObservableObject {
     static let shared = PipelineWorker()
 
     @Published var isRunning = false

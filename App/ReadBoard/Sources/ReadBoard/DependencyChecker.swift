@@ -4,8 +4,8 @@ import Foundation
 // 启动时检查 whisper 转录链路的 4 个外部依赖，缺失的给出安装引导。
 // 模型文件缺失可自动下载(见 ModelDownloader)；whisper-cli/ffmpeg/yt-dlp 需 brew/手动安装。
 
-struct TranscribeDependency: Identifiable {
-    let id: String          // whisper-cli / ffmpeg / yt-dlp / model
+public struct TranscribeDependency: Identifiable {
+    public let id: String          // whisper-cli / ffmpeg / yt-dlp / model
     let displayName: String
     let path: String
     let installed: Bool
@@ -15,7 +15,7 @@ struct TranscribeDependency: Identifiable {
     let installHint: String
 }
 
-final class DependencyChecker: @unchecked Sendable {
+public final class DependencyChecker: @unchecked Sendable {
     static let shared = DependencyChecker()
 
     private init() {}

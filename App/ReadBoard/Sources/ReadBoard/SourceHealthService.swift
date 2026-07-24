@@ -3,8 +3,8 @@ import Foundation
 // MARK: - 源健康监控
 // 聚合各源抓取健康状况：报错、长期未更新（停更）、抓取量。帮助发现死源/问题源。
 
-struct SourceHealth: Identifiable, Hashable {
-    let id: Int64
+public struct SourceHealth: Identifiable, Hashable {
+    public let id: Int64
     let name: String
     let identifier: String
     let enabled: Bool
@@ -21,7 +21,7 @@ struct SourceHealth: Identifiable, Hashable {
     var hasError: Bool { error != nil && !(error?.isEmpty ?? true) }
 }
 
-final class SourceHealthService: @unchecked Sendable {
+public final class SourceHealthService: @unchecked Sendable {
     static let shared = SourceHealthService()
     private let db = Database.shared
     private init() {}

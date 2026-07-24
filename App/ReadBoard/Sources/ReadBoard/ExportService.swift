@@ -5,8 +5,8 @@ import Foundation
 // 管线完成后 PipelineWorker 调 runPending(trigger:)；设置页可手动 runFor(ruleId)。
 // 幂等：export_record UNIQUE(rule_id, content_id)，重跑不产生重复交付。
 
-struct ExportRule: Identifiable {
-    let id: Int64
+public struct ExportRule: Identifiable {
+    public let id: Int64
     var name: String
     var enabled: Bool
     var criteria: Criteria
@@ -70,7 +70,7 @@ struct ExportRule: Identifiable {
     }
 }
 
-final class ExportService: @unchecked Sendable {
+public final class ExportService: @unchecked Sendable {
 
     static let shared = ExportService()
     private let db = Database.shared
@@ -111,7 +111,7 @@ final class ExportService: @unchecked Sendable {
             VALUES (?,?,?,?,?,?)
             """, params: [rule.name, rule.enabled ? 1 : 0, rule.criteria.toJSON(),
                           rule.triggerOn, rule.target, configJson])
-        return Int64(db.scalarInt("SELECT last_insert_rowid();") ?? 0)
+        return db.lastInsertId()  // 走写连接 C API（读写分离后 scalarInt 的读连接拿不到本次插入的 rowid）
     }
 
     func deleteRule(id: Int64) {

@@ -4,14 +4,14 @@ import Foundation
 // 订阅资产命脉：从 FreshRSS/Follo 迁入订阅，备份导出。
 // OPML 结构: <outline text="文件夹"><outline text="源名" type="rss" xmlUrl="..."/></outline>
 
-struct OPMLResult {
+public struct OPMLResult {
     var foldersCreated = 0
     var sourcesAdded = 0
     var sourcesSkipped = 0    // 已存在(identifier 重复)
     var errors: [String] = []
 }
 
-final class OPMLService: @unchecked Sendable {
+public final class OPMLService: @unchecked Sendable {
     static let shared = OPMLService()
     private let db = Database.shared
     private init() {}

@@ -3,9 +3,9 @@ import SwiftUI
 // MARK: - 独立设置窗口（⌘, 打开，NavigationSplitView 分页）
 // 六页：通用 / AI 与 LLM / 依赖 / 功能板块 / 导出规则 / 缓存清理
 
-enum SettingsPage: String, CaseIterable, Identifiable {
+public enum SettingsPage: String, CaseIterable, Identifiable {
     case general, ai, deps, boards, export, cleanup
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
     var title: String {
         switch self {
@@ -30,10 +30,10 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     }
 }
 
-struct SettingsView: View {
+public struct SettingsView: View {
     @State private var selection: SettingsPage? = .general
 
-    var body: some View {
+    public var body: some View {
         NavigationSplitView {
             List(SettingsPage.allCases, selection: $selection) { page in
                 Label(page.title, systemImage: page.icon)
@@ -57,8 +57,8 @@ struct SettingsView: View {
 
 // MARK: - 通用
 
-struct GeneralPane: View {
-    var body: some View {
+public struct GeneralPane: View {
+    public var body: some View {
         Form {
             Section("feed 自动抓取") {
                 Toggle("自动周期抓取（默认 15 分钟）", isOn: Binding(
@@ -76,7 +76,7 @@ struct GeneralPane: View {
 
 // MARK: - AI 与 LLM
 
-struct AILLMPane: View {
+public struct AILLMPane: View {
     @State private var baseURL = ""
     @State private var apiKey = ""
     @State private var model = ""
@@ -86,7 +86,7 @@ struct AILLMPane: View {
     @State private var testOK = false
     @State private var savedHint = false
 
-    var body: some View {
+    public var body: some View {
         Form {
             Section("LLM 服务（OpenAI 兼容接口）") {
                 Picker("预设", selection: $presetId) {
@@ -165,13 +165,13 @@ struct AILLMPane: View {
 
 // MARK: - 依赖
 
-struct DepsPane: View {
+public struct DepsPane: View {
     @State private var deps: [TranscribeDependency] = []
     @ObservedObject private var downloader = ModelDownloader.shared
     @State private var copiedId: String? = nil
     @State private var customPaths: [String: String] = [:]
 
-    var body: some View {
+    public var body: some View {
         Form {
             Section("转录依赖（播客 / 视频转写）") {
                 ForEach(deps) { dep in
@@ -278,10 +278,10 @@ private extension Optional where Wrapped == String {
 
 // MARK: - 功能板块
 
-struct BoardsPane: View {
+public struct BoardsPane: View {
     @State private var states: [String: Bool] = [:]
 
-    var body: some View {
+    public var body: some View {
         Form {
             Section {
                 ForEach(FeatureBoard.allCases) { board in
@@ -322,7 +322,7 @@ struct BoardsPane: View {
 
 // MARK: - 缓存清理
 
-struct CleanupPane: View {
+public struct CleanupPane: View {
     @ObservedObject private var cleanup = CacheCleanupService.shared
     @State private var archiveDays = 30
     @State private var deleteDays = 90
@@ -330,7 +330,7 @@ struct CleanupPane: View {
     @State private var cleanHtml = true
     @State private var cleanHtmlDays = 7
 
-    var body: some View {
+    public var body: some View {
         Form {
             Section("当前占用") {
                 VStack(alignment: .leading, spacing: 4) {

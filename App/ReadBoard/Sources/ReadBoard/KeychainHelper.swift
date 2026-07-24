@@ -3,12 +3,17 @@ import Security
 
 /// Keychain 轻量封装：API key / token 等敏感配置的存取。
 /// 不存 UserDefaults——plist 明文可被其他进程读取，也会进备份/同步。
-enum KeychainHelper {
+public enum KeychainHelper {
 
     private static let service = "com.readboard"
 
     static func save(_ value: String, forKey key: String) -> Bool {
-        guard let data = value.data(using: .utf8) else { return false }
+        saveWithStatus(value, forKey: key) == errSecSuccess
+    }
+
+    /// 带状态码的版本（诊断用）：返回 OSStatus 而非 Bool
+    static func saveWithStatus(_ value: String, forKey key: String) -> OSStatus {
+        guard let data = value.data(using: .utf8) else { return -1 }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -18,7 +23,7 @@ enum KeychainHelper {
         SecItemDelete(query as CFDictionary)
         var attrs = query
         attrs[kSecValueData as String] = data
-        return SecItemAdd(attrs as CFDictionary, nil) == errSecSuccess
+        return SecItemAdd(attrs as CFDictionary, nil)
     }
 
     static func load(forKey key: String) -> String? {

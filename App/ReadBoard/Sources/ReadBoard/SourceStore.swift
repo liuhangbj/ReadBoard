@@ -5,7 +5,7 @@ import CryptoKit
 // MARK: - 订阅源模型
 
 /// 管线开关（存于 content_source.config JSON，默认全关）
-struct PipelinePolicy: Hashable {
+public struct PipelinePolicy: Hashable {
     var autoScore = false
     var autoTranslate = false
     var autoTranscribe = false
@@ -26,8 +26,8 @@ struct PipelinePolicy: Hashable {
     }
 }
 
-struct FeedSource: Identifiable, Hashable {
-    let id: Int64
+public struct FeedSource: Identifiable, Hashable {
+    public let id: Int64
     let stype: String          // rss / podcast / youtube / wechat
     let name: String
     let identifier: String     // feed url / channel id
@@ -73,8 +73,8 @@ struct FeedSource: Identifiable, Hashable {
 
 // MARK: - 文件夹
 
-struct Folder: Identifiable, Hashable {
-    let id: Int64
+public struct Folder: Identifiable, Hashable {
+    public let id: Int64
     let name: String
     let config: String
 
@@ -84,7 +84,7 @@ struct Folder: Identifiable, Hashable {
 // MARK: - 订阅源管理（写入 + 抓取调度）
 
 @MainActor
-final class SourceStore: ObservableObject {
+public final class SourceStore: ObservableObject {
     /// 常驻单例：自动抓取调度挂在它上面（App 生命周期内不被释放）
     static let shared = SourceStore()
 

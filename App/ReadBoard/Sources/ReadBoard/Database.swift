@@ -3,8 +3,8 @@ import SQLite3
 
 // MARK: - 数据模型
 
-struct ContentItem: Identifiable, Hashable {
-    let id: Int64
+public struct ContentItem: Identifiable, Hashable {
+    public let id: Int64
     let ctype: String
     let source: String
     let title: String
@@ -62,8 +62,8 @@ struct ContentItem: Identifiable, Hashable {
     }
 }
 
-struct SourceGroup: Identifiable, Hashable {
-    var id: String { name }
+public struct SourceGroup: Identifiable, Hashable {
+    public var id: String { name }
     let name: String      // source 或 feed 显示名
     let kind: String      // rss / podcast / youtube / wechat
     let count: Int
@@ -71,7 +71,7 @@ struct SourceGroup: Identifiable, Hashable {
 
 // MARK: - SQLite 只读访问
 
-final class Database: @unchecked Sendable {
+public final class Database: @unchecked Sendable {
     static let shared = Database()
     /// 读连接：供 UI 查询（fetchContents/fetchSourceGroups/queryRows 等）
     private var db: OpaquePointer?
@@ -136,10 +136,22 @@ final class Database: @unchecked Sendable {
             let numStr = file.split(separator: "_").first.map(String.init) ?? "0"
             guard let num = Int(numStr), num > current else { continue }
             guard let sql = try? String(contentsOfFile: "\(migDir)/\(file)", encoding: .utf8) else { continue }
+            var allOK = true
             for statement in Self.splitSQLStatements(sql) {
-                execRaw(handle, statement)
+                if !execRaw(handle, statement) {
+                    allOK = false
+                    let err = String(cString: sqlite3_errmsg(handle))
+                    // 迁移失败必须可见——静默跳过会导致索引/表缺失而无人知晓（011 dedup 索引曾因此缺位）
+                    fputs("[migration] ⚠ \(file) 执行失败: \(err)\n  语句: \(statement.prefix(120))\n", stderr)
+                }
             }
-            version = max(version, num)
+            // 只在全部成功时才推进版本；部分失败保持版本让下次重试
+            if allOK {
+                version = max(version, num)
+            } else {
+                fputs("[migration] ⚠ \(file) 有语句失败，user_version 不推进，下次启动重试\n", stderr)
+                break
+            }
         }
         if version != current {
             execRaw(handle, "PRAGMA user_version = \(version);")
@@ -241,6 +253,20 @@ final class Database: @unchecked Sendable {
     /// 写连接上的 changes()（紧跟 execute 调用，返回刚影响的行数）
     func writeChanges() -> Int {
         intVal(wdb, "SELECT changes();") ?? 0
+    }
+
+    /// 写连接上的标量 Int——last_insert_rowid()/changes() 这类"本次写入的会话状态"
+    /// 必须在写连接上查，走读连接会拿到错的值（读写双连接下读连接没有这次插入的上下文）
+    func writeScalarInt(_ sql: String, params: [Any?] = []) -> Int? {
+        guard open() else { return nil }
+        var stmt: OpaquePointer?
+        var result: Int?
+        if sqlite3_prepare_v2(wdb, sql, -1, &stmt, nil) == SQLITE_OK {
+            bindParams(stmt, params)
+            if sqlite3_step(stmt) == SQLITE_ROW { result = Int(sqlite3_column_int64(stmt, 0)) }
+        }
+        sqlite3_finalize(stmt)
+        return result
     }
 
     /// 查询单个 Int 值

@@ -5,7 +5,7 @@ import Foundation
 // 保护：星标/有标签的不动。周期执行（每日）。
 
 @MainActor
-final class RetentionService: ObservableObject {
+public final class RetentionService: ObservableObject {
     static let shared = RetentionService()
 
     @Published var lastRunSummary = ""

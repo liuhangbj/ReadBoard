@@ -8,7 +8,7 @@ import SQLite3
 // 备份滚动只删超额的旧文件；临时目录只删 readboard- 前缀自己建的。
 
 @MainActor
-final class CacheCleanupService: ObservableObject {
+public final class CacheCleanupService: ObservableObject {
     static let shared = CacheCleanupService()
 
     // 各项磁盘占用（字节）+ 条目数，供设置页展示

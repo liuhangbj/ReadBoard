@@ -3,13 +3,13 @@ import Foundation
 // MARK: - 标签系统
 // 跨源主题归类（AI/矿业/宏观），多对多。tag + content_tag 两表。
 
-struct Tag: Identifiable, Hashable {
-    let id: Int64
+public struct Tag: Identifiable, Hashable {
+    public let id: Int64
     let name: String
     let color: String?
 }
 
-final class TagService: @unchecked Sendable {
+public final class TagService: @unchecked Sendable {
     static let shared = TagService()
     private let db = Database.shared
     private init() {}

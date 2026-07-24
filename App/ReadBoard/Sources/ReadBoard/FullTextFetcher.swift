@@ -8,7 +8,7 @@ import Foundation
 //   summary    — 抓不到全文, 只留摘要
 // 执行时按 mode 走对应路径, 结果写 content_md + fetch_status + fetch_engine。
 
-enum FetchMode: String, CaseIterable {
+public enum FetchMode: String, CaseIterable, Sendable {
     case feedFull = "feed_full"
     case defuddle = "defuddle"
     case cdp = "cdp"
@@ -24,7 +24,7 @@ enum FetchMode: String, CaseIterable {
     }
 }
 
-final class FullTextFetcher: @unchecked Sendable {
+public final class FullTextFetcher: @unchecked Sendable {
     static let shared = FullTextFetcher()
 
     /// node / CLI 脚本路径（node 走 DependencyPaths 解析，脚本在 App 资源内）

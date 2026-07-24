@@ -10,10 +10,10 @@ import Foundation
 //   ai        AI 板块（打分 / 摘要 / 翻译 / 转录 四条 LLM/whisper 管线）
 //   export    后处理板块（按条件导出到 Obsidian / readitlater / webhook）
 
-enum FeatureBoard: String, CaseIterable, Identifiable {
+public enum FeatureBoard: String, CaseIterable, Identifiable {
     case media, fulltext, ai, `export`
 
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
     var displayName: String {
         switch self {
@@ -68,9 +68,9 @@ enum FeatureBoard: String, CaseIterable, Identifiable {
 // MARK: - AI 子管线开关（挂在 ai 板块下，细粒度）
 // 与板块总开关两层：board.ai.enabled && aiPipeline(.score) 才真开。
 
-enum AIPipeline: String, CaseIterable, Identifiable {
+public enum AIPipeline: String, CaseIterable, Identifiable {
     case score, summarize, translate, transcribe
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
     var displayName: String {
         switch self {
@@ -100,7 +100,7 @@ enum AIPipeline: String, CaseIterable, Identifiable {
 // 保留 .env 作为首次启动的默认值填充；一旦设置页保存过，以 App 内配置为准。
 // apiKey 不落 plist——明文可被其他进程读取，也会进备份/同步，统一走 Keychain。
 
-struct LLMSettings {
+public struct LLMSettings {
     var baseURL: String
     var apiKey: String
     var model: String

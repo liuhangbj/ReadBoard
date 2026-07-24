@@ -2,14 +2,14 @@ import Foundation
 
 // MARK: - LLM 配置（可 App 内覆盖，默认读 rss-curation .env 复用 key）
 
-struct LLMProvider: Hashable {
+public struct LLMProvider: Hashable {
     var name: String
     var endpoint: String
     var apiKey: String
     var model: String
 }
 
-enum LLMConfig {
+public enum LLMConfig {
     /// 从 rss-curation/.env 读取 key（复用，避免重复配置）。
     /// 优先 DeepSeek；环境变量 READBOARD_LLM_* 可覆盖。
     static func defaultProviders() -> [LLMProvider] {
@@ -72,13 +72,13 @@ enum LLMConfig {
 
 // MARK: - OpenAI 兼容客户端（fallback 链）
 
-enum LLMError: Error, LocalizedError {
+public enum LLMError: Error, LocalizedError {
     case noProvider
     case httpError(Int, String)
     case emptyResponse
     case invalidJSON
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .noProvider: return "未配置 LLM API Key"
         case .httpError(let c, let b): return "LLM HTTP \(c): \(b.prefix(200))"
@@ -88,12 +88,12 @@ enum LLMError: Error, LocalizedError {
     }
 }
 
-struct ChatMessage {
+public struct ChatMessage {
     let role: String
     let content: String
 }
 
-final class LLMClient {
+public final class LLMClient {
 
     /// 每次调用都读当前配置（设置页改后立即生效，无需重启）。
     /// App 内保存的配置排最前，其后是 .env 探测的 fallback 链。

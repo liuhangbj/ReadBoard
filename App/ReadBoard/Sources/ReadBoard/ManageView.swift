@@ -3,10 +3,10 @@ import SwiftUI
 // MARK: - 管理面板
 // 统一承载：统计概览 / 源健康 / 失败重试 / 标签管理 / 过滤规则
 
-struct ManageView: View {
+public struct ManageView: View {
     @State private var tab = 0
 
-    var body: some View {
+    public var body: some View {
         VStack(spacing: 0) {
             Picker("", selection: $tab) {
                 Text("统计").tag(0)
@@ -34,12 +34,12 @@ struct ManageView: View {
 
 // MARK: 统计概览
 
-struct StatsPane: View {
+public struct StatsPane: View {
     @State private var s = StatsOverview()
     @State private var jobTypes: [(jtype: String, ok: Int, failed: Int)] = []
     @State private var topSources: [(name: String, count: Int)] = []
 
-    var body: some View {
+    public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 // 概览卡片
@@ -114,10 +114,10 @@ struct StatsPane: View {
 
 // MARK: 源健康
 
-struct SourceHealthPane: View {
+public struct SourceHealthPane: View {
     @State private var problems: [SourceHealth] = []
 
-    var body: some View {
+    public var body: some View {
         List {
             if problems.isEmpty {
                 ContentUnavailableView("所有源健康", systemImage: "checkmark.seal",
@@ -148,11 +148,11 @@ struct SourceHealthPane: View {
 
 // MARK: 失败重试
 
-struct FailedJobPane: View {
+public struct FailedJobPane: View {
     @State private var failures: [FailedJob] = []
     @State private var retrying: Set<Int64> = []
 
-    var body: some View {
+    public var body: some View {
         List {
             if failures.isEmpty {
                 ContentUnavailableView("没有失败任务", systemImage: "checkmark.circle",
@@ -197,11 +197,11 @@ struct FailedJobPane: View {
 
 // MARK: 标签管理
 
-struct TagManagePane: View {
+public struct TagManagePane: View {
     @State private var tagCounts: [(tag: Tag, count: Int)] = []
     @State private var newTag = ""
 
-    var body: some View {
+    public var body: some View {
         VStack(spacing: 0) {
             HStack {
                 TextField("新建标签", text: $newTag)
@@ -241,7 +241,7 @@ struct TagManagePane: View {
 
 // MARK: 过滤规则
 
-struct FilterRulePane: View {
+public struct FilterRulePane: View {
     @State private var rules: [FilterRule] = []
     @State private var showAdd = false
     // 新规则表单
@@ -251,7 +251,7 @@ struct FilterRulePane: View {
     @State private var rPattern = ""
     @State private var rAction = "archive"
 
-    var body: some View {
+    public var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("命中规则的新内容将自动执行动作")

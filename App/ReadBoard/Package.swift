@@ -5,9 +5,19 @@ let package = Package(
     name: "ReadBoard",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(
+        .target(
             name: "ReadBoard",
             path: "Sources/ReadBoard"
+        ),
+        .executableTarget(
+            name: "ReadBoardMain",
+            dependencies: ["ReadBoard"],
+            path: "Sources/ReadBoardMain"
+        ),
+        .testTarget(
+            name: "ReadBoardTests",
+            dependencies: ["ReadBoard"],
+            path: "Tests/ReadBoardTests"
         )
     ]
 )

@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - 订阅源管理界面
 
-struct SourcesView: View {
+public struct SourcesView: View {
     @ObservedObject private var store = SourceStore.shared
     @ObservedObject private var worker = PipelineWorker.shared
     @State private var showAddSheet = false
@@ -10,7 +10,7 @@ struct SourcesView: View {
     @State private var newFolderName = ""
     @State private var opmlMessage = ""
 
-    var body: some View {
+    public var body: some View {
         VStack(spacing: 0) {
             // 顶部工具条
             HStack {
@@ -170,11 +170,11 @@ struct SourcesView: View {
 
 // MARK: 文件夹分组头（含文件夹级管线总开关）
 
-struct FolderHeader: View {
+public struct FolderHeader: View {
     let folder: Folder
     @ObservedObject var store: SourceStore
 
-    var body: some View {
+    public var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "folder.fill")
                 .foregroundStyle(.secondary)
@@ -208,11 +208,11 @@ struct FolderHeader: View {
 
 // MARK: 单行
 
-struct SourceRow: View {
+public struct SourceRow: View {
     let src: FeedSource
     @ObservedObject var store: SourceStore
 
-    var body: some View {
+    public var body: some View {
         HStack(spacing: 10) {
             Text(icon)
                 .font(.title3)
@@ -362,7 +362,7 @@ struct SourceRow: View {
 
 // MARK: 添加源
 
-struct AddSourceSheet: View {
+public struct AddSourceSheet: View {
     @ObservedObject var store: SourceStore
     @Environment(\.dismiss) private var dismiss
 
@@ -372,7 +372,7 @@ struct AddSourceSheet: View {
     @State private var testing = false
     @State private var testResult = ""
 
-    var body: some View {
+    public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("添加订阅源").font(.title3.bold())
 

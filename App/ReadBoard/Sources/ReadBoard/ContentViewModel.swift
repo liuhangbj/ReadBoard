@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 
 @MainActor
-final class ContentViewModel: ObservableObject {
+public final class ContentViewModel: ObservableObject {
     @Published var sourceGroups: [SourceGroup] = []
     @Published var items: [ContentItem] = []
     @Published var selectedSource: String? = nil   // nil = 全部

@@ -4,7 +4,7 @@ import Foundation
 // 优先级：用户在设置页指定的路径（UserDefaults）→ PATH 探测（which）→ 常见安装位置。
 // 任何一项都不假设用户机器和我一样——开箱无依赖也可运行核心功能，转录/全文按需配置。
 
-enum DependencyPaths {
+public enum DependencyPaths {
 
     enum Kind: String, CaseIterable, Identifiable {
         case whisperCLI, ffmpeg, ytdlp, node, whisperModel

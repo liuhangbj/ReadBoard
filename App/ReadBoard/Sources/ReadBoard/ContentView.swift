@@ -1,10 +1,10 @@
 import SwiftUI
 
-struct ContentView: View {
+public struct ContentView: View {
     @StateObject private var vm = ContentViewModel()
     @FocusState private var listFocused: Bool
 
-    var body: some View {
+    public var body: some View {
         NavigationSplitView {
             // ── 左栏：源列表 ──
             sourceSidebar
@@ -191,10 +191,10 @@ struct ContentView: View {
 
 // MARK: - 文章行
 
-struct ArticleRow: View {
+public struct ArticleRow: View {
     let item: ContentItem
 
-    var body: some View {
+    public var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .top) {
                 if !item.isRead {
@@ -265,7 +265,7 @@ struct ArticleRow: View {
 
 // MARK: - 阅读区
 
-struct ReadingView: View {
+public struct ReadingView: View {
     let item: ContentItem
     @Binding var showTranslated: Bool
 
@@ -274,7 +274,7 @@ struct ReadingView: View {
     @State private var busy = false
     @State private var statusMsg: String?
 
-    var body: some View {
+    public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 // 标题 + 元信息
@@ -469,12 +469,12 @@ extension Notification.Name {
 // MARK: - 标签编辑（阅读区）
 // 显示当前内容标签 + 输入新标签(回车添加) + 点标签移除
 
-struct TagEditorView: View {
+public struct TagEditorView: View {
     let contentId: Int64
     @State private var tags: [Tag] = []
     @State private var input = ""
 
-    var body: some View {
+    public var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "tag").foregroundStyle(.secondary).font(.caption)
             ForEach(tags) { tag in

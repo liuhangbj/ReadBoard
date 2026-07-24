@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - 评分结果
 
-struct ScoreResult {
+public struct ScoreResult {
     let depth: Int
     let quality: Int
     let readability: Int
@@ -12,7 +12,7 @@ struct ScoreResult {
 
 // MARK: - LLM 管线（评分 + 翻译）
 
-final class LLMPipeline: @unchecked Sendable {
+public final class LLMPipeline: @unchecked Sendable {
     private let client = LLMClient()
     private let db = Database.shared
 

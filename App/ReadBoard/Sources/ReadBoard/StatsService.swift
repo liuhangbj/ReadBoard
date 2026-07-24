@@ -3,7 +3,7 @@ import Foundation
 // MARK: - 统计面板数据
 // 源数量/内容量/管线处理量/失败率聚合。
 
-struct StatsOverview {
+public struct StatsOverview {
     var totalSources = 0
     var enabledSources = 0
     var totalContent = 0
@@ -23,7 +23,7 @@ struct StatsOverview {
     var dbSizeMB: Double = 0
 }
 
-final class StatsService: @unchecked Sendable {
+public final class StatsService: @unchecked Sendable {
     static let shared = StatsService()
     private let db = Database.shared
     private init() {}

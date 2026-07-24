@@ -3,13 +3,13 @@ import SwiftUI
 // MARK: - 导出规则管理（后处理板块）
 // 规则列表 + 新建/编辑表单。手动"立即执行"对匹配内容全量补跑（幂等，已交付的跳过）。
 
-struct ExportRulePane: View {
+public struct ExportRulePane: View {
     @State private var rules: [ExportRule] = []
     @State private var editing: ExportRule? = nil
     @State private var showEditor = false
     @State private var runningId: Int64? = nil
 
-    var body: some View {
+    public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("导出规则")
@@ -116,7 +116,7 @@ struct ExportRulePane: View {
 
 // MARK: - 规则编辑表单
 
-struct ExportRuleEditor: View {
+public struct ExportRuleEditor: View {
     @State var rule: ExportRule
     let onSave: (ExportRule) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -126,7 +126,7 @@ struct ExportRuleEditor: View {
     @State private var bySource = false
     @State private var webhookURL = ""
 
-    var body: some View {
+    public var body: some View {
         VStack(spacing: 0) {
             Text(rule.id == 0 ? "新建导出规则" : "编辑导出规则")
                 .font(.title3.bold())

@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Feed 抓取与解析（自研，脱离 FreshRSS）
 // 收编原 FeedParser.php 逻辑：RSS 2.0 <item> / Atom <entry>，识别 podcast enclosure / YouTube 扩展
 
-struct ParsedEntry {
+public struct ParsedEntry {
     let guid: String
     let title: String
     let url: String
@@ -13,11 +13,11 @@ struct ParsedEntry {
     var meta: [String: String] = [:]   // audio_url / video_id / duration 等
 }
 
-enum FeedKind: String {
+public enum FeedKind: String {
     case article, podcast, video
 }
 
-struct ParsedFeed {
+public struct ParsedFeed {
     let title: String
     let siteURL: String?
     var entries: [ParsedEntry]
@@ -29,13 +29,13 @@ struct ParsedFeed {
     }
 }
 
-enum FeedFetchError: Error, LocalizedError {
+public enum FeedFetchError: Error, LocalizedError {
     case badURL
     case httpError(Int)
     case emptyBody
     case parseFailed
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .badURL: return "无效的订阅地址"
         case .httpError(let c): return "HTTP 错误 \(c)"
@@ -45,7 +45,7 @@ enum FeedFetchError: Error, LocalizedError {
     }
 }
 
-final class FeedFetcher {
+public final class FeedFetcher {
     /// 抓取并解析一个 feed
     static func fetch(urlString: String, proxy: String? = nil) async throws -> ParsedFeed {
         guard let url = URL(string: urlString) else { throw FeedFetchError.badURL }

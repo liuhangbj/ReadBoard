@@ -1,8 +1,8 @@
 import SwiftUI
 
-@main
-struct ReadBoardApp: App {
-    init() {
+// 入口在 Sources/ReadBoardMain/main.swift（独立 mini-target，库本身无 @main 以便测试链接）
+public struct ReadBoardApp: App {
+    public init() {
         // 启动后台管线 worker（周期扫描未处理内容，按开关补跑打分/翻译/摘要/转录）
         PipelineWorker.shared.start()
         // 启动 feed 自动抓取调度（周期 syncAll，信息流源头）
@@ -13,7 +13,7 @@ struct ReadBoardApp: App {
         RetentionService.shared.start()
     }
 
-    var body: some Scene {
+    public var body: some Scene {
         WindowGroup {
             RootView()
                 .frame(minWidth: 900, minHeight: 600)
@@ -28,10 +28,10 @@ struct ReadBoardApp: App {
     }
 }
 
-struct RootView: View {
+public struct RootView: View {
     @State private var tab = 0
 
-    var body: some View {
+    public var body: some View {
         TabView(selection: $tab) {
             ContentView()
                 .tabItem { Label("阅读", systemImage: "doc.text") }

@@ -4,8 +4,8 @@ import Foundation
 // 关键词/正则规则：新内容入库/管线扫描时命中则自动执行动作（归档/标已读/加星/打标签）。
 // source_id NULL=全局规则，否则仅对某源生效。
 
-struct FilterRule: Identifiable, Hashable {
-    let id: Int64
+public struct FilterRule: Identifiable, Hashable {
+    public let id: Int64
     var name: String
     var field: String        // title / content / author / url
     var matchType: String    // contains / regex / prefix
@@ -15,7 +15,7 @@ struct FilterRule: Identifiable, Hashable {
     var enabled: Bool
 }
 
-final class FilterService: @unchecked Sendable {
+public final class FilterService: @unchecked Sendable {
     static let shared = FilterService()
     private let db = Database.shared
     private init() {}

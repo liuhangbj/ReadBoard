@@ -3,8 +3,8 @@ import Foundation
 // MARK: - 管线失败记录 + 手动重试
 // content_job 记了各管线的失败(status=3)。这里聚合失败项供重看/手动重试。
 
-struct FailedJob: Identifiable, Hashable {
-    let id: Int64            // content_job.id
+public struct FailedJob: Identifiable, Hashable {
+    public let id: Int64            // content_job.id
     let contentId: Int64
     let jtype: String        // score / translate / summarize / transcribe
     let error: String?
@@ -12,7 +12,7 @@ struct FailedJob: Identifiable, Hashable {
     let title: String        // 关联 content.title
 }
 
-final class FailedJobService: @unchecked Sendable {
+public final class FailedJobService: @unchecked Sendable {
     static let shared = FailedJobService()
     private let db = Database.shared
     private init() {}

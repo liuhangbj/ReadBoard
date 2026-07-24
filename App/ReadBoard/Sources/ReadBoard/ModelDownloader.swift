@@ -4,7 +4,7 @@ import Foundation
 // 模型缺失时从 huggingface 下载 ggml-medium.bin 到 ~/tools/whisper/models/，带进度回调。
 
 @MainActor
-final class ModelDownloader: ObservableObject {
+public final class ModelDownloader: ObservableObject {
     static let shared = ModelDownloader()
 
     @Published var isDownloading = false
