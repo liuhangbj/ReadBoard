@@ -214,43 +214,7 @@ public final class ExportService: @unchecked Sendable {
         let publishedAt: String
     }
 
-    // MARK: 渲染 + 交付
-
-    /// YAML 字符串安全化：转义引号 + 压平换行（标题带换行会破坏 frontmatter 结构）
-    private static func yamlEscape(_ s: String) -> String {
-        s.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
-    }
-
-    private func render(rule: ExportRule, c: ExportContent) -> String {
-        var md = "---\n"
-        md += "title: \"\(Self.yamlEscape(c.title))\"\n"
-        md += "source: \"\(Self.yamlEscape(c.source))\"\n"
-        md += "url: \"\(Self.yamlEscape(c.url))\"\n"
-        if let s = c.score { md += "score: \(s)\n" }
-        md += "published: \"\(c.publishedAt)\"\n"
-        md += "rule: \"\(rule.name)\"\n---\n\n"
-        md += "# \(c.title)\n\n"
-        if let sum = c.summary, !sum.isEmpty { md += "> \(sum)\n\n" }
-        // 正文优先级：译文（含转录稿，TranscribePipeline 写入此字段）> 原文
-        // 剥嵌套 frontmatter：内容本身若带 --- 头（Defuddle/抓取器有时会留），
-        // 否则 Obsidian 会把内层 --- 当正文分隔，渲染出双重 frontmatter。
-        if let t = c.translated, !t.isEmpty {
-            let tClean = Self.stripLeadingFrontmatter(t)
-            if let orig = c.contentMd, !orig.isEmpty {
-                md += tClean + "\n\n---\n\n## 原文\n\n" + Self.stripLeadingFrontmatter(orig)
-            } else {
-                md += tClean
-            }
-        } else {
-            md += Self.stripLeadingFrontmatter(c.contentMd ?? "")
-        }
-        md += "\n\n[原文链接](\(c.url))\n"
-        return md
-    }
+    // MARK: 交付（渲染统一走 ArchiveService，归档 md 是唯一产物）
 
     /// 去掉正文开头的 YAML frontmatter 块（--- ... ---），防止导出后双重 frontmatter
     static func stripLeadingFrontmatter(_ text: String) -> String {
@@ -267,8 +231,21 @@ public final class ExportService: @unchecked Sendable {
         return text
     }
 
+    /// 交付 = 把归档 md 分发到目标。归档文件是唯一产物（ArchiveService 渲染），
+    /// 本服务不再自己渲染——mddir/obsidian 拷贝归档文件，webhook 读归档内容发送。
+    /// 内容未归档（没走完管线）：临时渲染内容分发，不落盘不打归档标记
+    ///（完成才归档是归档语义，导出只是分发，不该把未完成的标成已归档）。
     private func deliver(rule: ExportRule, c: ExportContent) async -> (Bool, String?, String?) {
-        let md = render(rule: rule, c: c)
+        let md: String
+        if let archivePath = ArchiveService.shared.archiveFilePath(contentId: c.id),
+           FileManager.default.fileExists(atPath: archivePath),
+           let content = try? String(contentsOfFile: archivePath, encoding: .utf8) {
+            md = content   // 已归档：直接用归档文件（SSOT）
+        } else if let rendered = ArchiveService.shared.renderString(contentId: c.id) {
+            md = rendered  // 未归档：临时渲染，不落盘不打标记
+        } else {
+            return (false, nil, "内容不存在")
+        }
         switch rule.target {
         case "obsidian", "mddir":
             guard let dir = rule.targetConfig["dir"] as? String, !dir.isEmpty else {

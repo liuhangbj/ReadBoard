@@ -458,6 +458,7 @@ public struct ReadingView: View {
         statusMsg = "评分中…"
         Task {
             let ok = await pipeline.score(contentId: cid, title: item.title, body: contentBody)
+            if ok { ArchiveService.shared.rearchive(contentId: cid) }   // 手动重处理 → 刷新归档文件
             await MainActor.run {
                 guard busyForId == cid else { return }   // 已切走，不覆盖新文章状态
                 busy = false
@@ -474,6 +475,7 @@ public struct ReadingView: View {
         statusMsg = "翻译中…"
         Task {
             let ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
+            if ok { ArchiveService.shared.rearchive(contentId: cid) }
             await MainActor.run {
                 guard busyForId == cid else { return }
                 busy = false
@@ -493,6 +495,7 @@ public struct ReadingView: View {
         statusMsg = "摘要中…"
         Task {
             let ok = await pipeline.summarize(contentId: cid, title: item.title, body: contentBody)
+            if ok { ArchiveService.shared.rearchive(contentId: cid) }
             await MainActor.run {
                 guard busyForId == cid else { return }
                 busy = false
@@ -510,6 +513,7 @@ public struct ReadingView: View {
         Task {
             let ok = await transcriber.transcribe(
                 contentId: cid, title: item.title, audioUrl: item.audioUrl, pageUrl: item.url, language: item.language)
+            if ok { ArchiveService.shared.rearchive(contentId: cid) }
             await MainActor.run {
                 guard busyForId == cid else { return }
                 busy = false

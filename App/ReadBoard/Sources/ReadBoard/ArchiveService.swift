@@ -85,7 +85,36 @@ public final class ArchiveService: @unchecked Sendable {
             return false
         }
         guard isComplete(contentId: contentId) else { return false }
+        return renderAndWrite(contentId: contentId)
+    }
 
+    /// 强制渲染+落盘（不判完成、不判已归档）。内部共用；手动重处理刷新也走它。
+    /// 成功写 meta.archived_at。返回是否写入。
+    @discardableResult
+    func renderAndWrite(contentId: Int64) -> Bool {
+        guard let md = renderString(contentId: contentId),
+              let row = db.queryRows("""
+                  SELECT c.title, c.source, s.name AS source_name
+                  FROM content c LEFT JOIN content_source s ON c.source_id = s.id
+                  WHERE c.id = ?;
+                  """, params: [contentId]).first else { return false }
+        let sourceName = row["source_name"] ?? row["source"] ?? "unknown"
+        let ok = writeFile(md: md,
+                           title: row["title"] ?? "untitled",
+                           sourceName: sourceName,
+                           contentId: contentId)
+        if ok {
+            db.execute("""
+                UPDATE content SET meta = json_set(COALESCE(meta,'{}'), '$.archived_at', datetime('now'))
+                WHERE id = ?;
+                """, params: [contentId])
+        }
+        return ok
+    }
+
+    /// 只渲染成字符串（不落盘、不打归档标记）。供导出层对"未走完管线"的内容取内容——
+    /// 导出行为不该把内容标记成"已归档"（完成才归档是归档语义，导出只是分发）。
+    func renderString(contentId: Int64) -> String? {
         guard let row = db.queryRows("""
             SELECT c.id, c.title, c.url, c.source, c.author, c.published_at,
                    c.llm_score, c.llm_summary, c.llm_translated_md, c.content_md, c.excerpt,
@@ -93,22 +122,29 @@ public final class ArchiveService: @unchecked Sendable {
             FROM content c
             LEFT JOIN content_source s ON c.source_id = s.id
             WHERE c.id = ?;
-            """, params: [contentId]).first else { return false }
+            """, params: [contentId]).first else { return nil }
+        return renderBilingual(row: row)
+    }
 
-        let md = renderBilingual(row: row)
+    /// 归档文件路径（归档目录/源名/标题-contentId.md）
+    func archiveFilePath(contentId: Int64) -> String? {
+        guard let row = db.queryRows("""
+            SELECT c.title, c.source, s.name AS source_name
+            FROM content c LEFT JOIN content_source s ON c.source_id = s.id
+            WHERE c.id = ?;
+            """, params: [contentId]).first else { return nil }
         let sourceName = row["source_name"] ?? row["source"] ?? "unknown"
-        let ok = writeFile(md: md,
-                           title: row["title"] ?? "untitled",
-                           sourceName: sourceName,
-                           contentId: contentId)
-        if ok {
-            // 标记已归档（幂等锚点 + 统计）
-            db.execute("""
-                UPDATE content SET meta = json_set(COALESCE(meta,'{}'), '$.archived_at', datetime('now'))
-                WHERE id = ?;
-                """, params: [contentId])
-        }
-        return ok
+        let title = row["title"] ?? "untitled"
+        return archiveDir + "/" + ExportService.sanitizeFilename(sourceName)
+             + "/" + ExportService.sanitizeFilename(title) + "-\(contentId).md"
+    }
+
+    /// 手动重处理后刷新归档：清标记 + 立即重新落盘（文件更新到最新产出）。
+    /// 手动单篇 = 用户明确要这份内容，立即重新归档，不等 worker 下一轮。
+    /// 返回是否重新落盘成功。
+    @discardableResult
+    func rearchive(contentId: Int64) -> Bool {
+        renderAndWrite(contentId: contentId)
     }
 
     /// 双语对照渲染：frontmatter + AI 摘要 + 译文（如无则原文）+ 分隔 + 原文
