@@ -37,6 +37,9 @@ public struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: vm.toastMessage)
+        .sheet(isPresented: $showShortcutHelp) {
+            ShortcutHelpView()
+        }
     }
 
     // MARK: 快捷键（隐藏按钮承载键盘事件）
@@ -49,9 +52,18 @@ public struct ContentView: View {
             Button("") { if let it = vm.selectedItem { vm.toggleArchive(it) } }.keyboardShortcut("a", modifiers: [])
             Button("") { vm.shortcutToggleRead() }.keyboardShortcut(.space, modifiers: [])
             Button("") { openOriginal() }.keyboardShortcut("v", modifiers: [])
+            Button("") { vm.markAllRead() }.keyboardShortcut("e", modifiers: [])
+            Button("") { showShortcutHelp = true }.keyboardShortcut("?", modifiers: [])
+            Button("") { focusSearch() }.keyboardShortcut("f", modifiers: [])
         }
         .frame(width: 0, height: 0)
         .opacity(0)
+    }
+
+    @State private var showShortcutHelp = false
+
+    private func focusSearch() {
+        searchFocused = true   // @FocusState 包装值，赋值即聚焦搜索框
     }
 
     private func openOriginal() {
@@ -525,7 +537,8 @@ public struct ContentView: View {
     private var readingPane: some View {
         Group {
             if let item = vm.selectedItem {
-                ReadingView(item: item, showTranslated: $vm.showTranslated)
+                ReadingView(item: item, showTranslated: $vm.showTranslated,
+                            onPrev: { vm.selectPrev() }, onNext: { vm.selectNext() })
                     .id(item.id)   // 切文章强制重建视图：busy/statusMsg 等 @State 不串到下一篇
             } else {
                 ContentUnavailableView(
@@ -667,6 +680,9 @@ struct ReadingLayout {
 public struct ReadingView: View {
     let item: ContentItem
     @Binding var showTranslated: Bool
+    /// 上一篇/下一篇导航回调（阅读区顶部按钮，键盘 j/k 的图形化对应）
+    var onPrev: (() -> Void)? = nil
+    var onNext: (() -> Void)? = nil
 
     @State private var pipeline = LLMPipeline()
     @State private var transcriber = TranscribePipeline()
@@ -751,6 +767,22 @@ public struct ReadingView: View {
                 .help("版面设置")
                 .popover(isPresented: $showLayoutPopover, arrowEdge: .bottom) {
                     layoutPanel
+                }
+
+                // 上一篇/下一篇（键盘 j/k 的图形化对应）
+                HStack(spacing: 2) {
+                    Button { onPrev?() } label: {
+                        Image(systemName: "chevron.up")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("上一篇（k）")
+                    .disabled(onPrev == nil)
+                    Button { onNext?() } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("下一篇（j）")
+                    .disabled(onNext == nil)
                 }
             }
             .padding(.horizontal, 16)
@@ -1242,5 +1274,67 @@ public struct ShareSheet: View {
         }
         .padding(20)
         .frame(width: 380, height: 420)
+    }
+}
+
+// MARK: - 快捷键帮助面板（按 ? 弹出）
+
+struct ShortcutHelpView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    private let groups: [(String, [(String, String)])] = [
+        ("导航", [
+            ("j / ↓", "下一篇"),
+            ("k / ↑", "上一篇"),
+            ("f", "聚焦搜索框"),
+        ]),
+        ("文章操作", [
+            ("空格", "已读 / 未读切换"),
+            ("s", "星标 / 取消星标"),
+            ("a", "归档 / 取消归档"),
+            ("e", "当前筛选范围全部标已读"),
+            ("v", "浏览器打开原文"),
+        ]),
+        ("其他", [
+            ("?", "显示本帮助"),
+            ("⌘N", "添加订阅源"),
+        ]),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Text("键盘快捷键").font(.title3.bold())
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            ForEach(groups, id: \.0) { group, rows in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(group).font(.headline).foregroundStyle(.secondary)
+                    ForEach(rows, id: \.0) { key, desc in
+                        HStack {
+                            Text(key)
+                                .font(.system(.callout, design: .monospaced))
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(.quaternary)
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                .frame(minWidth: 70, alignment: .center)
+                            Text(desc).font(.callout)
+                            Spacer()
+                        }
+                    }
+                }
+            }
+
+            Text("提示：搜索框聚焦时，j/k/空格 等单键快捷键自动禁用，避免与输入冲突。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(24)
+        .frame(width: 420)
     }
 }
