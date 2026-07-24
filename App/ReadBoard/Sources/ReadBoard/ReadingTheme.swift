@@ -446,3 +446,65 @@ struct MarkdownBodyView: View {
         return fontChoice.font(size: base).bold()
     }
 }
+
+// MARK: - 双语逐段对照视图（Follo 核心交互）
+// 原文/译文按段落对齐交替：原文普通字、译文色块背景突出。
+// 段落按双换行切分，一一对应（LLM 翻译保持段数一致时对齐最好）。
+
+struct BilingualBodyView: View {
+    let original: String
+    let translated: String
+    let theme: ReadingTheme
+    let mode: ReadingTheme.Mode
+    let fontChoice: ReadingFont
+    let fontSize: Double
+    let lineSpacing: Double
+
+    private var p: ThemePalette { theme.palette(for: mode) }
+
+    /// 段落对（原文段 + 对应译文段）
+    private var pairs: [(original: String, translated: String)] {
+        let origParas = splitParagraphs(original)
+        let transParas = splitParagraphs(translated)
+        let count = max(origParas.count, transParas.count)
+        var result: [(String, String)] = []
+        for i in 0..<count {
+            let o = i < origParas.count ? origParas[i] : ""
+            let t = i < transParas.count ? transParas[i] : ""
+            if !o.isEmpty || !t.isEmpty { result.append((o, t)) }
+        }
+        return result
+    }
+
+    private func splitParagraphs(_ text: String) -> [String] {
+        text.components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(Array(pairs.enumerated()), id: \.offset) { _, pair in
+                VStack(alignment: .leading, spacing: 6) {
+                    // 原文
+                    if !pair.original.isEmpty {
+                        MarkdownBodyView(markdown: pair.original, theme: theme, mode: mode,
+                                         fontChoice: fontChoice, fontSize: fontSize, lineSpacing: lineSpacing)
+                    }
+                    // 译文（色块背景突出，Follo 风格）
+                    if !pair.translated.isEmpty {
+                        MarkdownBodyView(markdown: pair.translated, theme: theme, mode: mode,
+                                         fontChoice: fontChoice, fontSize: fontSize, lineSpacing: lineSpacing)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(p.backgroundAlt)
+                            .overlay(alignment: .leading) {
+                                Rectangle().fill(p.link).frame(width: 3)
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+        }
+    }
+}

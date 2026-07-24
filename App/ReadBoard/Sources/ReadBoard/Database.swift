@@ -24,6 +24,7 @@ public struct ContentItem: Identifiable, Hashable {
     var isRead: Bool { readAt != nil }
     let starred: Bool         // 星标
     let archived: Bool        // 归档
+    var imageUrl: String? = nil  // 首图（列表缩略图，从 content_html 抽）
 
     /// 返回一个标记为已读的副本（本地状态同步用）
     func markingRead() -> ContentItem {
@@ -502,17 +503,20 @@ public final class Database: @unchecked Sendable {
         guard open() else { return [] }
         let useFTS = (keyword?.isEmpty == false) && ftsAvailable()
         // 轻列：列表渲染够用，不扛正文。列序固定见 rowToListItem
+        // content_html 只用于抽首图（缩略图），不进 ContentItem.contentMd
         var sql: String
         if useFTS {
             sql = """
             SELECT c.id, c.ctype, c.source, c.title, c.author, c.url, c.language, c.published_at,
-                   c.excerpt, c.llm_score, c.llm_summary, c.fetch_status, c.read_at, c.starred, c.is_archived
+                   c.excerpt, c.llm_score, c.llm_summary, c.fetch_status, c.read_at, c.starred, c.is_archived,
+                   c.content_html
             FROM content c JOIN content_fts f ON f.rowid = c.id
             """
         } else {
             sql = """
             SELECT id, ctype, source, title, author, url, language, published_at,
-                   excerpt, llm_score, llm_summary, fetch_status, read_at, starred, is_archived
+                   excerpt, llm_score, llm_summary, fetch_status, read_at, starred, is_archived,
+                   content_html
             FROM content
             """
         }
@@ -743,7 +747,7 @@ public final class Database: @unchecked Sendable {
         func int64(_ i: Int32) -> Int64? {
             sqlite3_column_type(stmt, i) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, i)
         }
-        return ContentItem(
+        var item = ContentItem(
             id: sqlite3_column_int64(stmt, 0),
             ctype: text(1) ?? "article",
             source: text(2) ?? "rss",
@@ -764,5 +768,23 @@ public final class Database: @unchecked Sendable {
             starred: sqlite3_column_int(stmt, 13) == 1,
             archived: sqlite3_column_int(stmt, 14) == 1
         )
+        // 抽首图（列 15 content_html，可能不存在——旧查询无此列时容错）
+        if sqlite3_column_count(stmt) > 15, let html = text(15) {
+            item.imageUrl = Self.firstImageUrl(in: html)
+        }
+        return item
+    }
+
+    /// 从 HTML 抽第一个 img src（列表缩略图用）
+    static func firstImageUrl(in html: String) -> String? {
+        guard let range = html.range(of: "<img[^>]+src=[\"']([^\"']+)[\"']",
+                                     options: .regularExpression) else { return nil }
+        let tag = String(html[range])
+        guard let srcRange = tag.range(of: "src=[\"']([^\"']+)[\"']",
+                                       options: .regularExpression) else { return nil }
+        var src = String(tag[srcRange])
+        src = src.replacingOccurrences(of: "src=[\"']", with: "", options: .regularExpression)
+        src = src.replacingOccurrences(of: "[\"']$", with: "", options: .regularExpression)
+        return src.hasPrefix("http") ? src : nil
     }
 }

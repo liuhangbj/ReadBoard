@@ -89,8 +89,25 @@ public struct ContentView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    // 全部
+                    // 固定分类（Follo 式置顶）：全部 / 未读 / 星标 / 归档
                     allRow
+                    quickFilterRow(icon: "envelope.badge", name: "未读",
+                                   isActive: vm.readFilter == .unread) {
+                        vm.readFilter = vm.readFilter == .unread ? .all : .unread
+                        vm.reload()
+                    }
+                    quickFilterRow(icon: "star", name: "星标",
+                                   isActive: vm.readFilter == .starred) {
+                        vm.readFilter = vm.readFilter == .starred ? .all : .starred
+                        vm.reload()
+                    }
+                    quickFilterRow(icon: "archivebox", name: "归档",
+                                   isActive: vm.showArchived) {
+                        vm.showArchived.toggle()
+                        vm.reload()
+                    }
+
+                    Divider().padding(.vertical, 6)
 
                     ForEach(vm.sidebarTree) { node in
                         if node.isFolder {
@@ -154,23 +171,52 @@ public struct ContentView: View {
     private var allRow: some View {
         Button {
             vm.selectFilter(nil)
+            vm.readFilter = .all
+            vm.showArchived = false
+            vm.reload()
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "tray.full")
                     .foregroundStyle(.secondary)
                     .frame(width: 16)
                 Text("全部")
-                    .foregroundStyle(vm.selectedFilter == nil ? .white : .primary)
+                    .foregroundStyle(vm.selectedFilter == nil && vm.readFilter == .all && !vm.showArchived ? .white : .primary)
                 Spacer()
                 Text("\(vm.totalCount)")
-                    .foregroundStyle(vm.selectedFilter == nil ? .white.opacity(0.8) : .secondary)
+                    .foregroundStyle(vm.selectedFilter == nil && vm.readFilter == .all && !vm.showArchived ? .white.opacity(0.8) : .secondary)
                     .font(.caption)
             }
             .padding(.leading, 12)
             .padding(.trailing, 12)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(vm.selectedFilter == nil ? Color.accentColor : Color.clear)
+            .background(vm.selectedFilter == nil && vm.readFilter == .all && !vm.showArchived ? Color.accentColor : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 固定分类快捷行（未读/星标/归档）
+    private func quickFilterRow(icon: String, name: String, isActive: Bool,
+                                action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .foregroundStyle(isActive ? .white : .secondary)
+                    .frame(width: 16)
+                Text(name)
+                    .foregroundStyle(isActive ? .white : .primary)
+                Spacer()
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, 12)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isActive ? Color.accentColor : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -213,6 +259,7 @@ public struct ContentView: View {
             .padding(.vertical, 6 * scale)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(vm.selectedFilter == node.filterKey ? Color.accentColor : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -477,8 +524,10 @@ public struct ContentView: View {
                 set: { if let it = $0 { vm.open(it) } }
             )) {
                 ForEach(vm.items) { item in
-                    ArticleRow(item: item)
+                    ArticleRow(item: item, isSelected: vm.selectedItem?.id == item.id)
                         .tag(item)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
                         .contextMenu {
                             Button(item.isRead ? "标为未读" : "标为已读") { vm.toggleRead(item) }
                             Button(item.starred ? "取消星标" : "加星标") { vm.toggleStar(item) }
@@ -512,6 +561,7 @@ public struct ContentView: View {
                 }
             }
             .listStyle(.plain)
+            .scrollContentBackground(.hidden)
         }
     }
 
@@ -536,66 +586,80 @@ public struct ContentView: View {
 
 public struct ArticleRow: View {
     let item: ContentItem
+    let isSelected: Bool
     /// @AppStorage 让缩放值变化时行自动重建（静态 ReadingLayout.uiFontScale 不触发刷新）
     @AppStorage("reading.uiFontScale") private var scale: Double = 1.0
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .top) {
-                if !item.isRead {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 7, height: 7)
-                        .padding(.top, 5)
+        HStack(alignment: .top, spacing: 12) {
+            // 缩略图（有首图才显示，右侧 Follo 式）
+            VStack(alignment: .leading, spacing: 5) {
+                // 标题行
+                HStack(alignment: .top, spacing: 6) {
+                    Text(item.title)
+                        .font(.system(size: 15 * scale, weight: item.isRead ? .regular : .semibold))
+                        .foregroundStyle(isSelected ? .white : (item.isRead ? .secondary : .primary))
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if item.starred {
+                        Image(systemName: "star.fill")
+                            .foregroundStyle(isSelected ? .white : .yellow)
+                            .font(.system(size: 11 * scale))
+                    }
+                    Spacer(minLength: 0)
+                    if let s = item.llmScore {
+                        Text("\(s)")
+                            .font(.system(size: 11 * scale).bold())
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(isSelected ? Color.white.opacity(0.25) : scoreColor(s).opacity(0.18))
+                            .foregroundStyle(isSelected ? .white : scoreColor(s))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
                 }
-                Text(item.title)
-                    .font(.system(size: 15 * scale).bold())
-                    .foregroundStyle(item.isRead ? .secondary : .primary)
-                    .lineLimit(2)
-                if item.starred {
-                    Image(systemName: "star.fill")
-                        .foregroundStyle(.yellow)
-                        .font(.system(size: 12 * scale))
+                // 摘要
+                if let ex = item.excerpt, !ex.isEmpty {
+                    Text(ex)
+                        .font(.system(size: 12.5 * scale))
+                        .foregroundStyle(isSelected ? .white.opacity(0.85) : .secondary)
+                        .lineLimit(2)
                 }
-                Spacer()
-                if let s = item.llmScore {
-                    Text("\(s)")
-                        .font(.system(size: 11 * scale).bold())
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(scoreColor(s).opacity(0.2))
-                        .foregroundStyle(scoreColor(s))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                // 来源 + 日期
+                HStack(spacing: 8) {
+                    Text(item.source)
+                        .font(.system(size: 11 * scale, weight: .medium))
+                        .foregroundStyle(isSelected ? .white.opacity(0.9) : .secondary)
+                    if let pd = item.publishedAt, pd.count >= 10 {
+                        Text(String(pd.prefix(10)))
+                            .font(.system(size: 11 * scale))
+                            .foregroundStyle(isSelected ? .white.opacity(0.7) : Color(nsColor: .tertiaryLabelColor))
+                    }
+                    Spacer()
+                    if !item.isRead && !isSelected {
+                        Circle().fill(Color.accentColor).frame(width: 7, height: 7)
+                    }
                 }
             }
-            HStack(spacing: 6) {
-                Text(item.source)
-                    .font(.system(size: 10 * scale))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(.quaternary)
-                    .clipShape(RoundedRectangle(cornerRadius: 3))
-                if let author = item.author, !author.isEmpty {
-                    Text(author)
-                        .font(.system(size: 11 * scale))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+            // 右侧缩略图（有首图才显示）
+            if let img = item.imageUrl, let url = URL(string: img) {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    case .failure, .empty:
+                        Rectangle().fill(Color.gray.opacity(0.15))
+                    @unknown default:
+                        Rectangle().fill(Color.gray.opacity(0.15))
+                    }
                 }
-                Spacer()
-                if let lang = item.language {
-                    Text(lang)
-                        .font(.system(size: 10 * scale))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            if let ex = item.excerpt, !ex.isEmpty {
-                Text(ex)
-                    .font(.system(size: 12 * scale))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                .frame(width: 72 * scale, height: 72 * scale)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
-        .padding(.vertical, 3)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(isSelected ? Color.accentColor : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
     }
 
     private func scoreColor(_ s: Int) -> Color {
@@ -710,14 +774,15 @@ public struct ReadingView: View {
 
                 Spacer()
 
-                // 原文/翻译切换（有翻译时）
+                // 双语/原文/翻译切换（有翻译时）：双语对照 / 仅原文 / 仅译文
                 if item.llmTranslatedMd != nil {
-                    Picker("", selection: $showTranslated) {
-                        Text("原文").tag(false)
-                        Text("翻译").tag(true)
+                    Picker("", selection: $viewMode) {
+                        Text("双语").tag(0)
+                        Text("原文").tag(1)
+                        Text("译文").tag(2)
                     }
                     .pickerStyle(.segmented)
-                    .frame(maxWidth: 140)
+                    .frame(maxWidth: 200)
                     .controlSize(.small)
                 }
 
@@ -815,17 +880,32 @@ public struct ReadingView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
 
-                    // 正文（markdown 渲染 + 主题/亮暗/字体/版面设置生效）
-                    MarkdownBodyView(
-                        markdown: bodyText,
-                        theme: theme,
-                        mode: themeMode,
-                        fontChoice: fontChoice,
-                        fontSize: fontSize,
-                        lineSpacing: lineSpacing
-                    )
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // 正文：有译文时双语逐段对照（Follo 核心交互），否则单语 markdown
+                    if bilingualMode, let translated = item.llmTranslatedMd, !translated.isEmpty,
+                       let original = item.contentMd, !original.isEmpty {
+                        BilingualBodyView(
+                            original: original,
+                            translated: translated,
+                            theme: theme,
+                            mode: themeMode,
+                            fontChoice: fontChoice,
+                            fontSize: fontSize,
+                            lineSpacing: lineSpacing
+                        )
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        MarkdownBodyView(
+                            markdown: bodyText,
+                            theme: theme,
+                            mode: themeMode,
+                            fontChoice: fontChoice,
+                            fontSize: fontSize,
+                            lineSpacing: lineSpacing
+                        )
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
                 .padding(24)
                 .frame(maxWidth: contentWidth)
@@ -973,7 +1053,18 @@ public struct ReadingView: View {
         NotificationCenter.default.post(name: .contentUpdated, object: nil)
     }
 
+    /// 正文视图模式：0=双语对照 / 1=仅原文 / 2=仅译文（默认双语，Follo 风格）
+    @State private var viewMode = 0
+
+    /// 双语对照模式（viewMode=0 且有译文）
+    private var bilingualMode: Bool {
+        viewMode == 0 && item.llmTranslatedMd != nil
+    }
+
     private var bodyText: String {
+        // 仅译文
+        if viewMode == 2, let t = item.llmTranslatedMd, !t.isEmpty { return t }
+        // 兼容旧 showTranslated 绑定
         if showTranslated, let t = item.llmTranslatedMd, !t.isEmpty { return t }
         if let md = item.contentMd, !md.isEmpty { return md }
         return item.excerpt ?? "(无内容)"
