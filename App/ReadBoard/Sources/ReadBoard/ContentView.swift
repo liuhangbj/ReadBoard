@@ -3,6 +3,7 @@ import SwiftUI
 public struct ContentView: View {
     @StateObject private var vm = ContentViewModel()
     @FocusState private var listFocused: Bool
+    @FocusState private var searchFocused: Bool
 
     public var body: some View {
         NavigationSplitView {
@@ -30,7 +31,7 @@ public struct ContentView: View {
             Button("") { vm.selectPrev() }.keyboardShortcut("k", modifiers: [])
             Button("") { if let it = vm.selectedItem { vm.toggleStar(it) } }.keyboardShortcut("s", modifiers: [])
             Button("") { if let it = vm.selectedItem { vm.toggleArchive(it) } }.keyboardShortcut("a", modifiers: [])
-            Button("") { if let it = vm.selectedItem { vm.toggleRead(it) } }.keyboardShortcut(.space, modifiers: [])
+            Button("") { vm.shortcutToggleRead() }.keyboardShortcut(.space, modifiers: [])
             Button("") { openOriginal() }.keyboardShortcut("v", modifiers: [])
         }
         .frame(width: 0, height: 0)
@@ -84,6 +85,8 @@ public struct ContentView: View {
                 TextField("搜索标题 / 正文", text: $vm.keyword)
                     .textFieldStyle(.plain)
                     .font(.callout)
+                    .focused($searchFocused)
+                    .onChange(of: searchFocused) { _, f in vm.searchFocused = f }
                     .onChange(of: vm.keyword) { _, _ in vm.reloadDebounced() }
                 if !vm.keyword.isEmpty {
                     Button { vm.keyword = "" } label: {
@@ -96,7 +99,7 @@ public struct ContentView: View {
             .padding(.vertical, 6)
             .background(.quaternary.opacity(0.5))
 
-            // 筛选条：评分 + 未读 + 星标 + 归档
+            // 筛选条：评分(可选含未评分) + 标签 + 未读 + 星标 + 归档
             HStack {
                 Text("评分 ≥")
                     .font(.caption)
@@ -109,6 +112,26 @@ public struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: vm.minScore) { _, _ in vm.reload() }
+                if vm.minScore > 0 {
+                    Toggle("含未评分", isOn: $vm.includeUnscored)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                        .controlSize(.small)
+                        .onChange(of: vm.includeUnscored) { _, _ in vm.reload() }
+                }
+                // 标签筛选
+                Picker(selection: $vm.selectedTag) {
+                    Text("标签: 全部").tag(nil as Tag?)
+                    ForEach(vm.tags) { t in
+                        Text("🏷 \(t.name)").tag(t as Tag?)
+                    }
+                } label: { EmptyView() }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: 130)
+                .font(.caption)
+                .controlSize(.small)
+                .onChange(of: vm.selectedTag) { _, _ in vm.reload() }
                 Toggle("未读", isOn: $vm.unreadOnly)
                     .toggleStyle(.checkbox)
                     .font(.caption)

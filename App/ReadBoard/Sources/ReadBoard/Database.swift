@@ -370,9 +370,10 @@ public final class Database: @unchecked Sendable {
 
     /// 拉取内容列表（轻列，不取正文 content_md/llm_translated_md/meta —— 正文点开再按 id 查）
     /// 可按 source 过滤、评分筛选、未读过滤、关键词搜索(FTS5)、星标/归档筛选
-    func fetchContents(source: String? = nil, minScore: Int? = nil, unreadOnly: Bool = false,
+    func fetchContents(source: String? = nil, minScore: Int? = nil, includeUnscored: Bool = false,
+                       unreadOnly: Bool = false,
                        keyword: String? = nil, starredOnly: Bool = false,
-                       archived: Bool = false, limit: Int = 200) -> [ContentItem] {
+                       archived: Bool = false, tagId: Int64? = nil, limit: Int = 200) -> [ContentItem] {
         guard open() else { return [] }
         let useFTS = (keyword?.isEmpty == false) && ftsAvailable()
         // 轻列：列表渲染够用，不扛正文。列序固定见 rowToListItem
@@ -393,9 +394,15 @@ public final class Database: @unchecked Sendable {
         var conds: [String] = [useFTS ? "c.is_archived = \(archived ? 1 : 0)" : "is_archived = \(archived ? 1 : 0)"]
         let col = useFTS ? "c." : ""
         if source != nil { conds.append("\(col)source = ?") }
-        if minScore != nil { conds.append("\(col)llm_score >= ?") }
+        if minScore != nil {
+            // 含未评分：未评分（NULL）也纳入，避免筛选把未评分文章藏掉
+            conds.append(includeUnscored ? "(\(col)llm_score >= ? OR \(col)llm_score IS NULL)" : "\(col)llm_score >= ?")
+        }
         if unreadOnly { conds.append("\(col)read_at IS NULL") }
         if starredOnly { conds.append("\(col)starred = 1") }
+        if tagId != nil {
+            conds.append("\(col)id IN (SELECT content_id FROM content_tag WHERE tag_id = ?)")
+        }
         if useFTS { conds.append("content_fts MATCH ?") }
         else if let kw = keyword, !kw.isEmpty {
             conds.append("(\(col)title LIKE ? OR \(col)excerpt LIKE ?)")
@@ -412,6 +419,7 @@ public final class Database: @unchecked Sendable {
             }
             if let s = source { binder(s) }
             if let m = minScore { sqlite3_bind_int64(stmt, idx, Int64(m)); idx += 1 }
+            if let t = tagId { sqlite3_bind_int64(stmt, idx, t); idx += 1 }
             if useFTS {
                 binder(ftsQuery(keyword!))
             } else if let kw = keyword, !kw.isEmpty {
@@ -458,13 +466,25 @@ public final class Database: @unchecked Sendable {
         intVal(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='content_fts';") == 1
     }
 
-    /// 把用户关键词转成 FTS5 MATCH 查询（多词 AND，加前缀匹配）
+    /// 把用户关键词转成 FTS5 MATCH 查询（多词 AND，加前缀匹配）。
+    /// 只保留 FTS 安全字符（字母/数字/CJK/下划线/连字符），其余（引号/括号/冒号/AND/OR/NEAR 等
+    /// FTS 运算符）一律丢弃——防止用户输入 `"/NEAR` 之类直接打崩 MATCH 语法。
     private func ftsQuery(_ kw: String) -> String {
         let terms = kw.split(whereSeparator: { $0 == " " || $0 == "　" })
-            .map { $0.trimmingCharacters(in: .punctuationCharacters) }
+            .map { Self.sanitizeFTSWord(String($0)) }
             .filter { !$0.isEmpty }
         guard !terms.isEmpty else { return "\"\"" }
         return terms.map { "\"\($0)\"*" }.joined(separator: " AND ")
+    }
+
+    /// 单词级清洗：剥离 FTS5 特殊字符，只留可匹配字符
+    private static func sanitizeFTSWord(_ w: String) -> String {
+        String(w.unicodeScalars.filter { s in
+            CharacterSet.alphanumerics.contains(s)
+            || (0x4E00...0x9FFF).contains(Int(s.value))   // CJK
+            || (0x3400...0x4DBF).contains(Int(s.value))   // CJK 扩展A
+            || s == "_" || s == "-"
+        })
     }
 
     /// 标记已读（写入当前时间）
@@ -496,23 +516,33 @@ public final class Database: @unchecked Sendable {
     }
 
     /// 批量标已读（按条件：source/当前筛选）。返回影响条数。
+    /// 关键词语义与 fetchContents 对齐：FTS 可用走 MATCH（与列表口径一致），否则 LIKE 回退。
     @discardableResult
     func markAllRead(source: String? = nil, minScore: Int? = nil, keyword: String? = nil) -> Int {
         var sql = "UPDATE content SET read_at = datetime('now') WHERE read_at IS NULL AND is_archived = 0"
         var conds: [String] = []
         if source != nil { conds.append("source = ?") }
         if minScore != nil { conds.append("llm_score >= ?") }
-        if let kw = keyword, !kw.isEmpty { conds.append("(title LIKE ? OR excerpt LIKE ? OR content_md LIKE ?)") }
+        let useFTS = (keyword?.isEmpty == false) && ftsAvailable()
+        if useFTS {
+            conds.append("id IN (SELECT rowid FROM content_fts WHERE content_fts MATCH ?)")
+        } else if let kw = keyword, !kw.isEmpty {
+            conds.append("(title LIKE ? OR excerpt LIKE ? OR content_md LIKE ?)")
+        }
         if !conds.isEmpty { sql += " AND " + conds.joined(separator: " AND ") }
-        execute(sql, params: buildMarkParams(source: source, minScore: minScore, keyword: keyword))
+        execute(sql, params: buildMarkParams(source: source, minScore: minScore, keyword: keyword, useFTS: useFTS))
         return scalarInt("SELECT changes()") ?? 0
     }
 
-    private func buildMarkParams(source: String?, minScore: Int?, keyword: String?) -> [Any?] {
+    private func buildMarkParams(source: String?, minScore: Int?, keyword: String?, useFTS: Bool) -> [Any?] {
         var params: [Any?] = []
         if let s = source { params.append(s) }
         if let m = minScore { params.append(m) }
-        if let kw = keyword, !kw.isEmpty { let like = "%\(kw)%"; params.append(like); params.append(like); params.append(like) }
+        if useFTS, let kw = keyword {
+            params.append(ftsQuery(kw))
+        } else if let kw = keyword, !kw.isEmpty {
+            let like = "%\(kw)%"; params.append(like); params.append(like); params.append(like)
+        }
         return params
     }
 

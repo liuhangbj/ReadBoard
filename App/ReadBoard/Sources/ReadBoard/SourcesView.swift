@@ -384,7 +384,7 @@ public struct AddSourceSheet: View {
             .pickerStyle(.segmented)
 
             TextField("名称（可选，留空自动用 feed 标题）", text: $name)
-            TextField(stype == "youtube" ? "频道 URL 或 UC 开头 ID" : "Feed 地址 (https://…)", text: $identifier)
+            TextField(stype == "youtube" ? "频道 URL / @handle / UC 开头 ID" : "Feed 地址 (https://…)", text: $identifier)
                 .textFieldStyle(.roundedBorder)
 
             if !testResult.isEmpty {
@@ -408,12 +408,21 @@ public struct AddSourceSheet: View {
         .frame(width: 460)
     }
 
+    /// 解析用户输入为最终 identifier（YouTube 异步解析 channel_id，其余同步返回）
+    private func resolveIdentifier() async throws -> String {
+        let id = identifier.trimmingCharacters(in: .whitespaces)
+        if stype == "youtube" {
+            return try await YouTubeResolver.resolveFeedURL(id)
+        }
+        return id
+    }
+
     private func testFeed() {
         testing = true
         testResult = ""
-        let url = resolvedIdentifier()
         Task {
             do {
+                let url = try await resolveIdentifier()
                 let feed = try await FeedFetcher.fetch(urlString: url)
                 var msg = "✓ \(feed.title)：\(feed.entries.count) 条，类型 \(feed.kind.rawValue)"
                 // RSS 文章类: 探测全文模式
@@ -435,29 +444,26 @@ public struct AddSourceSheet: View {
         }
     }
 
-    private func resolvedIdentifier() -> String {
-        var id = identifier.trimmingCharacters(in: .whitespaces)
-        if stype == "youtube" {
-            if id.hasPrefix("UC") {
-                return "https://www.youtube.com/feeds/videos.xml?channel_id=\(id)"
-            }
-            // 频道页 URL 暂存原始，抓取层后续可扩展解析 channel_id
-        }
-        return id
-    }
-
     private func add() {
         let finalName = name.isEmpty ? identifier : name
         testing = true
         testResult = ""
         Task {
-            let ok = await store.addSource(stype: stype, name: finalName, identifier: resolvedIdentifier())
-            await MainActor.run {
-                testing = false
-                if ok {
-                    dismiss()
-                } else {
-                    testResult = "✗ 添加失败（可能已存在相同源）"
+            do {
+                let url = try await resolveIdentifier()
+                let ok = await store.addSource(stype: stype, name: finalName, identifier: url)
+                await MainActor.run {
+                    testing = false
+                    if ok {
+                        dismiss()
+                    } else {
+                        testResult = "✗ 添加失败（可能已存在相同源）"
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    testing = false
+                    testResult = "✗ \(error.localizedDescription)"
                 }
             }
         }

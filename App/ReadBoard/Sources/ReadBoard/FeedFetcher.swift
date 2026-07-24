@@ -45,6 +45,87 @@ public enum FeedFetchError: Error, LocalizedError {
     }
 }
 
+/// YouTube 输入 → feed URL 解析器
+/// 支持：UC 频道 id、youtube.com/@handle、/channel/UC...、/c/xxx、/user/xxx、任意频道/视频页 URL
+/// 原理：抓频道页 HTML，提取 "channelId":"UC..."（或 /channel/UC... 链接），拼 feeds/videos.xml
+public enum YouTubeResolver {
+    public enum ResolveError: Error, LocalizedError {
+        case notYouTube
+        case channelIdNotFound
+
+        public var errorDescription: String? {
+            switch self {
+            case .notYouTube: return "不是有效的 YouTube 频道地址"
+            case .channelIdNotFound: return "无法从频道页解析 channel_id（频道可能不存在）"
+            }
+        }
+    }
+
+    /// 把用户输入规范化为 videos.xml feed URL
+    public static func resolveFeedURL(_ input: String, proxy: String? = nil) async throws -> String {
+        let id = input.trimmingCharacters(in: .whitespaces)
+        // 已是 feed URL
+        if id.contains("feeds/videos.xml") { return id }
+        // 纯 UC 频道 id
+        if id.hasPrefix("UC"), !id.contains("/") {
+            return "https://www.youtube.com/feeds/videos.xml?channel_id=\(id)"
+        }
+        // URL 形式
+        guard let url = URL(string: id), let host = url.host?.lowercased(),
+              host.contains("youtube.com") || host.contains("youtu.be") else {
+            throw ResolveError.notYouTube
+        }
+        // /channel/UC... 直接提取
+        if let range = id.range(of: #"/channel/(UC[\w-]+)"#, options: .regularExpression) {
+            let cid = String(id[range]).replacingOccurrences(of: "/channel/", with: "")
+            return "https://www.youtube.com/feeds/videos.xml?channel_id=\(cid)"
+        }
+        // 其余（@handle、/c/、/user/、视频页）：抓页面 HTML 提取 channelId
+        let cid = try await fetchChannelId(pageURL: url, proxy: proxy)
+        return "https://www.youtube.com/feeds/videos.xml?channel_id=\(cid)"
+    }
+
+    /// 抓频道页 HTML，正则提取 channelId
+    private static func fetchChannelId(pageURL: URL, proxy: String?) async throws -> String {
+        var req = URLRequest(url: pageURL, timeoutInterval: 30)
+        req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+                     forHTTPHeaderField: "User-Agent")
+        req.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+
+        let config = URLSessionConfiguration.default
+        if let proxy, let purl = URL(string: proxy), let host = purl.host, let port = purl.port {
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable: true,
+                kCFNetworkProxiesHTTPProxy: host,
+                kCFNetworkProxiesHTTPPort: port,
+                kCFNetworkProxiesHTTPSEnable: true,
+                kCFNetworkProxiesHTTPSProxy: host,
+                kCFNetworkProxiesHTTPSPort: port,
+            ]
+        }
+        let session = URLSession(configuration: config)
+        let (data, resp) = try await session.data(for: req)
+        if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+            throw FeedFetchError.httpError(http.statusCode)
+        }
+        guard let html = String(data: data, encoding: .utf8) else {
+            throw ResolveError.channelIdNotFound
+        }
+        // 频道页 ytInitialData 内含 "channelId":"UC..."；视频页有 "externalChannelId"
+        for pattern in [#""channelId"\s*:\s*"(UC[\w-]+)""#,
+                        #""externalChannelId"\s*:\s*"(UC[\w-]+)""#,
+                        #"youtube\.com/channel/(UC[\w-]+)"#] {
+            if let m = html.range(of: pattern, options: .regularExpression) {
+                let s = String(html[m])
+                if let cidRange = s.range(of: #"UC[\w-]+"#, options: .regularExpression) {
+                    return String(s[cidRange])
+                }
+            }
+        }
+        throw ResolveError.channelIdNotFound
+    }
+}
+
 public final class FeedFetcher {
     /// 抓取并解析一个 feed
     static func fetch(urlString: String, proxy: String? = nil) async throws -> ParsedFeed {

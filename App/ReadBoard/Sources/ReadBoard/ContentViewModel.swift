@@ -8,12 +8,16 @@ public final class ContentViewModel: ObservableObject {
     @Published var selectedSource: String? = nil   // nil = 全部
     @Published var selectedItem: ContentItem? = nil
     @Published var minScore: Int = 0               // 评分筛选 0=不限
+    @Published var includeUnscored: Bool = false   // 评分筛选时是否含未评分
     @Published var unreadOnly: Bool = false        // 只看未读
     @Published var starredOnly: Bool = false       // 只看星标
     @Published var showArchived: Bool = false      // 看归档（默认看活跃）
     @Published var keyword: String = ""            // 搜索关键词（标题/正文）
+    @Published var selectedTag: Tag? = nil         // 标签筛选 nil=不限
+    @Published var tags: [Tag] = []                // 全部标签（筛选下拉）
     @Published var totalCount: Int = 0
     @Published var showTranslated: Bool = false    // 阅读区显示原文/翻译
+    @Published var searchFocused: Bool = false     // 搜索框焦点（快捷键避让）
 
     private let db = Database.shared
     /// 搜索防抖：连续输入时取消上一次未执行的 reload
@@ -48,6 +52,7 @@ public final class ContentViewModel: ObservableObject {
     func loadAll() {
         totalCount = db.totalCount()
         sourceGroups = db.fetchSourceGroups()
+        tags = TagService.shared.allTags()
         reload()
     }
 
@@ -55,8 +60,10 @@ public final class ContentViewModel: ObservableObject {
         let minS: Int? = minScore > 0 ? minScore : nil
         let kw = keyword.trimmingCharacters(in: .whitespaces)
         items = db.fetchContents(source: selectedSource, minScore: minS,
+                                 includeUnscored: includeUnscored,
                                  unreadOnly: unreadOnly, keyword: kw.isEmpty ? nil : kw,
-                                 starredOnly: starredOnly, archived: showArchived, limit: 300)
+                                 starredOnly: starredOnly, archived: showArchived,
+                                 tagId: selectedTag?.id, limit: 300)
         if let sel = selectedItem, !items.contains(sel) {
             selectedItem = nil
         }
@@ -128,12 +135,18 @@ public final class ContentViewModel: ObservableObject {
         return n
     }
 
-    // MARK: 快捷键导航
+    // MARK: 快捷键导航（搜索框聚焦时禁用，避免空格/j/k 被列表抢走）
 
     /// 选中下一篇
-    func selectNext() { moveSelection(by: 1) }
+    func selectNext() { guard !searchFocused else { return }; moveSelection(by: 1) }
     /// 选中上一篇
-    func selectPrev() { moveSelection(by: -1) }
+    func selectPrev() { guard !searchFocused else { return }; moveSelection(by: -1) }
+
+    /// 快捷键触发已读切换（空格）——搜索框聚焦时忽略
+    func shortcutToggleRead() {
+        guard !searchFocused, let it = selectedItem else { return }
+        toggleRead(it)
+    }
 
     private func moveSelection(by delta: Int) {
         guard !items.isEmpty else { return }
