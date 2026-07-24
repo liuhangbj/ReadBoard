@@ -233,3 +233,46 @@ final class FeedParseTests: XCTestCase {
         XCTAssertEqual(entries[0].html, "<p>双层转义正文</p>")
     }
 }
+
+// MARK: - Markdown 解析
+
+final class MarkdownParseTests: XCTestCase {
+
+    func testHeadings() {
+        let blocks = MarkdownRenderer.parse("# 一级\n## 二级\n正文")
+        guard case .heading(let l1, _) = blocks[0], case .heading(let l2, _) = blocks[1] else {
+            XCTFail("应解析出两个标题"); return
+        }
+        XCTAssertEqual(l1, 1); XCTAssertEqual(l2, 2)
+    }
+
+    func testParagraphMerge() {
+        let blocks = MarkdownRenderer.parse("第一行\n第二行\n\n新段落")
+        let paras = blocks.filter { if case .paragraph = $0 { return true }; return false }
+        XCTAssertEqual(paras.count, 2, "连续行合并为一段，空行分段")
+    }
+
+    func testListAndQuote() {
+        let blocks = MarkdownRenderer.parse("- 列表项\n> 引用")
+        guard case .listItem(let ordered, _, _) = blocks[0], case .quote = blocks[1] else {
+            XCTFail("应解析出列表项和引用"); return
+        }
+        XCTAssertFalse(ordered)
+    }
+
+    func testCodeBlock() {
+        let blocks = MarkdownRenderer.parse("```python\nprint(1)\n```")
+        guard case .codeBlock(let lang, let code) = blocks[0] else {
+            XCTFail("应解析出代码块"); return
+        }
+        XCTAssertEqual(lang, "python")
+        XCTAssertTrue(code.contains("print(1)"))
+    }
+
+    func testInlineBoldAndLink() {
+        let attr = MarkdownRenderer.inline("这是**加粗**和[链接](https://x.com)")
+        let str = String(attr.characters)
+        XCTAssertTrue(str.contains("加粗"))
+        XCTAssertTrue(str.contains("链接"))
+    }
+}

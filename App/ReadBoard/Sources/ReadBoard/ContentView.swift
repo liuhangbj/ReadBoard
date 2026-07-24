@@ -457,6 +457,8 @@ public struct ReadingView: View {
     @State private var fontSize = ReadingLayout.fontSize
     @State private var lineSpacing = ReadingLayout.lineSpacing
     @State private var contentWidth = ReadingLayout.contentWidth
+    @State private var theme = ReadingTheme.current
+    @State private var fontChoice = ReadingFont.current
     @State private var showLayoutPopover = false
     @State private var showShareSheet = false
     /// 星标/已读状态（本地镜像，操作后即时反馈，不依赖 reload）
@@ -531,14 +533,15 @@ public struct ReadingView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     // 标题 + 元信息
                     Text(item.title)
-                        .font(.title2.bold())
+                        .font(theme.headingSerif ? .system(.title2, design: .serif).bold() : .title2.bold())
+                        .foregroundStyle(theme.text)
                     HStack(spacing: 10) {
                         if let a = item.author, !a.isEmpty { Label(a, systemImage: "person") }
                         if let p = item.publishedAt { Label(String(p.prefix(10)), systemImage: "calendar") }
                         if let s = item.llmScore { Label("评分 \(s)", systemImage: "star.fill") }
                     }
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.secondaryText)
 
                     // ── 标签行 ──
                     TagEditorView(contentId: item.id)
@@ -595,23 +598,29 @@ public struct ReadingView: View {
                     if let sum = item.llmSummary, !sum.isEmpty {
                         Text(sum)
                             .font(.callout)
+                            .foregroundStyle(theme.secondaryText)
                             .padding(10)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.quaternary.opacity(0.5))
+                            .background(theme.quoteBackground)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
 
-                    // 正文（版面设置生效）
-                    Text(bodyText)
-                        .font(.system(size: fontSize))
-                        .lineSpacing(lineSpacing)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    // 正文（markdown 渲染 + 主题/字体/版面设置生效）
+                    MarkdownBodyView(
+                        markdown: bodyText,
+                        theme: theme,
+                        fontChoice: fontChoice,
+                        fontSize: fontSize,
+                        lineSpacing: lineSpacing
+                    )
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(24)
                 .frame(maxWidth: contentWidth)
                 .frame(maxWidth: .infinity)   // 内容限宽后居中
             }
+            .background(theme.background)   // 主题底色
         }
         // 视图随 .id(item.id) 重建，onAppear 即切文章——刷新有效开关与本地状态
         .onAppear {
@@ -628,12 +637,40 @@ public struct ReadingView: View {
     private var layoutPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("版面设置").font(.headline)
+
+            // 主题
+            HStack {
+                Text("主题").frame(width: 60, alignment: .leading)
+                Picker("", selection: $theme) {
+                    ForEach(ReadingTheme.allCases) { t in
+                        Text(t.displayName).tag(t)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: theme) { _, v in ReadingTheme.current = v }
+            }
+
+            // 字体
+            HStack {
+                Text("字体").frame(width: 60, alignment: .leading)
+                Picker("", selection: $fontChoice) {
+                    ForEach(ReadingFont.allCases) { f in
+                        Text(f.displayName).tag(f)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: fontChoice) { _, v in ReadingFont.current = v }
+            }
+
+            // 字号
             HStack {
                 Text("字号").frame(width: 60, alignment: .leading)
                 Button { adjustFont(-1) } label: { Image(systemName: "textformat.size.smaller") }
                 Text("\(Int(fontSize))").frame(width: 30).font(.callout.monospacedDigit())
                 Button { adjustFont(1) } label: { Image(systemName: "textformat.size.larger") }
             }
+
+            // 行距
             HStack {
                 Text("行距").frame(width: 60, alignment: .leading)
                 Slider(value: $lineSpacing, in: 0...16, step: 1) { _ in
@@ -641,6 +678,8 @@ public struct ReadingView: View {
                 }
                 Text("\(Int(lineSpacing))").frame(width: 24).font(.callout.monospacedDigit())
             }
+
+            // 宽度
             HStack {
                 Text("宽度").frame(width: 60, alignment: .leading)
                 Picker("", selection: $contentWidth) {
@@ -653,7 +692,7 @@ public struct ReadingView: View {
             }
         }
         .padding()
-        .frame(width: 300)
+        .frame(width: 340)
     }
 
     private func adjustFont(_ delta: Double) {
