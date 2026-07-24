@@ -21,6 +21,20 @@ public struct ContentView: View {
         .navigationTitle("ReadBoard")
         .onAppear { vm.loadAll() }
         .background(shortcutHandlers)
+        // 轻提示（取消归档等操作的反馈）
+        .overlay(alignment: .bottom) {
+            if let toast = vm.toastMessage {
+                Text(toast)
+                    .font(.caption)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(.regularMaterial)
+                    .clipShape(Capsule())
+                    .shadow(radius: 4)
+                    .padding(.bottom, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: vm.toastMessage)
     }
 
     // MARK: 快捷键（隐藏按钮承载键盘事件）
@@ -192,6 +206,7 @@ public struct ContentView: View {
         Group {
             if let item = vm.selectedItem {
                 ReadingView(item: item, showTranslated: $vm.showTranslated)
+                    .id(item.id)   // 切文章强制重建视图：busy/statusMsg 等 @State 不串到下一篇
             } else {
                 ContentUnavailableView(
                     "选择一篇文章",
@@ -296,6 +311,8 @@ public struct ReadingView: View {
     @State private var transcriber = TranscribePipeline()
     @State private var busy = false
     @State private var statusMsg: String?
+    /// busy 所属的内容 id——切文章后旧任务完成不再污染新文章的 busy 状态
+    @State private var busyForId: Int64? = nil
 
     public var body: some View {
         ScrollView {
@@ -424,10 +441,12 @@ public struct ReadingView: View {
     private func runScore() {
         let cid = item.id
         busy = true
+        busyForId = cid
         statusMsg = "评分中…"
         Task {
             let ok = await pipeline.score(contentId: cid, title: item.title, body: contentBody)
             await MainActor.run {
+                guard busyForId == cid else { return }   // 已切走，不覆盖新文章状态
                 busy = false
                 statusMsg = ok ? "✅ 评分完成" : "❌ 评分失败"
                 if ok { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
@@ -438,10 +457,12 @@ public struct ReadingView: View {
     private func runTranslate() {
         let cid = item.id
         busy = true
+        busyForId = cid
         statusMsg = "翻译中…"
         Task {
             let ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
             await MainActor.run {
+                guard busyForId == cid else { return }
                 busy = false
                 statusMsg = ok ? "✅ 翻译完成" : "❌ 翻译失败"
                 if ok {
@@ -455,10 +476,12 @@ public struct ReadingView: View {
     private func runSummarize() {
         let cid = item.id
         busy = true
+        busyForId = cid
         statusMsg = "摘要中…"
         Task {
             let ok = await pipeline.summarize(contentId: cid, title: item.title, body: contentBody)
             await MainActor.run {
+                guard busyForId == cid else { return }
                 busy = false
                 statusMsg = ok ? "✅ 摘要完成" : "❌ 摘要失败"
                 if ok { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
@@ -469,11 +492,13 @@ public struct ReadingView: View {
     private func runTranscribe() {
         let cid = item.id
         busy = true
+        busyForId = cid
         statusMsg = "转录中（下载+识别，较长）…"
         Task {
             let ok = await transcriber.transcribe(
                 contentId: cid, title: item.title, audioUrl: item.audioUrl, pageUrl: item.url, language: item.language)
             await MainActor.run {
+                guard busyForId == cid else { return }
                 busy = false
                 statusMsg = ok ? "✅ 转录完成" : "❌ 转录失败"
                 if ok {

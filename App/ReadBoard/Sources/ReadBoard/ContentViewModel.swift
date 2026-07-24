@@ -119,10 +119,28 @@ public final class ContentViewModel: ObservableObject {
         if selectedItem?.id == item.id { selectedItem = items.first { $0.id == item.id } }
     }
 
-    /// 切换归档（归档后从活跃列表消失）
+    /// 切换归档（归档后从活跃列表消失；取消归档回到活跃列表）
     func toggleArchive(_ item: ContentItem) {
+        let wasArchived = item.archived
         db.toggleArchive(contentId: item.id)
         reload()
+        // 取消归档且当前不在看归档视图时给提示——否则文章"消失"用户不知去哪了
+        if wasArchived && !showArchived {
+            showToast("已取消归档，回到活跃列表")
+        }
+    }
+
+    // MARK: 轻提示（3s 自动消失）
+    @Published var toastMessage: String? = nil
+    private var toastTask: Task<Void, Never>?
+    private func showToast(_ msg: String) {
+        toastMessage = msg
+        toastTask?.cancel()
+        toastTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.toastMessage = nil
+        }
     }
 
     /// 全部标已读（按当前筛选范围）。返回影响条数。

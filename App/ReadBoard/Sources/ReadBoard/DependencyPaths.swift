@@ -53,6 +53,13 @@ public enum DependencyPaths {
         var defaultsKey: String { "dep.path.\(rawValue)" }
     }
 
+    /// 用户配置了路径但文件已不存在（brew 升级/卸载后路径失效）——设置页据此告警
+    static func isCustomStale(_ kind: Kind) -> Bool {
+        guard let custom = UserDefaults.standard.string(forKey: kind.defaultsKey),
+              !custom.isEmpty else { return false }
+        return !FileManager.default.fileExists(atPath: custom)
+    }
+
     /// 解析某依赖的可用路径：用户配置 > PATH 探测 > 常见位置。都不存在返回 nil。
     static func resolve(_ kind: Kind) -> String? {
         let fm = FileManager.default

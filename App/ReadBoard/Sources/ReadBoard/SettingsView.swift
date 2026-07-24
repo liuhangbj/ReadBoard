@@ -248,6 +248,12 @@ public struct DepsPane: View {
                         ))
                         .textFieldStyle(.roundedBorder)
                         .font(.caption)
+                        // 路径失效告警：配了但文件不在（brew 升级/卸载后）
+                        if DependencyPaths.isCustomStale(kind) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                                .help("该路径已失效（文件不存在），请修正或清除回自动探测")
+                        }
                         if !customPaths[kind.rawValue].isNilOrEmpty {
                             Button("清除") {
                                 customPaths[kind.rawValue] = ""
@@ -329,6 +335,7 @@ public struct CleanupPane: View {
     @State private var keepCount = 5
     @State private var cleanHtml = true
     @State private var cleanHtmlDays = 7
+    @State private var showCleanConfirm = false
 
     public var body: some View {
         Form {
@@ -363,7 +370,7 @@ public struct CleanupPane: View {
             Section("清理策略") {
                 Stepper("已读 \(archiveDays) 天后自动归档", value: $archiveDays, in: 1...365)
                     .onChange(of: archiveDays) { _, v in cleanup.archiveAfterDays = v }
-                Stepper(deleteDays == 0 ? "归档内容永不删除" : "归档 \(deleteDays) 天后自动删除", value: $deleteDays, in: 0...730)
+                Stepper(deleteDays == 0 ? "归档内容永不删除（已禁用自动删除）" : "归档 \(deleteDays) 天后自动删除", value: $deleteDays, in: 0...730)
                     .onChange(of: deleteDays) { _, v in cleanup.deleteAfterDays = v }
                 Stepper("备份保留最近 \(keepCount) 份", value: $keepCount, in: 1...30)
                     .onChange(of: keepCount) { _, v in cleanup.backupKeepCount = v }
@@ -379,10 +386,16 @@ public struct CleanupPane: View {
             Section {
                 HStack {
                     Button(cleanup.isRunning ? "清理中…" : "立即清理") {
-                        Task { await cleanup.runAll() }
+                        showCleanConfirm = true
                     }
                     .disabled(cleanup.isRunning)
                     if cleanup.isRunning { ProgressView().controlSize(.small) }
+                }
+                .alert("立即清理？", isPresented: $showCleanConfirm) {
+                    Button("取消", role: .cancel) {}
+                    Button("开始清理") { Task { await cleanup.runAll() } }
+                } message: {
+                    Text("将按上方策略归档/删除内容、清理 HTML 和临时文件。\n删除的内容会先备份到回收站（下方可恢复）。")
                 }
                 if !cleanup.lastRunSummary.isEmpty {
                     Text(cleanup.lastRunSummary)

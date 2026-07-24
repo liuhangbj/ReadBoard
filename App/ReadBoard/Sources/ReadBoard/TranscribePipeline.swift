@@ -9,6 +9,7 @@ public enum TranscribeError: Error, LocalizedError {
     case downloadFailed(String)
     case whisperFailed(String)
     case emptyTranscript
+    case timedOut(String)   // 进程超时被强杀——单独一类，区别于崩溃/参数错
 
     public var errorDescription: String? {
         switch self {
@@ -16,6 +17,7 @@ public enum TranscribeError: Error, LocalizedError {
         case .downloadFailed(let m): return "下载失败: \(m)"
         case .whisperFailed(let m): return "转写失败: \(m)"
         case .emptyTranscript: return "转写结果为空"
+        case .timedOut(let m): return "处理超时: \(m)"
         }
     }
 }
@@ -124,7 +126,7 @@ public final class TranscribePipeline: @unchecked Sendable {
     /// 跑外部进程，非 0 退出抛错。带超时 terminate + stdout/stderr 持续 drain。
     /// 不修这两个会出大事：whisper/ffmpeg 挂死则 continuation 永不 resume（任务永久卡死）；
     /// stdout 大量输出无人读会写满 pipe 缓冲区(64KB)导致子进程阻塞。
-    private func run(_ bin: String, _ args: [String], timeout: TimeInterval = 600) async throws {
+    private func run(_ bin: String, _ args: [String], timeout: TimeInterval = 1800) async throws {
         // 可变状态封装进 @unchecked Sendable 盒子，满足 @Sendable 闭包捕获要求
         final class Box: @unchecked Sendable {
             let lock = NSLock()
@@ -180,9 +182,15 @@ public final class TranscribePipeline: @unchecked Sendable {
                     box.resume?(.success(()))
                 } else {
                     box.lock.lock(); let errStr = String(data: box.errData, encoding: .utf8) ?? ""; box.lock.unlock()
-                    let reason = proc.terminationReason == .uncaughtSignal ? "（超时/被终止）" : ""
-                    box.resume?(.failure(TranscribeError.whisperFailed(
-                        "\(URL(fileURLWithPath: bin).lastPathComponent) exit \(status)\(reason): \(errStr.suffix(200))")))
+                    let name = URL(fileURLWithPath: bin).lastPathComponent
+                    // 被看门狗强杀（超时）单独归类：uncaughtSignal(SIGTERM) = 超时，区别于进程自己崩
+                    if proc.terminationReason == .uncaughtSignal {
+                        box.resume?(.failure(TranscribeError.timedOut(
+                            "\(name) 超过 \(Int(timeout))s 未完成被终止（长音频属正常，可重试或加大超时）")))
+                    } else {
+                        box.resume?(.failure(TranscribeError.whisperFailed(
+                            "\(name) exit \(status): \(errStr.suffix(200))")))
+                    }
                 }
             }
             do { try p.run() } catch { box.watchdog?.cancel(); box.resume?(.failure(error)) }
