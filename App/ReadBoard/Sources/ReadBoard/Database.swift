@@ -498,7 +498,7 @@ public final class Database: @unchecked Sendable {
                        unreadOnly: Bool = false,
                        keyword: String? = nil, starredOnly: Bool = false,
                        archived: Bool = false, tagId: Int64? = nil,
-                       processedFilter: String? = nil,
+                       processedFilters: Set<String> = [],
                        limit: Int = 200, offset: Int = 0) -> [ContentItem] {
         guard open() else { return [] }
         let useFTS = (keyword?.isEmpty == false) && ftsAvailable()
@@ -536,15 +536,18 @@ public final class Database: @unchecked Sendable {
         if tagId != nil {
             conds.append("\(col)id IN (SELECT content_id FROM content_tag WHERE tag_id = ?)")
         }
-        // 处理状态筛选：已打分/已摘要/已翻译/已转录
-        if let pf = processedFilter {
-            switch pf {
-            case "score": conds.append("\(col)llm_score IS NOT NULL")
-            case "summary": conds.append("\(col)llm_summary IS NOT NULL AND \(col)llm_summary != ''")
-            case "translate": conds.append("\(col)llm_translated_md IS NOT NULL AND \(col)llm_translated_md != ''")
-            case "transcribe":
-                conds.append("(\(col)ctype IN ('podcast','video') OR \(col)meta LIKE '%audio_url%') AND \(col)llm_translated_md IS NOT NULL AND \(col)llm_translated_md != ''")
-            default: break
+        // 处理状态筛选（多选，「或」关系——满足任一即纳入）：
+        // 已打分/已摘要/已翻译/已转录
+        if !processedFilters.isEmpty {
+            var orConds: [String] = []
+            if processedFilters.contains("score") { orConds.append("\(col)llm_score IS NOT NULL") }
+            if processedFilters.contains("summary") { orConds.append("(\(col)llm_summary IS NOT NULL AND \(col)llm_summary != '')") }
+            if processedFilters.contains("translate") { orConds.append("(\(col)llm_translated_md IS NOT NULL AND \(col)llm_translated_md != '')") }
+            if processedFilters.contains("transcribe") {
+                orConds.append("((\(col)ctype IN ('podcast','video') OR \(col)meta LIKE '%audio_url%') AND \(col)llm_translated_md IS NOT NULL AND \(col)llm_translated_md != '')")
+            }
+            if !orConds.isEmpty {
+                conds.append("(" + orConds.joined(separator: " OR ") + ")")
             }
         }
         if useFTS { conds.append("content_fts MATCH ?") }

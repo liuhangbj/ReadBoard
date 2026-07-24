@@ -13,8 +13,9 @@ public final class ContentViewModel: ObservableObject {
     /// 阅读状态单选：all=全部 / unread=未读 / starred=星标（三选一）
     @Published var readFilter: ReadFilter = .all
     @Published var showArchived: Bool = false      // 看归档（默认看活跃）
-    /// 处理状态筛选：nil=不限，"score"/"summary"/"translate"/"transcribe"
-    @Published var processedFilter: String? = nil
+    /// 处理状态筛选（多选）：score/summary/translate/transcribe。空 = 不限。
+    /// 多选为「或」关系（满足任一即纳入），符合"我想看已打分或已翻译的"直觉。
+    @Published var processedFilters: Set<String> = []
     @Published var keyword: String = ""            // 搜索关键词（标题/正文）
 
     enum ReadFilter: String, CaseIterable {
@@ -108,7 +109,7 @@ public final class ContentViewModel: ObservableObject {
                                     starredOnly: readFilter == .starred,
                                     archived: showArchived,
                                     tagId: selectedTag?.id,
-                                    processedFilter: processedFilter,
+                                    processedFilters: processedFilters,
                                     limit: Self.pageSize, offset: 0)
         items = page
         hasMore = page.count >= Self.pageSize
@@ -130,7 +131,7 @@ public final class ContentViewModel: ObservableObject {
                                     starredOnly: readFilter == .starred,
                                     archived: showArchived,
                                     tagId: selectedTag?.id,
-                                    processedFilter: processedFilter,
+                                    processedFilters: processedFilters,
                                     limit: Self.pageSize,
                                     offset: items.count)
         hasMore = page.count >= Self.pageSize

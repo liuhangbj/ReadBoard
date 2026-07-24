@@ -89,26 +89,6 @@ public struct ContentView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    // 固定分类（Follo 式置顶）：全部 / 未读 / 星标 / 归档
-                    allRow
-                    quickFilterRow(icon: "envelope.badge", name: "未读",
-                                   isActive: vm.readFilter == .unread) {
-                        vm.readFilter = vm.readFilter == .unread ? .all : .unread
-                        vm.reload()
-                    }
-                    quickFilterRow(icon: "star", name: "星标",
-                                   isActive: vm.readFilter == .starred) {
-                        vm.readFilter = vm.readFilter == .starred ? .all : .starred
-                        vm.reload()
-                    }
-                    quickFilterRow(icon: "archivebox", name: "归档",
-                                   isActive: vm.showArchived) {
-                        vm.showArchived.toggle()
-                        vm.reload()
-                    }
-
-                    Divider().padding(.vertical, 6)
-
                     ForEach(vm.sidebarTree) { node in
                         if node.isFolder {
                             // 文件夹行：左侧箭头控制展开，点击行过滤该组
@@ -165,61 +145,6 @@ public struct ContentView: View {
             // 默认展开所有文件夹（用户能直接看到源，不用先点一下）
             expandedFolders = Set(vm.sidebarTree.filter { $0.isFolder }.map { $0.id })
         }
-    }
-
-    /// "全部"行（点击清空过滤）
-    private var allRow: some View {
-        Button {
-            vm.selectFilter(nil)
-            vm.readFilter = .all
-            vm.showArchived = false
-            vm.reload()
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "tray.full")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16)
-                Text("全部")
-                    .foregroundStyle(vm.selectedFilter == nil && vm.readFilter == .all && !vm.showArchived ? .white : .primary)
-                Spacer()
-                Text("\(vm.totalCount)")
-                    .foregroundStyle(vm.selectedFilter == nil && vm.readFilter == .all && !vm.showArchived ? .white.opacity(0.8) : .secondary)
-                    .font(.caption)
-            }
-            .padding(.leading, 12)
-            .padding(.trailing, 12)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(vm.selectedFilter == nil && vm.readFilter == .all && !vm.showArchived ? Color.accentColor : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// 固定分类快捷行（未读/星标/归档）
-    private func quickFilterRow(icon: String, name: String, isActive: Bool,
-                                action: @escaping () -> Void) -> some View {
-        Button {
-            action()
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .foregroundStyle(isActive ? .white : .secondary)
-                    .frame(width: 16)
-                Text(name)
-                    .foregroundStyle(isActive ? .white : .primary)
-                Spacer()
-            }
-            .padding(.leading, 12)
-            .padding(.trailing, 12)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isActive ? Color.accentColor : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     /// 左栏行（点击过滤 + 未读角标 + 右键设置菜单）。
@@ -407,6 +332,25 @@ public struct ContentView: View {
     }
 
     // MARK: 中栏
+
+    /// 处理状态平铺多选按钮（激活高亮，点击切换加入/移出多选集）
+    private func processedToggle(key: String, label: String) -> some View {
+        let active = vm.processedFilters.contains(key)
+        return Button {
+            if active { vm.processedFilters.remove(key) }
+            else { vm.processedFilters.insert(key) }
+            vm.reload()
+        } label: {
+            Text(label)
+                .font(.caption)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(active ? Color.accentColor : Color.gray.opacity(0.12))
+                .foregroundStyle(active ? .white : .primary)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+    }
+
     private var articleList: some View {
         VStack(spacing: 0) {
             // 搜索框
@@ -431,7 +375,7 @@ public struct ContentView: View {
             .padding(.vertical, 6)
             .background(.quaternary.opacity(0.5))
 
-            // 筛选条：评分(输入框) + 处理状态(选择框) + 未读/全部/星标(单选) + 归档
+            // 筛选条行1：评分(输入框) + 标签 + 未读/全部/星标(单选) + 归档
             HStack {
                 Text("评分 ≥")
                     .font(.caption)
@@ -449,21 +393,6 @@ public struct ContentView: View {
                         .controlSize(.small)
                         .onChange(of: vm.includeUnscored) { _, _ in vm.reload() }
                 }
-
-                // 处理状态选择框（打分/摘要/翻译/转录）
-                Picker(selection: $vm.processedFilter) {
-                    Text("处理: 全部").tag(nil as String?)
-                    Text("已打分").tag("score" as String?)
-                    Text("已摘要").tag("summary" as String?)
-                    Text("已翻译").tag("translate" as String?)
-                    Text("已转录").tag("transcribe" as String?)
-                } label: { EmptyView() }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(maxWidth: 110)
-                .font(.caption)
-                .controlSize(.small)
-                .onChange(of: vm.processedFilter) { _, _ in vm.reload() }
 
                 // 标签筛选
                 Picker(selection: $vm.selectedTag) {
@@ -500,6 +429,20 @@ public struct ContentView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
+
+            // 筛选条行2：处理状态平铺多选按钮（打分/摘要/翻译/转录，可多选）
+            HStack(spacing: 6) {
+                Text("处理")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                processedToggle(key: "score", label: "已打分")
+                processedToggle(key: "summary", label: "已摘要")
+                processedToggle(key: "translate", label: "已翻译")
+                processedToggle(key: "transcribe", label: "已转录")
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 6)
 
             // 操作条：全部标已读 + 计数
             HStack {
