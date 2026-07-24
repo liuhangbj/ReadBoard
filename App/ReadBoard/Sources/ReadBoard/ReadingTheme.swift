@@ -59,99 +59,183 @@ enum ReadingTheme: String, CaseIterable, Identifiable {
         }
     }
 
-    var palette: ThemePalette {
-        switch self {
-        case .claude:
-            // Primary 主题（ceciliamay/obsidian-primary 浅色，Obsidian October 2021 最佳主题）
-            // 设计语言：Bauhaus 红黄蓝 + 泛黄复古杂志页 + 斯堪的纳维亚暖木。
-            // 语义色（作者原话）：italics 蓝、bold 红、links 黄——
-            // "italics felt blue, bold felt red, and links felt yellow"
-            return ThemePalette(
-                background: Color(red: 0.965, green: 0.945, blue: 0.894),    // #F6F1E4 泛黄杂志底
-                backgroundAlt: Color(red: 0.937, green: 0.910, blue: 0.847), // #EFE8D8 稍深
-                codeBackground: Color(red: 0.929, green: 0.898, blue: 0.831),
-                inlineCodeBackground: Color(red: 0.910, green: 0.878, blue: 0.812),
-                text: Color(red: 0.286, green: 0.247, blue: 0.208),          // #493F35 暖深棕
-                textSecondary: Color(red: 0.482, green: 0.435, blue: 0.376), // 暖中灰
-                textFaint: Color(red: 0.639, green: 0.596, blue: 0.533),     // 暖浅灰
-                h1: Color(red: 0.220, green: 0.184, blue: 0.149),            // 近黑暖棕
-                h2: Color(red: 0.769, green: 0.263, blue: 0.220),            // 红 #C44338（bold 红系延伸）
-                h3: Color(red: 0.227, green: 0.471, blue: 0.678),            // 蓝 #3A78AD（italic 蓝系延伸）
-                h4: Color(red: 0.788, green: 0.596, blue: 0.180),            // 黄 #C9982E（link 黄系延伸）
-                bold: Color(red: 0.769, green: 0.263, blue: 0.220),          // bold 红 #C44338
-                italic: Color(red: 0.227, green: 0.471, blue: 0.678),        // italic 蓝 #3A78AD
-                inlineCode: Color(red: 0.769, green: 0.263, blue: 0.220),    // 行内代码红
-                link: Color(red: 0.788, green: 0.596, blue: 0.180),          // link 黄 #C9982E
-                quoteBorder: Color(red: 0.227, green: 0.471, blue: 0.678),   // 引用蓝
-                quoteText: Color(red: 0.435, green: 0.384, blue: 0.322),
-                listMarker: Color(red: 0.769, green: 0.263, blue: 0.220),    // 列表标记红
-                divider: Color(red: 0.839, green: 0.800, blue: 0.729),
-                codeText: Color(red: 0.286, green: 0.247, blue: 0.208),
-                codeKeyword: Color(red: 0.769, green: 0.263, blue: 0.220),   // keyword 红
-                codeString: Color(red: 0.345, green: 0.553, blue: 0.310),    // string 暖绿
-                codeComment: Color(red: 0.639, green: 0.596, blue: 0.533),   // comment 暖灰
-                codeNumber: Color(red: 0.788, green: 0.596, blue: 0.180),    // number 黄
-                headingSerif: true   // Primary 配衬线标题（杂志感）
-            )
-        case .things:
-            // Things 主题（obsidian-things 深色）：named palette 直接抄
-            return ThemePalette(
-                background: Color(red: 0.141, green: 0.157, blue: 0.196),    // #242832 深蓝灰
-                backgroundAlt: Color(red: 0.113, green: 0.125, blue: 0.161), // 更深 #1D2029
-                codeBackground: Color(red: 0.098, green: 0.110, blue: 0.145),
-                inlineCodeBackground: Color(red: 0.20, green: 0.22, blue: 0.27),
-                text: Color(red: 0.827, green: 0.808, blue: 0.792),          // #D3CECA
-                textSecondary: Color(red: 0.55, green: 0.57, blue: 0.62),
-                textFaint: Color(red: 0.42, green: 0.45, blue: 0.51),
-                h1: Color(red: 0.937, green: 0.925, blue: 0.910),            // 近白
-                h2: Color(red: 0.18, green: 0.50, blue: 0.95),               // blue #2e80f2
-                h3: Color(red: 0.18, green: 0.50, blue: 0.95),               // H3 blue
-                h4: Color(red: 0.898, green: 0.710, blue: 0.404),            // yellow #e5b567
-                bold: Color(red: 1.0, green: 0.510, blue: 0.698),            // pink #ff82b2
-                italic: Color(red: 1.0, green: 0.510, blue: 0.698),          // pink
-                inlineCode: Color(red: 0.745, green: 0.78, blue: 0.81),      // 浅灰 #BEC6CF
-                link: Color(red: 0.18, green: 0.50, blue: 0.95),             // blue
-                quoteBorder: Color(red: 0.243, green: 0.706, blue: 0.749),   // green #3eb4bf
-                quoteText: Color(red: 0.243, green: 0.706, blue: 0.749),     // 引用 green
-                listMarker: Color(red: 0.243, green: 0.706, blue: 0.749),    // green
-                divider: Color(red: 0.30, green: 0.32, blue: 0.38),
-                codeText: Color(red: 0.827, green: 0.808, blue: 0.792),
-                codeKeyword: Color(red: 0.78, green: 0.47, blue: 0.87),      // purple-ish
-                codeString: Color(red: 0.60, green: 0.76, blue: 0.47),       // atom green
-                codeComment: Color(red: 0.42, green: 0.45, blue: 0.51),      // atom gray
-                codeNumber: Color(red: 0.82, green: 0.60, blue: 0.40),       // atom orange
-                headingSerif: false
-            )
-        case .systemDefault:
-            return ThemePalette(
-                background: Color(nsColor: .textBackgroundColor),
-                backgroundAlt: Color.gray.opacity(0.10),
-                codeBackground: Color.gray.opacity(0.14),
-                inlineCodeBackground: Color.gray.opacity(0.16),
-                text: Color(nsColor: .textColor),
-                textSecondary: .secondary,
-                textFaint: Color(nsColor: .tertiaryLabelColor),
-                h1: Color(nsColor: .textColor),
-                h2: Color(nsColor: .textColor),
-                h3: Color(nsColor: .textColor),
-                h4: Color(nsColor: .textColor),
-                bold: Color(nsColor: .textColor),
-                italic: Color(nsColor: .textColor),
-                inlineCode: Color(nsColor: .textColor),
-                link: .accentColor,
-                quoteBorder: .accentColor,
-                quoteText: .secondary,
-                listMarker: .accentColor,
-                divider: Color.gray.opacity(0.4),
-                codeText: Color(nsColor: .textColor),
-                codeKeyword: .accentColor,
-                codeString: .green,
-                codeComment: .secondary,
-                codeNumber: .orange,
-                headingSerif: false
-            )
+    /// 亮/暗模式（持久化）
+    enum Mode: String, CaseIterable, Identifiable {
+        case light, dark
+        var id: String { rawValue }
+        var displayName: String { self == .light ? "亮色" : "暗色" }
+        static var current: Mode {
+            get {
+                let raw = UserDefaults.standard.string(forKey: "reading.themeMode") ?? "light"
+                return Mode(rawValue: raw) ?? .light
+            }
+            set { UserDefaults.standard.set(newValue.rawValue, forKey: "reading.themeMode") }
         }
     }
+
+    /// 当前主题的 palette（按亮暗模式取对应变体）
+    var palette: ThemePalette {
+        palette(for: Mode.current)
+    }
+
+    func palette(for mode: Mode) -> ThemePalette {
+        switch (self, mode) {
+        case (.claude, .light): return Self.primaryLight
+        case (.claude, .dark): return Self.primaryDark
+        case (.things, .light): return Self.thingsLight
+        case (.things, .dark): return Self.thingsDark
+        case (.systemDefault, _): return Self.systemPalette
+        }
+    }
+
+    // MARK: Primary（ceciliamay/obsidian-primary）——Bauhaus 红黄蓝 + 泛黄杂志
+
+    /// Primary 浅色：泛黄杂志底 + 暖深棕字 + 红黄蓝语义
+    static let primaryLight = ThemePalette(
+        background: Color(red: 0.965, green: 0.945, blue: 0.894),    // #F6F1E4
+        backgroundAlt: Color(red: 0.937, green: 0.910, blue: 0.847),
+        codeBackground: Color(red: 0.929, green: 0.898, blue: 0.831),
+        inlineCodeBackground: Color(red: 0.910, green: 0.878, blue: 0.812),
+        text: Color(red: 0.286, green: 0.247, blue: 0.208),          // #493F35
+        textSecondary: Color(red: 0.482, green: 0.435, blue: 0.376),
+        textFaint: Color(red: 0.639, green: 0.596, blue: 0.533),
+        h1: Color(red: 0.220, green: 0.184, blue: 0.149),
+        h2: Color(red: 0.769, green: 0.263, blue: 0.220),            // 红
+        h3: Color(red: 0.227, green: 0.471, blue: 0.678),            // 蓝
+        h4: Color(red: 0.788, green: 0.596, blue: 0.180),            // 黄
+        bold: Color(red: 0.769, green: 0.263, blue: 0.220),
+        italic: Color(red: 0.227, green: 0.471, blue: 0.678),
+        inlineCode: Color(red: 0.769, green: 0.263, blue: 0.220),
+        link: Color(red: 0.788, green: 0.596, blue: 0.180),
+        quoteBorder: Color(red: 0.227, green: 0.471, blue: 0.678),
+        quoteText: Color(red: 0.435, green: 0.384, blue: 0.322),
+        listMarker: Color(red: 0.769, green: 0.263, blue: 0.220),
+        divider: Color(red: 0.839, green: 0.800, blue: 0.729),
+        codeText: Color(red: 0.286, green: 0.247, blue: 0.208),
+        codeKeyword: Color(red: 0.769, green: 0.263, blue: 0.220),
+        codeString: Color(red: 0.345, green: 0.553, blue: 0.310),
+        codeComment: Color(red: 0.639, green: 0.596, blue: 0.533),
+        codeNumber: Color(red: 0.788, green: 0.596, blue: 0.180),
+        headingSerif: true
+    )
+
+    /// Primary 深色：暖棕暗底 + 米黄字 + 柔化红黄蓝（降低饱和度护眼）
+    static let primaryDark = ThemePalette(
+        background: Color(red: 0.145, green: 0.125, blue: 0.098),    // #251F19 暖棕暗底
+        backgroundAlt: Color(red: 0.110, green: 0.094, blue: 0.074),
+        codeBackground: Color(red: 0.090, green: 0.078, blue: 0.063),
+        inlineCodeBackground: Color(red: 0.22, green: 0.19, blue: 0.15),
+        text: Color(red: 0.878, green: 0.847, blue: 0.796),          // #E0D8CB 米黄
+        textSecondary: Color(red: 0.62, green: 0.58, blue: 0.52),
+        textFaint: Color(red: 0.47, green: 0.44, blue: 0.39),
+        h1: Color(red: 0.945, green: 0.925, blue: 0.890),            // 近白米
+        h2: Color(red: 0.898, green: 0.478, blue: 0.435),            // 柔红 #E57A70
+        h3: Color(red: 0.549, green: 0.720, blue: 0.878),            // 柔蓝 #8CB8E0
+        h4: Color(red: 0.898, green: 0.761, blue: 0.478),            // 柔黄 #E5C27A
+        bold: Color(red: 0.898, green: 0.478, blue: 0.435),
+        italic: Color(red: 0.549, green: 0.720, blue: 0.878),
+        inlineCode: Color(red: 0.898, green: 0.620, blue: 0.478),    // 柔橙红
+        link: Color(red: 0.898, green: 0.761, blue: 0.478),
+        quoteBorder: Color(red: 0.549, green: 0.720, blue: 0.878),
+        quoteText: Color(red: 0.70, green: 0.66, blue: 0.60),
+        listMarker: Color(red: 0.898, green: 0.478, blue: 0.435),
+        divider: Color(red: 0.32, green: 0.28, blue: 0.23),
+        codeText: Color(red: 0.878, green: 0.847, blue: 0.796),
+        codeKeyword: Color(red: 0.898, green: 0.478, blue: 0.435),
+        codeString: Color(red: 0.643, green: 0.796, blue: 0.549),    // 柔绿
+        codeComment: Color(red: 0.47, green: 0.44, blue: 0.39),
+        codeNumber: Color(red: 0.898, green: 0.761, blue: 0.478),
+        headingSerif: true
+    )
+
+    // MARK: Things（colineckert/obsidian-things）——named palette
+
+    /// Things 深色：深蓝灰底 + named palette（blue/pink/green/yellow）
+    static let thingsDark = ThemePalette(
+        background: Color(red: 0.141, green: 0.157, blue: 0.196),    // #242832
+        backgroundAlt: Color(red: 0.113, green: 0.125, blue: 0.161),
+        codeBackground: Color(red: 0.098, green: 0.110, blue: 0.145),
+        inlineCodeBackground: Color(red: 0.20, green: 0.22, blue: 0.27),
+        text: Color(red: 0.827, green: 0.808, blue: 0.792),          // #D3CECA
+        textSecondary: Color(red: 0.55, green: 0.57, blue: 0.62),
+        textFaint: Color(red: 0.42, green: 0.45, blue: 0.51),
+        h1: Color(red: 0.937, green: 0.925, blue: 0.910),
+        h2: Color(red: 0.18, green: 0.50, blue: 0.95),               // blue #2e80f2
+        h3: Color(red: 0.18, green: 0.50, blue: 0.95),
+        h4: Color(red: 0.898, green: 0.710, blue: 0.404),            // yellow #e5b567
+        bold: Color(red: 1.0, green: 0.510, blue: 0.698),            // pink #ff82b2
+        italic: Color(red: 1.0, green: 0.510, blue: 0.698),
+        inlineCode: Color(red: 0.745, green: 0.78, blue: 0.81),
+        link: Color(red: 0.18, green: 0.50, blue: 0.95),
+        quoteBorder: Color(red: 0.243, green: 0.706, blue: 0.749),   // green #3eb4bf
+        quoteText: Color(red: 0.243, green: 0.706, blue: 0.749),
+        listMarker: Color(red: 0.243, green: 0.706, blue: 0.749),
+        divider: Color(red: 0.30, green: 0.32, blue: 0.38),
+        codeText: Color(red: 0.827, green: 0.808, blue: 0.792),
+        codeKeyword: Color(red: 0.78, green: 0.47, blue: 0.87),
+        codeString: Color(red: 0.60, green: 0.76, blue: 0.47),
+        codeComment: Color(red: 0.42, green: 0.45, blue: 0.51),
+        codeNumber: Color(red: 0.82, green: 0.60, blue: 0.40),
+        headingSerif: false
+    )
+
+    /// Things 浅色：白底 + named palette 同色（浅色下加深保证对比度）
+    static let thingsLight = ThemePalette(
+        background: Color(red: 0.996, green: 0.996, blue: 0.992),    // #FEFEFD 近白
+        backgroundAlt: Color(red: 0.949, green: 0.953, blue: 0.961),
+        codeBackground: Color(red: 0.937, green: 0.941, blue: 0.949),
+        inlineCodeBackground: Color(red: 0.898, green: 0.906, blue: 0.918),
+        text: Color(red: 0.220, green: 0.243, blue: 0.278),          // #383E47
+        textSecondary: Color(red: 0.45, green: 0.48, blue: 0.53),
+        textFaint: Color(red: 0.62, green: 0.65, blue: 0.69),
+        h1: Color(red: 0.13, green: 0.15, blue: 0.18),
+        h2: Color(red: 0.16, green: 0.45, blue: 0.85),               // blue 深一点
+        h3: Color(red: 0.16, green: 0.45, blue: 0.85),
+        h4: Color(red: 0.78, green: 0.58, blue: 0.20),               // yellow 深
+        bold: Color(red: 0.88, green: 0.30, blue: 0.52),             // pink 深
+        italic: Color(red: 0.88, green: 0.30, blue: 0.52),
+        inlineCode: Color(red: 0.33, green: 0.36, blue: 0.42),
+        link: Color(red: 0.16, green: 0.45, blue: 0.85),
+        quoteBorder: Color(red: 0.20, green: 0.60, blue: 0.65),      // green 深
+        quoteText: Color(red: 0.20, green: 0.55, blue: 0.60),
+        listMarker: Color(red: 0.20, green: 0.60, blue: 0.65),
+        divider: Color(red: 0.86, green: 0.87, blue: 0.89),
+        codeText: Color(red: 0.220, green: 0.243, blue: 0.278),
+        codeKeyword: Color(red: 0.65, green: 0.28, blue: 0.70),
+        codeString: Color(red: 0.30, green: 0.60, blue: 0.30),
+        codeComment: Color(red: 0.55, green: 0.58, blue: 0.62),
+        codeNumber: Color(red: 0.78, green: 0.48, blue: 0.20),
+        headingSerif: false
+    )
+
+    /// 系统默认
+    static let systemPalette = ThemePalette(
+        background: Color(nsColor: .textBackgroundColor),
+        backgroundAlt: Color.gray.opacity(0.10),
+        codeBackground: Color.gray.opacity(0.14),
+        inlineCodeBackground: Color.gray.opacity(0.16),
+        text: Color(nsColor: .textColor),
+        textSecondary: .secondary,
+        textFaint: Color(nsColor: .tertiaryLabelColor),
+        h1: Color(nsColor: .textColor),
+        h2: Color(nsColor: .textColor),
+        h3: Color(nsColor: .textColor),
+        h4: Color(nsColor: .textColor),
+        bold: Color(nsColor: .textColor),
+        italic: Color(nsColor: .textColor),
+        inlineCode: Color(nsColor: .textColor),
+        link: .accentColor,
+        quoteBorder: .accentColor,
+        quoteText: .secondary,
+        listMarker: .accentColor,
+        divider: Color.gray.opacity(0.4),
+        codeText: Color(nsColor: .textColor),
+        codeKeyword: .accentColor,
+        codeString: .green,
+        codeComment: .secondary,
+        codeNumber: .orange,
+        headingSerif: false
+    )
 
     static var current: ReadingTheme {
         get {
@@ -237,13 +321,14 @@ enum ReadingFont: Hashable {
 struct MarkdownBodyView: View {
     let markdown: String
     let theme: ReadingTheme
+    let mode: ReadingTheme.Mode
     let fontChoice: ReadingFont
     let fontSize: Double
     let lineSpacing: Double
 
     @State private var blocks: [MdBlock] = []
 
-    private var p: ThemePalette { theme.palette }
+    private var p: ThemePalette { theme.palette(for: mode) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

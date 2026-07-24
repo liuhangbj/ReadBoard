@@ -177,7 +177,8 @@ public struct ContentView: View {
     /// 左栏行（点击过滤 + 未读角标 + 右键设置菜单）。
     /// Button 而非 List.tag——List selection 对 DisclosureGroup/自定义行不可靠。
     private func sidebarRow(_ node: SidebarNode, indent: Int) -> some View {
-        Button {
+        let scale = ReadingLayout.uiFontScale
+        return Button {
             vm.selectFilter(node.filterKey)
         } label: {
             HStack(spacing: 6) {
@@ -188,12 +189,13 @@ public struct ContentView: View {
                 }
                 Text(node.name)
                     .lineLimit(1)
+                    .font(.system(size: 13 * scale))
                     .foregroundStyle(vm.selectedFilter == node.filterKey ? .white : .primary)
                 Spacer()
                 // 未读角标（未读 > 0 显示；否则显示总数）
                 if node.unread > 0 {
                     Text("\(node.unread)")
-                        .font(.caption2.bold())
+                        .font(.system(size: 11 * scale).bold())
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(vm.selectedFilter == node.filterKey ? Color.white.opacity(0.25) : Color.accentColor.opacity(0.2))
                         .foregroundStyle(vm.selectedFilter == node.filterKey ? .white : .accentColor)
@@ -201,12 +203,12 @@ public struct ContentView: View {
                 } else {
                     Text("\(node.count)")
                         .foregroundStyle(vm.selectedFilter == node.filterKey ? .white.opacity(0.8) : .secondary)
-                        .font(.caption)
+                        .font(.system(size: 11 * scale))
                 }
             }
             .padding(.leading, CGFloat(indent) * 18 + 12)
             .padding(.trailing, 12)
-            .padding(.vertical, 6)
+            .padding(.vertical, 6 * scale)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(vm.selectedFilter == node.filterKey ? Color.accentColor : Color.clear)
             .contentShape(Rectangle())
@@ -532,6 +534,7 @@ public struct ContentView: View {
 
 public struct ArticleRow: View {
     let item: ContentItem
+    private var scale: Double { ReadingLayout.uiFontScale }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -543,18 +546,18 @@ public struct ArticleRow: View {
                         .padding(.top, 5)
                 }
                 Text(item.title)
-                    .font(.headline)
+                    .font(.system(size: 15 * scale).bold())
                     .foregroundStyle(item.isRead ? .secondary : .primary)
                     .lineLimit(2)
                 if item.starred {
                     Image(systemName: "star.fill")
                         .foregroundStyle(.yellow)
-                        .font(.caption)
+                        .font(.system(size: 12 * scale))
                 }
                 Spacer()
                 if let s = item.llmScore {
                     Text("\(s)")
-                        .font(.caption.bold())
+                        .font(.system(size: 11 * scale).bold())
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(scoreColor(s).opacity(0.2))
@@ -564,27 +567,27 @@ public struct ArticleRow: View {
             }
             HStack(spacing: 6) {
                 Text(item.source)
-                    .font(.caption2)
+                    .font(.system(size: 10 * scale))
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
                     .background(.quaternary)
                     .clipShape(RoundedRectangle(cornerRadius: 3))
                 if let author = item.author, !author.isEmpty {
                     Text(author)
-                        .font(.caption)
+                        .font(.system(size: 11 * scale))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 Spacer()
                 if let lang = item.language {
                     Text(lang)
-                        .font(.caption2)
+                        .font(.system(size: 10 * scale))
                         .foregroundStyle(.tertiary)
                 }
             }
             if let ex = item.excerpt, !ex.isEmpty {
                 Text(ex)
-                    .font(.caption)
+                    .font(.system(size: 12 * scale))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
@@ -618,6 +621,24 @@ struct ReadingLayout {
         get { let v = UserDefaults.standard.double(forKey: "reading.contentWidth"); return v > 0 ? v : 720 }
         set { UserDefaults.standard.set(newValue, forKey: "reading.contentWidth") }
     }
+    // 分块字号（不跟正文走——标题/元信息/摘要独立，解决"标题比正文还小"）
+    static var titleFontSize: Double {
+        get { let v = UserDefaults.standard.double(forKey: "reading.titleFontSize"); return v > 0 ? v : 24 }
+        set { UserDefaults.standard.set(newValue, forKey: "reading.titleFontSize") }
+    }
+    static var metaFontSize: Double {
+        get { let v = UserDefaults.standard.double(forKey: "reading.metaFontSize"); return v > 0 ? v : 12 }
+        set { UserDefaults.standard.set(newValue, forKey: "reading.metaFontSize") }
+    }
+    static var summaryFontSize: Double {
+        get { let v = UserDefaults.standard.double(forKey: "reading.summaryFontSize"); return v > 0 ? v : 14 }
+        set { UserDefaults.standard.set(newValue, forKey: "reading.summaryFontSize") }
+    }
+    /// 界面字体大小（左栏源名/中栏列表/操作条，独立于阅读正文）
+    static var uiFontScale: Double {
+        get { let v = UserDefaults.standard.double(forKey: "reading.uiFontScale"); return v > 0 ? v : 1.0 }
+        set { UserDefaults.standard.set(newValue, forKey: "reading.uiFontScale") }
+    }
 }
 
 public struct ReadingView: View {
@@ -637,8 +658,13 @@ public struct ReadingView: View {
     @State private var lineSpacing = ReadingLayout.lineSpacing
     @State private var contentWidth = ReadingLayout.contentWidth
     @State private var theme = ReadingTheme.current
+    @State private var themeMode = ReadingTheme.Mode.current
     @State private var fontChoice = ReadingFont.current
     @State private var customFontName: String = ""
+    @State private var titleFontSize = ReadingLayout.titleFontSize
+    @State private var metaFontSize = ReadingLayout.metaFontSize
+    @State private var summaryFontSize = ReadingLayout.summaryFontSize
+    @State private var uiFontScale = ReadingLayout.uiFontScale
     @State private var showLayoutPopover = false
     @State private var showShareSheet = false
 
@@ -722,17 +748,19 @@ public struct ReadingView: View {
             // ── 正文滚动区 ──
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    // 标题 + 元信息
+                    // 标题 + 元信息（独立字号设置）
                     Text(item.title)
-                        .font(theme.palette.headingSerif ? .system(.title2, design: .serif).bold() : .title2.bold())
-                        .foregroundStyle(theme.palette.text)
+                        .font(p.headingSerif
+                            ? .system(size: titleFontSize, design: .serif).bold()
+                            : .system(size: titleFontSize).bold())
+                        .foregroundStyle(p.text)
                     HStack(spacing: 10) {
                         if let a = item.author, !a.isEmpty { Label(a, systemImage: "person") }
-                        if let p = item.publishedAt { Label(String(p.prefix(10)), systemImage: "calendar") }
+                        if let pd = item.publishedAt { Label(String(pd.prefix(10)), systemImage: "calendar") }
                         if let s = item.llmScore { Label("评分 \(s)", systemImage: "star.fill") }
                     }
-                    .font(.caption)
-                    .foregroundStyle(theme.palette.textSecondary)
+                    .font(.system(size: metaFontSize))
+                    .foregroundStyle(p.textSecondary)
 
                     // ── 标签行 ──
                     TagEditorView(contentId: item.id)
@@ -785,21 +813,22 @@ public struct ReadingView: View {
 
                     Divider()
 
-                    // 摘要
+                    // 摘要（独立字号设置）
                     if let sum = item.llmSummary, !sum.isEmpty {
                         Text(sum)
-                            .font(.callout)
-                            .foregroundStyle(theme.palette.textSecondary)
+                            .font(.system(size: summaryFontSize))
+                            .foregroundStyle(p.textSecondary)
                             .padding(10)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(theme.palette.backgroundAlt)
+                            .background(p.backgroundAlt)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
 
-                    // 正文（markdown 渲染 + 主题/字体/版面设置生效）
+                    // 正文（markdown 渲染 + 主题/亮暗/字体/版面设置生效）
                     MarkdownBodyView(
                         markdown: bodyText,
                         theme: theme,
+                        mode: themeMode,
                         fontChoice: fontChoice,
                         fontSize: fontSize,
                         lineSpacing: lineSpacing
@@ -811,7 +840,7 @@ public struct ReadingView: View {
                 .frame(maxWidth: contentWidth)
                 .frame(maxWidth: .infinity)   // 内容限宽后居中
             }
-            .background(theme.palette.background)   // 主题底色
+            .background(p.background)   // 主题底色
         }
         // 视图随 .id(item.id) 重建，onAppear 即切文章——刷新有效开关与本地状态
         .onAppear {
@@ -831,7 +860,7 @@ public struct ReadingView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("版面设置").font(.headline)
 
-            // 主题
+            // 主题 + 亮/暗
             HStack {
                 Text("主题").frame(width: 60, alignment: .leading)
                 Picker("", selection: $theme) {
@@ -841,6 +870,53 @@ public struct ReadingView: View {
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: theme) { _, v in ReadingTheme.current = v }
+            }
+            HStack {
+                Text("亮暗").frame(width: 60, alignment: .leading)
+                Picker("", selection: $themeMode) {
+                    ForEach(ReadingTheme.Mode.allCases) { m in
+                        Text(m.displayName).tag(m)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: themeMode) { _, v in ReadingTheme.Mode.current = v }
+            }
+
+            // 字号（正文/标题/信息/摘要 分块独立 + 界面）
+            HStack {
+                Text("正文字号").frame(width: 60, alignment: .leading)
+                Stepper(value: $fontSize, in: 12...28, step: 1) {
+                    Text("\(Int(fontSize))").font(.callout.monospacedDigit())
+                }
+                .onChange(of: fontSize) { _, v in ReadingLayout.fontSize = v }
+            }
+            HStack {
+                Text("标题字号").frame(width: 60, alignment: .leading)
+                Stepper(value: $titleFontSize, in: 16...40, step: 1) {
+                    Text("\(Int(titleFontSize))").font(.callout.monospacedDigit())
+                }
+                .onChange(of: titleFontSize) { _, v in ReadingLayout.titleFontSize = v }
+            }
+            HStack {
+                Text("信息字号").frame(width: 60, alignment: .leading)
+                Stepper(value: $metaFontSize, in: 9...18, step: 1) {
+                    Text("\(Int(metaFontSize))").font(.callout.monospacedDigit())
+                }
+                .onChange(of: metaFontSize) { _, v in ReadingLayout.metaFontSize = v }
+            }
+            HStack {
+                Text("摘要字号").frame(width: 60, alignment: .leading)
+                Stepper(value: $summaryFontSize, in: 10...22, step: 1) {
+                    Text("\(Int(summaryFontSize))").font(.callout.monospacedDigit())
+                }
+                .onChange(of: summaryFontSize) { _, v in ReadingLayout.summaryFontSize = v }
+            }
+            HStack {
+                Text("界面缩放").frame(width: 60, alignment: .leading)
+                Slider(value: $uiFontScale, in: 0.8...1.5, step: 0.05) { _ in
+                    ReadingLayout.uiFontScale = uiFontScale
+                }
+                Text(String(format: "%.0f%%", uiFontScale * 100)).frame(width: 40).font(.callout.monospacedDigit())
             }
 
             // 字体（预设 + 自定义系统字体名）
@@ -897,14 +973,6 @@ public struct ReadingView: View {
                 .padding(.leading, 60)
             }
 
-            // 字号
-            HStack {
-                Text("字号").frame(width: 60, alignment: .leading)
-                Button { adjustFont(-1) } label: { Image(systemName: "textformat.size.smaller") }
-                Text("\(Int(fontSize))").frame(width: 30).font(.callout.monospacedDigit())
-                Button { adjustFont(1) } label: { Image(systemName: "textformat.size.larger") }
-            }
-
             // 行距
             HStack {
                 Text("行距").frame(width: 60, alignment: .leading)
@@ -927,12 +995,7 @@ public struct ReadingView: View {
             }
         }
         .padding()
-        .frame(width: 340)
-    }
-
-    private func adjustFont(_ delta: Double) {
-        fontSize = max(12, min(28, fontSize + delta))
-        ReadingLayout.fontSize = fontSize
+        .frame(width: 360)
     }
 
     // MARK: 快捷操作（本地即时反馈 + 通知列表刷新）
@@ -965,6 +1028,9 @@ public struct ReadingView: View {
     private var isMediaItem: Bool {
         item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil
     }
+
+    /// 当前 palette（按 themeMode 取——亮/暗切换即时生效）
+    private var p: ThemePalette { theme.palette(for: themeMode) }
 
     // MARK: - LLM 操作
 
