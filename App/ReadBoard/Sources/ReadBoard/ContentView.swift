@@ -57,49 +57,93 @@ public struct ContentView: View {
         NSWorkspace.shared.open(url)
     }
     // MARK: 左栏（文件夹→源 两级树，订阅源视角）
-    private var sourceSidebar: some View {
-        List(selection: Binding(
-            get: { vm.selectedFilter },
-            set: { vm.selectFilter($0) }
-        )) {
-            // 全部
-            HStack {
-                Image(systemName: "tray.full")
-                    .foregroundStyle(.secondary)
-                Text("全部")
-                Spacer()
-                Text("\(vm.totalCount)")
-                    .foregroundStyle(.secondary)
-                    .font(.caption)
-            }
-            .tag(nil as String?)
+    @StateObject private var sourceStore = SourceStore.shared
+    @State private var showAddSource = false
+    @State private var showAddFolder = false
+    @State private var newFolderName = ""
 
-            // 文件夹（可展开）→ 源
-            ForEach(vm.sidebarTree) { node in
-                if node.isFolder {
-                    DisclosureGroup {
-                        ForEach(node.children ?? []) { child in
-                            sidebarRow(child)
-                                .tag(child.filterKey as String?)
+    private var sourceSidebar: some View {
+        VStack(spacing: 0) {
+            // 顶部工具条：添加源 / 添加文件夹
+            HStack(spacing: 4) {
+                Text("订阅源")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button { showAddFolder = true } label: {
+                    Image(systemName: "folder.badge.plus")
+                }
+                .buttonStyle(.borderless)
+                .help("新建文件夹")
+                Button { showAddSource = true } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .help("添加订阅源")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
+            List(selection: Binding(
+                get: { vm.selectedFilter },
+                set: { vm.selectFilter($0) }
+            )) {
+                // 全部
+                HStack {
+                    Image(systemName: "tray.full")
+                        .foregroundStyle(.secondary)
+                    Text("全部")
+                    Spacer()
+                    Text("\(vm.totalCount)")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                }
+                .tag(nil as String?)
+
+                // 文件夹（可展开）→ 源
+                ForEach(vm.sidebarTree) { node in
+                    if node.isFolder {
+                        DisclosureGroup {
+                            ForEach(node.children ?? []) { child in
+                                sidebarRow(child)
+                                    .tag(child.filterKey as String?)
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "folder.fill")
+                                    .foregroundStyle(.secondary)
+                                Text(node.name)
+                                Spacer()
+                                Text("\(node.count)")
+                                    .foregroundStyle(.secondary)
+                                    .font(.caption)
+                            }
                         }
-                    } label: {
-                        HStack {
-                            Image(systemName: "folder.fill")
-                                .foregroundStyle(.secondary)
-                            Text(node.name)
-                            Spacer()
-                            Text("\(node.count)")
-                                .foregroundStyle(.secondary)
-                                .font(.caption)
-                        }
+                    } else {
+                        sidebarRow(node)
+                            .tag(node.filterKey as String?)
                     }
-                } else {
-                    sidebarRow(node)
-                        .tag(node.filterKey as String?)
                 }
             }
+            .listStyle(.sidebar)
         }
-        .listStyle(.sidebar)
+        .sheet(isPresented: $showAddSource) {
+            AddSourceSheet(store: sourceStore)
+                .onDisappear { vm.loadAll() }
+        }
+        .alert("新建文件夹", isPresented: $showAddFolder) {
+            TextField("文件夹名称", text: $newFolderName)
+            Button("创建") {
+                let name = newFolderName.trimmingCharacters(in: .whitespaces)
+                if !name.isEmpty {
+                    sourceStore.addFolder(name: name)
+                    vm.loadAll()
+                }
+                newFolderName = ""
+            }
+            Button("取消", role: .cancel) { newFolderName = "" }
+        } message: {
+            Text("文件夹用于给订阅源分组（如「快讯」「深度」），并可设置组级管线总开关。")
+        }
     }
 
     private func sidebarRow(_ node: SidebarNode) -> some View {
@@ -141,19 +185,17 @@ public struct ContentView: View {
             .padding(.vertical, 6)
             .background(.quaternary.opacity(0.5))
 
-            // 筛选条：评分(可选含未评分) + 标签 + 未读 + 星标 + 归档
+            // 筛选条：评分(输入框) + 标签 + 未读 + 星标 + 归档
             HStack {
                 Text("评分 ≥")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Picker("", selection: $vm.minScore) {
-                    Text("不限").tag(0)
-                    Text("40").tag(40)
-                    Text("60").tag(60)
-                    Text("80").tag(80)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: vm.minScore) { _, _ in vm.reload() }
+                TextField("0", value: $vm.minScore, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 48)
+                    .font(.caption)
+                    .onSubmit { vm.reload() }
+                    .onChange(of: vm.minScore) { _, _ in vm.reloadDebounced() }
                 if vm.minScore > 0 {
                     Toggle("含未评分", isOn: $vm.includeUnscored)
                         .toggleStyle(.checkbox)
@@ -330,6 +372,22 @@ public struct ArticleRow: View {
 
 // MARK: - 阅读区
 
+/// 阅读器版面设置（持久化 UserDefaults）
+struct ReadingLayout {
+    static var fontSize: Double {
+        get { let v = UserDefaults.standard.double(forKey: "reading.fontSize"); return v > 0 ? v : 16 }
+        set { UserDefaults.standard.set(newValue, forKey: "reading.fontSize") }
+    }
+    static var lineSpacing: Double {
+        get { let v = UserDefaults.standard.double(forKey: "reading.lineSpacing"); return v > 0 ? v : 6 }
+        set { UserDefaults.standard.set(newValue, forKey: "reading.lineSpacing") }
+    }
+    static var contentWidth: Double {   // 最大内容宽度
+        get { let v = UserDefaults.standard.double(forKey: "reading.contentWidth"); return v > 0 ? v : 720 }
+        set { UserDefaults.standard.set(newValue, forKey: "reading.contentWidth") }
+    }
+}
+
 public struct ReadingView: View {
     let item: ContentItem
     @Binding var showTranslated: Bool
@@ -340,115 +398,234 @@ public struct ReadingView: View {
     @State private var statusMsg: String?
     /// busy 所属的内容 id——切文章后旧任务完成不再污染新文章的 busy 状态
     @State private var busyForId: Int64? = nil
-    /// 当前内容的有效管线开关（源 OR 文件夹）。手动按钮也尊重开关——
-    /// 用户在某源上关掉自动打分，通常就是不想给这个源的内容打分。
+    /// 当前内容的有效管线开关（源 OR 文件夹）
     @State private var policy = PipelinePolicy()
+    /// 版面设置
+    @State private var fontSize = ReadingLayout.fontSize
+    @State private var lineSpacing = ReadingLayout.lineSpacing
+    @State private var contentWidth = ReadingLayout.contentWidth
+    @State private var showLayoutPopover = false
+    @State private var showShareSheet = false
+    /// 星标/已读状态（本地镜像，操作后即时反馈，不依赖 reload）
+    @State private var isStarred = false
+    @State private var isRead = false
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                // 标题 + 元信息
-                Text(item.title)
-                    .font(.title2.bold())
-                HStack(spacing: 10) {
-                    if let a = item.author, !a.isEmpty { Label(a, systemImage: "person") }
-                    if let p = item.publishedAt { Label(String(p.prefix(10)), systemImage: "calendar") }
-                    if let s = item.llmScore { Label("评分 \(s)", systemImage: "star.fill") }
+        VStack(spacing: 0) {
+            // ── 顶部操作条：快捷操作（星标/已读/归档/分享）+ 版面设置 ──
+            HStack(spacing: 14) {
+                // 快捷操作
+                Button { toggleStar() } label: {
+                    Image(systemName: isStarred ? "star.fill" : "star")
+                        .foregroundStyle(isStarred ? .yellow : .secondary)
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .buttonStyle(.borderless)
+                .help(isStarred ? "取消星标" : "加星标")
 
-                // ── 标签行 ──
-                TagEditorView(contentId: item.id)
-
-                // ── LLM 操作条 ──
-                HStack(spacing: 10) {
-                    // 转录不依赖 LLM key（whisper 本地），单独判断；也尊重源转录开关
-                    if isMediaItem, item.llmTranslatedMd == nil, policy.autoTranscribe {
-                        Button {
-                            runTranscribe()
-                        } label: {
-                            Label("转录", systemImage: "waveform")
-                        }
-                        .disabled(busy)
-                    }
-                    if !pipeline.isAvailable {
-                        if !isMediaItem {
-                            Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
-                                .font(.caption)
-                                .foregroundStyle(.red)
-                        }
-                    } else {
-                        if item.llmScore == nil, policy.autoScore {
-                            Button {
-                                runScore()
-                            } label: {
-                                Label("AI 评分", systemImage: "star")
-                            }
-                            .disabled(busy)
-                        }
-                        if item.llmSummary == nil, policy.autoSummarize {
-                            Button {
-                                runSummarize()
-                            } label: {
-                                Label("摘要", systemImage: "text.quote")
-                            }
-                            .disabled(busy)
-                        }
-                        if !isMediaItem, item.llmTranslatedMd == nil, policy.autoTranslate {
-                            Button {
-                                runTranslate()
-                            } label: {
-                                Label("AI 翻译", systemImage: "character.bubble")
-                            }
-                            .disabled(busy)
-                        }
-                        if busy {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                        }
-                        if let msg = statusMsg {
-                            Text(msg)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    Spacer()
+                Button { toggleRead() } label: {
+                    Image(systemName: isRead ? "envelope.open" : "envelope.badge")
+                        .foregroundStyle(.secondary)
                 }
+                .buttonStyle(.borderless)
+                .help(isRead ? "标为未读" : "标为已读")
 
-                // 原文/翻译切换（有翻译时才显示）
+                Button { toggleArchive() } label: {
+                    Image(systemName: item.archived ? "tray.and.arrow.up" : "archivebox")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help(item.archived ? "取消归档" : "归档")
+
+                Button { showShareSheet = true } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("分享 / 后处理")
+
+                Spacer()
+
+                // 原文/翻译切换（有翻译时）
                 if item.llmTranslatedMd != nil {
                     Picker("", selection: $showTranslated) {
                         Text("原文").tag(false)
                         Text("翻译").tag(true)
                     }
                     .pickerStyle(.segmented)
-                    .frame(maxWidth: 160)
+                    .frame(maxWidth: 140)
+                    .controlSize(.small)
                 }
 
-                Divider()
-
-                // 摘要
-                if let sum = item.llmSummary, !sum.isEmpty {
-                    Text(sum)
-                        .font(.callout)
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.quaternary.opacity(0.5))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                // 版面设置
+                Button { showLayoutPopover = true } label: {
+                    Image(systemName: "textformat.size")
+                        .foregroundStyle(.secondary)
                 }
-
-                // 正文
-                Text(bodyText)
-                    .font(.body)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                .buttonStyle(.borderless)
+                .help("版面设置")
+                .popover(isPresented: $showLayoutPopover, arrowEdge: .bottom) {
+                    layoutPanel
+                }
             }
-            .padding(24)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(.bar)
+
+            Divider()
+
+            // ── 正文滚动区 ──
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    // 标题 + 元信息
+                    Text(item.title)
+                        .font(.title2.bold())
+                    HStack(spacing: 10) {
+                        if let a = item.author, !a.isEmpty { Label(a, systemImage: "person") }
+                        if let p = item.publishedAt { Label(String(p.prefix(10)), systemImage: "calendar") }
+                        if let s = item.llmScore { Label("评分 \(s)", systemImage: "star.fill") }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    // ── 标签行 ──
+                    TagEditorView(contentId: item.id)
+
+                    // ── LLM 操作条 ──
+                    HStack(spacing: 10) {
+                        if isMediaItem, item.llmTranslatedMd == nil, policy.autoTranscribe {
+                            Button { runTranscribe() } label: {
+                                Label("转录", systemImage: "waveform")
+                            }
+                            .disabled(busy)
+                        }
+                        if !pipeline.isAvailable {
+                            if !isMediaItem {
+                                Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                        } else {
+                            if item.llmScore == nil, policy.autoScore {
+                                Button { runScore() } label: {
+                                    Label("AI 评分", systemImage: "star")
+                                }
+                                .disabled(busy)
+                            }
+                            if item.llmSummary == nil, policy.autoSummarize {
+                                Button { runSummarize() } label: {
+                                    Label("摘要", systemImage: "text.quote")
+                                }
+                                .disabled(busy)
+                            }
+                            if !isMediaItem, item.llmTranslatedMd == nil, policy.autoTranslate {
+                                Button { runTranslate() } label: {
+                                    Label("AI 翻译", systemImage: "character.bubble")
+                                }
+                                .disabled(busy)
+                            }
+                            if busy {
+                                ProgressView().scaleEffect(0.7)
+                            }
+                            if let msg = statusMsg {
+                                Text(msg)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer()
+                    }
+
+                    Divider()
+
+                    // 摘要
+                    if let sum = item.llmSummary, !sum.isEmpty {
+                        Text(sum)
+                            .font(.callout)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.quaternary.opacity(0.5))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+
+                    // 正文（版面设置生效）
+                    Text(bodyText)
+                        .font(.system(size: fontSize))
+                        .lineSpacing(lineSpacing)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(24)
+                .frame(maxWidth: contentWidth)
+                .frame(maxWidth: .infinity)   // 内容限宽后居中
+            }
         }
-        // 视图随 .id(item.id) 重建，onAppear 即切文章——刷新有效开关
-        .onAppear { policy = Database.shared.effectivePolicyFor(contentId: item.id) }
+        // 视图随 .id(item.id) 重建，onAppear 即切文章——刷新有效开关与本地状态
+        .onAppear {
+            policy = Database.shared.effectivePolicyFor(contentId: item.id)
+            isStarred = item.starred
+            isRead = item.isRead
+        }
+        .sheet(isPresented: $showShareSheet) {
+            ShareSheet(item: item)
+        }
+    }
+
+    /// 版面设置面板
+    private var layoutPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("版面设置").font(.headline)
+            HStack {
+                Text("字号").frame(width: 60, alignment: .leading)
+                Button { adjustFont(-1) } label: { Image(systemName: "textformat.size.smaller") }
+                Text("\(Int(fontSize))").frame(width: 30).font(.callout.monospacedDigit())
+                Button { adjustFont(1) } label: { Image(systemName: "textformat.size.larger") }
+            }
+            HStack {
+                Text("行距").frame(width: 60, alignment: .leading)
+                Slider(value: $lineSpacing, in: 0...16, step: 1) { _ in
+                    ReadingLayout.lineSpacing = lineSpacing
+                }
+                Text("\(Int(lineSpacing))").frame(width: 24).font(.callout.monospacedDigit())
+            }
+            HStack {
+                Text("宽度").frame(width: 60, alignment: .leading)
+                Picker("", selection: $contentWidth) {
+                    Text("窄").tag(560.0)
+                    Text("中").tag(720.0)
+                    Text("宽").tag(960.0)
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: contentWidth) { _, v in ReadingLayout.contentWidth = v }
+            }
+        }
+        .padding()
+        .frame(width: 300)
+    }
+
+    private func adjustFont(_ delta: Double) {
+        fontSize = max(12, min(28, fontSize + delta))
+        ReadingLayout.fontSize = fontSize
+    }
+
+    // MARK: 快捷操作（本地即时反馈 + 通知列表刷新）
+
+    private func toggleStar() {
+        Database.shared.toggleStar(contentId: item.id)
+        isStarred.toggle()
+        NotificationCenter.default.post(name: .contentUpdated, object: nil)
+    }
+
+    private func toggleRead() {
+        if isRead { Database.shared.markUnread(contentId: item.id) }
+        else { Database.shared.markRead(contentId: item.id) }
+        isRead.toggle()
+        NotificationCenter.default.post(name: .contentUpdated, object: nil)
+    }
+
+    private func toggleArchive() {
+        Database.shared.toggleArchive(contentId: item.id)
+        NotificationCenter.default.post(name: .contentUpdated, object: nil)
     }
 
     private var bodyText: String {
@@ -590,4 +767,78 @@ public struct TagEditorView: View {
     }
 
     private func reload() { tags = TagService.shared.tagsFor(contentId: contentId) }
+}
+
+// MARK: - 分享 / 后处理（阅读区）
+
+public struct ShareSheet: View {
+    let item: ContentItem
+    @Environment(\.dismiss) private var dismiss
+    @State private var message = ""
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("分享 / 后处理").font(.title3.bold())
+            Text(item.title).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(item.url, forType: .string)
+                    message = "✅ 链接已复制"
+                } label: {
+                    Label("复制链接", systemImage: "link")
+                }
+
+                Button {
+                    let text = "\(item.title)\n\(item.url)"
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                    message = "✅ 标题+链接已复制"
+                } label: {
+                    Label("复制标题+链接", systemImage: "doc.on.doc")
+                }
+
+                Button {
+                    if let url = URL(string: item.url), !item.url.isEmpty {
+                        NSWorkspace.shared.open(url)
+                    }
+                    dismiss()
+                } label: {
+                    Label("在浏览器打开原文", systemImage: "safari")
+                }
+
+                Divider()
+
+                Button {
+                    ArchiveService.shared.rearchive(contentId: item.id)
+                    message = "✅ 已重新生成归档 md"
+                } label: {
+                    Label("重新生成归档文件", systemImage: "arrow.clockwise.doc")
+                }
+
+                Button {
+                    Task {
+                        await ExportService.shared.runPending(trigger: "manual", contentId: item.id)
+                        message = "✅ 已触发手动导出规则"
+                    }
+                } label: {
+                    Label("触发导出规则（Obsidian/webhook）", systemImage: "square.and.arrow.up.on.square")
+                }
+            }
+            .buttonStyle(.borderless)
+
+            if !message.isEmpty {
+                Text(message).font(.caption).foregroundStyle(.green)
+            }
+
+            Spacer()
+            HStack {
+                Spacer()
+                Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 380, height: 420)
+    }
 }
