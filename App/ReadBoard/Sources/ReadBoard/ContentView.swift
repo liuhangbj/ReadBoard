@@ -61,6 +61,8 @@ public struct ContentView: View {
     @State private var showAddSource = false
     @State private var showAddFolder = false
     @State private var newFolderName = ""
+    /// 展开的文件夹 id 集合（自己控制，DisclosureGroup 的 label 无法响应点击过滤）
+    @State private var expandedFolders: Set<String> = []
 
     private var sourceSidebar: some View {
         VStack(spacing: 0) {
@@ -83,48 +85,59 @@ public struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
 
-            List(selection: Binding(
-                get: { vm.selectedFilter },
-                set: { vm.selectFilter($0) }
-            )) {
-                // 全部
-                HStack {
-                    Image(systemName: "tray.full")
-                        .foregroundStyle(.secondary)
-                    Text("全部")
-                    Spacer()
-                    Text("\(vm.totalCount)")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
-                }
-                .tag(nil as String?)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    // 全部
+                    sidebarButton(
+                        icon: "tray.full", name: "全部", count: vm.totalCount,
+                        filterKey: nil, isSelected: vm.selectedFilter == nil, indent: 0
+                    )
 
-                // 文件夹（可展开）→ 源
-                ForEach(vm.sidebarTree) { node in
-                    if node.isFolder {
-                        DisclosureGroup {
-                            ForEach(node.children ?? []) { child in
-                                sidebarRow(child)
-                                    .tag(child.filterKey as String?)
+                    ForEach(vm.sidebarTree) { node in
+                        if node.isFolder {
+                            // 文件夹行：左侧箭头控制展开，点击行过滤该组
+                            HStack(spacing: 4) {
+                                Button {
+                                    if expandedFolders.contains(node.id) {
+                                        expandedFolders.remove(node.id)
+                                    } else {
+                                        expandedFolders.insert(node.id)
+                                    }
+                                } label: {
+                                    Image(systemName: expandedFolders.contains(node.id) ? "chevron.down" : "chevron.right")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 14)
+                                }
+                                .buttonStyle(.plain)
+
+                                sidebarButton(
+                                    icon: "folder.fill", name: node.name, count: node.count,
+                                    filterKey: node.filterKey,
+                                    isSelected: vm.selectedFilter == node.filterKey, indent: 0
+                                )
                             }
-                        } label: {
-                            HStack {
-                                Image(systemName: "folder.fill")
-                                    .foregroundStyle(.secondary)
-                                Text(node.name)
-                                Spacer()
-                                Text("\(node.count)")
-                                    .foregroundStyle(.secondary)
-                                    .font(.caption)
+                            // 展开的子源
+                            if expandedFolders.contains(node.id) {
+                                ForEach(node.children ?? []) { child in
+                                    sidebarButton(
+                                        icon: nil, name: child.name, count: child.count,
+                                        filterKey: child.filterKey,
+                                        isSelected: vm.selectedFilter == child.filterKey, indent: 1
+                                    )
+                                }
                             }
+                        } else {
+                            sidebarButton(
+                                icon: nil, name: node.name, count: node.count,
+                                filterKey: node.filterKey,
+                                isSelected: vm.selectedFilter == node.filterKey, indent: 0
+                            )
                         }
-                    } else {
-                        sidebarRow(node)
-                            .tag(node.filterKey as String?)
                     }
                 }
+                .padding(.vertical, 4)
             }
-            .listStyle(.sidebar)
         }
         .sheet(isPresented: $showAddSource) {
             AddSourceSheet(store: sourceStore)
@@ -144,20 +157,40 @@ public struct ContentView: View {
         } message: {
             Text("文件夹用于给订阅源分组（如「快讯」「深度」），并可设置组级管线总开关。")
         }
+        .onAppear {
+            // 默认展开所有文件夹（用户能直接看到源，不用先点一下）
+            expandedFolders = Set(vm.sidebarTree.filter { $0.isFolder }.map { $0.id })
+        }
     }
 
-    private func sidebarRow(_ node: SidebarNode) -> some View {
-        HStack {
-            if node.isFolder {
-                Image(systemName: "folder").foregroundStyle(.secondary)
+    /// 左栏行（可点击过滤）。Button 而非 List.tag——List selection 对 DisclosureGroup/自定义行不可靠。
+    private func sidebarButton(icon: String?, name: String, count: Int,
+                               filterKey: String?, isSelected: Bool, indent: Int) -> some View {
+        Button {
+            vm.selectFilter(filterKey)
+        } label: {
+            HStack(spacing: 6) {
+                if let icon {
+                    Image(systemName: icon)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16)
+                }
+                Text(name)
+                    .lineLimit(1)
+                    .foregroundStyle(isSelected ? .white : .primary)
+                Spacer()
+                Text("\(count)")
+                    .foregroundStyle(isSelected ? .white.opacity(0.8) : .secondary)
+                    .font(.caption)
             }
-            Text(node.name)
-                .lineLimit(1)
-            Spacer()
-            Text("\(node.count)")
-                .foregroundStyle(.secondary)
-                .font(.caption)
+            .padding(.leading, CGFloat(indent) * 18 + 12)
+            .padding(.trailing, 12)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isSelected ? Color.accentColor : Color.clear)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     // MARK: 中栏
