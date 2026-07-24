@@ -246,51 +246,64 @@ enum ReadingTheme: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - 正文字体选择（预设类别 + 自定义系统字体）
+// MARK: - 正文字体选择（预置中文字体 + 系统字体列表任选）
 
 enum ReadingFont: Hashable {
     case system
-    case serif
-    case sansSerif
-    case mono
-    case custom(String)   // 自定义字体名（系统已安装字体）
+    case heiti       // 黑体
+    case kaiti       // 楷体
+    case fangsong    // 仿宋
+    case custom(String)   // 系统已装字体族名（从列表选）
 
     var displayName: String {
         switch self {
         case .system: return "系统默认"
-        case .serif: return "衬线（宋）"
-        case .sansSerif: return "无衬线（黑）"
-        case .mono: return "等宽"
+        case .heiti: return "黑体"
+        case .kaiti: return "楷体"
+        case .fangsong: return "仿宋"
         case .custom(let name): return name
         }
     }
 
-    /// 预设项（自定义单独处理）
-    static let presets: [ReadingFont] = [.system, .serif, .sansSerif, .mono]
+    /// 预置项（自定义走系统字体列表）
+    static let presets: [ReadingFont] = [.system, .heiti, .kaiti, .fangsong]
+
+    /// 预置对应的系统字体族候选名（取系统里实际存在的）
+    private var presetFamilyCandidates: [String] {
+        switch self {
+        case .heiti: return ["Heiti SC", "STHeiti", "PingFang SC"]
+        case .kaiti: return ["Kaiti SC", "STKaiti", "Kai"]
+        case .fangsong: return ["STFangsong", "FangSong", "FangSong_GB2312"]
+        default: return []
+        }
+    }
 
     func font(size: CGFloat) -> Font {
         switch self {
-        case .system: return .system(size: size)
-        case .serif: return .system(size: size, design: .serif)
-        case .sansSerif: return .system(size: size, design: .default)
-        case .mono: return .system(size: size, design: .monospaced)
+        case .system:
+            return .system(size: size)
+        case .heiti, .kaiti, .fangsong:
+            // 预置中文字体：按候选名找系统里实际装的，找不到回退系统默认
+            let available = Set(NSFontManager.shared.availableFontFamilies)
+            for candidate in presetFamilyCandidates where available.contains(candidate) {
+                return .custom(candidate, size: size)
+            }
+            return .system(size: size)
         case .custom(let name):
-            // 系统字体按名取；取不到（名字错/未安装）回退系统默认
             return .custom(name, size: size)
         }
     }
 
-    // MARK: 持久化（预设存 rawValue，自定义存 "custom:<name>"）
+    // MARK: 持久化（预置存 key，自定义存 "custom:<name>"；兼容旧值迁移）
     static var current: ReadingFont {
         get {
             let raw = UserDefaults.standard.string(forKey: "reading.font") ?? "system"
-            if raw.hasPrefix("custom:") {
-                return .custom(String(raw.dropFirst(7)))
-            }
+            if raw.hasPrefix("custom:") { return .custom(String(raw.dropFirst(7))) }
             switch raw {
-            case "serif": return .serif
-            case "sansSerif": return .sansSerif
-            case "mono": return .mono
+            case "heiti", "sansSerif": return .heiti
+            case "kaiti": return .kaiti
+            case "fangsong", "serif": return .fangsong
+            case "mono": return .custom("Menlo")
             default: return .system
             }
         }
@@ -298,9 +311,9 @@ enum ReadingFont: Hashable {
             let raw: String
             switch newValue {
             case .system: raw = "system"
-            case .serif: raw = "serif"
-            case .sansSerif: raw = "sansSerif"
-            case .mono: raw = "mono"
+            case .heiti: raw = "heiti"
+            case .kaiti: raw = "kaiti"
+            case .fangsong: raw = "fangsong"
             case .custom(let name): raw = "custom:\(name)"
             }
             UserDefaults.standard.set(raw, forKey: "reading.font")
@@ -427,6 +440,9 @@ struct MarkdownBodyView: View {
         case 3: base = fontSize + 3
         default: base = fontSize + 1
         }
-        return p.headingSerif ? .system(size: base, design: .serif).bold() : .system(size: base).bold()
+        // 标题字体跟用户的字体选择走，不被主题强制（主题 headingSerif 只作默认提示，
+        // 用户选了字体就尊重用户——此前 Primary 的 headingSerif=true 把标题强制衬线，
+        // 覆盖了用户选的黑体/楷体）
+        return fontChoice.font(size: base).bold()
     }
 }

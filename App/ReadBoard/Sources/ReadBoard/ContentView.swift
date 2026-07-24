@@ -4,6 +4,8 @@ public struct ContentView: View {
     @StateObject private var vm = ContentViewModel()
     @FocusState private var listFocused: Bool
     @FocusState private var searchFocused: Bool
+    /// 界面缩放（@AppStorage 直接绑 UserDefaults——改值视图自动重建，静态读取不会触发刷新）
+    @AppStorage("reading.uiFontScale") private var uiFontScale: Double = 1.0
 
     public var body: some View {
         NavigationSplitView {
@@ -177,7 +179,7 @@ public struct ContentView: View {
     /// 左栏行（点击过滤 + 未读角标 + 右键设置菜单）。
     /// Button 而非 List.tag——List selection 对 DisclosureGroup/自定义行不可靠。
     private func sidebarRow(_ node: SidebarNode, indent: Int) -> some View {
-        let scale = ReadingLayout.uiFontScale
+        let scale = uiFontScale
         return Button {
             vm.selectFilter(node.filterKey)
         } label: {
@@ -534,7 +536,8 @@ public struct ContentView: View {
 
 public struct ArticleRow: View {
     let item: ContentItem
-    private var scale: Double { ReadingLayout.uiFontScale }
+    /// @AppStorage 让缩放值变化时行自动重建（静态 ReadingLayout.uiFontScale 不触发刷新）
+    @AppStorage("reading.uiFontScale") private var scale: Double = 1.0
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -660,24 +663,14 @@ public struct ReadingView: View {
     @State private var theme = ReadingTheme.current
     @State private var themeMode = ReadingTheme.Mode.current
     @State private var fontChoice = ReadingFont.current
-    @State private var customFontName: String = ""
     @State private var titleFontSize = ReadingLayout.titleFontSize
     @State private var metaFontSize = ReadingLayout.metaFontSize
     @State private var summaryFontSize = ReadingLayout.summaryFontSize
-    @State private var uiFontScale = ReadingLayout.uiFontScale
+    /// 界面缩放（@AppStorage 直绑——layoutPanel 里改这里视图自动刷新，
+    /// 同时 ContentView/ArticleRow 的同名 @AppStorage 也会跟着重建，全局生效）
+    @AppStorage("reading.uiFontScale") private var uiFontScale: Double = 1.0
     @State private var showLayoutPopover = false
     @State private var showShareSheet = false
-
-    /// 常用中文/阅读字体快捷项（系统有就显示，点击填入自定义）
-    private var commonChineseFonts: [String] {
-        let candidates = [
-            "LXGW WenKai", "LXGW WenKai Screen", "Source Han Serif SC", "Source Han Sans SC",
-            "Noto Serif CJK SC", "Noto Sans CJK SC", "PingFang SC", "Songti SC", "STSong",
-            "Kaiti SC", "Hiragino Sans GB", "Sarasa Gothic SC", "Smiley Sans",
-        ]
-        let available = Set(ReadingFont.availableFontFamilies)
-        return candidates.filter { available.contains($0) }
-    }
     /// 星标/已读状态（本地镜像，操作后即时反馈，不依赖 reload）
     @State private var isStarred = false
     @State private var isRead = false
@@ -748,11 +741,9 @@ public struct ReadingView: View {
             // ── 正文滚动区 ──
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    // 标题 + 元信息（独立字号设置）
+                    // 标题 + 元信息（独立字号设置；标题字体跟用户字体选择走，不被主题强制）
                     Text(item.title)
-                        .font(p.headingSerif
-                            ? .system(size: titleFontSize, design: .serif).bold()
-                            : .system(size: titleFontSize).bold())
+                        .font(fontChoice.font(size: titleFontSize).bold())
                         .foregroundStyle(p.text)
                     HStack(spacing: 10) {
                         if let a = item.author, !a.isEmpty { Label(a, systemImage: "person") }
@@ -847,8 +838,6 @@ public struct ReadingView: View {
             policy = Database.shared.effectivePolicyFor(contentId: item.id)
             isStarred = item.starred
             isRead = item.isRead
-            // 自定义字体名回填（当前是自定义类时，输入框显示当前名）
-            if case .custom(let name) = fontChoice { customFontName = name }
         }
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(item: item)
@@ -919,58 +908,24 @@ public struct ReadingView: View {
                 Text(String(format: "%.0f%%", uiFontScale * 100)).frame(width: 40).font(.callout.monospacedDigit())
             }
 
-            // 字体（预设 + 自定义系统字体名）
+            // 字体（预置 黑体/楷体/仿宋 + 系统字体列表任选，不手输）
             HStack {
                 Text("字体").frame(width: 60, alignment: .leading)
                 Picker("", selection: $fontChoice) {
+                    // 预置组
                     ForEach(ReadingFont.presets, id: \.self) { f in
                         Text(f.displayName).tag(f)
                     }
-                    if case .custom = fontChoice {
-                        Text(fontChoice.displayName).tag(fontChoice)
-                    } else {
-                        Text("自定义…").tag(ReadingFont.custom(""))
+                    Divider()
+                    // 系统字体列表（每个用自身字体渲染预览，所见即所得）
+                    ForEach(ReadingFont.availableFontFamilies, id: \.self) { family in
+                        Text(family)
+                            .font(.custom(family, size: 13))
+                            .tag(ReadingFont.custom(family))
                     }
                 }
                 .pickerStyle(.menu)
-                .onChange(of: fontChoice) { _, v in
-                    // 选了"自定义…"保留当前自定义名进入编辑；选预设直接存
-                    if case .custom(let n) = v, n.isEmpty {
-                        fontChoice = .custom(customFontName)
-                    } else {
-                        ReadingFont.current = v
-                    }
-                }
-            }
-            // 自定义字体名（选自定义类时显示）：系统字体列表可选 + 手输
-            if case .custom = fontChoice {
-                HStack {
-                    Text("字体名").frame(width: 60, alignment: .leading)
-                    TextField("如 LXGW WenKai / 思源宋体", text: $customFontName)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit {
-                            fontChoice = .custom(customFontName)
-                            ReadingFont.current = fontChoice
-                        }
-                }
-                // 常用中文字体快捷选择（点击填入）
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(commonChineseFonts, id: \.self) { name in
-                            Button(name) {
-                                customFontName = name
-                                fontChoice = .custom(name)
-                                ReadingFont.current = fontChoice
-                            }
-                            .buttonStyle(.borderless)
-                            .font(.caption)
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(.quaternary)
-                            .clipShape(RoundedRectangle(cornerRadius: 3))
-                        }
-                    }
-                }
-                .padding(.leading, 60)
+                .onChange(of: fontChoice) { _, v in ReadingFont.current = v }
             }
 
             // 行距
