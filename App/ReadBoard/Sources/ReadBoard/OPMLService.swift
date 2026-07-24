@@ -51,8 +51,9 @@ public final class OPMLService: @unchecked Sendable {
     private func sourceLine(_ s: [String: String], indent: String) -> String {
         let name = Self.esc(s["name"] ?? "")
         let url = Self.esc(s["identifier"] ?? "")
-        let type = (s["stype"] == "podcast" || s["stype"] == "youtube") ? "rss" : "rss"
-        return "\(indent)<outline text=\"\(name)\" type=\"\(type)\" xmlUrl=\"\(url)\"/>\n"
+        let stype = s["stype"] ?? "rss"
+        // OPML 标准 type 只有 rss；播客/YouTube 用 rb:stype 自定义属性保真，导入时认回
+        return "\(indent)<outline text=\"\(name)\" type=\"rss\" xmlUrl=\"\(url)\" rb:stype=\"\(stype)\"/>\n"
     }
 
     // MARK: 导入
@@ -88,8 +89,8 @@ public final class OPMLService: @unchecked Sendable {
                     continue
                 }
                 let ok = db.execute(
-                    "INSERT INTO content_source (stype, name, identifier, enabled, folder_id, config) VALUES ('rss', ?, ?, 1, ?, '{}')",
-                    params: [src.title, src.url, folderId.map { Int($0) }]
+                    "INSERT INTO content_source (stype, name, identifier, enabled, folder_id, config) VALUES (?, ?, ?, 1, ?, '{}')",
+                    params: [src.stype, src.title, src.url, folderId.map { Int($0) }]
                 )
                 if ok { result.sourcesAdded += 1 }
                 else { result.errors.append("插入失败: \(src.title)") }
@@ -124,6 +125,7 @@ public final class OPMLService: @unchecked Sendable {
 private struct OPMLSource {
     let title: String
     let url: String
+    let stype: String    // rb:stype 自定义属性保真（rss/podcast/youtube/wechat），无则按 URL 猜
 }
 
 private struct OPMLGroup {
@@ -155,10 +157,19 @@ private final class OPMLXMLParser: NSObject, XMLParserDelegate {
             folderSources = []
         } else if hasXmlUrl, let url = attr["xmlUrl"] {
             let title = attr["text"] ?? attr["title"] ?? url
-            let src = OPMLSource(title: title, url: url)
+            // 类型保真：优先 rb:stype 自定义属性；无则按 URL 特征猜（YouTube feed / 音频型）
+            let stype = attr["rb:stype"] ?? Self.guessType(url: url)
+            let src = OPMLSource(title: title, url: url, stype: stype)
             if currentFolder != nil { folderSources.append(src) }
             else { topLevelSources.append(src) }
         }
+    }
+
+    /// 无 rb:stype 时按 URL 猜类型（兼容 FreshRSS/Follo 导出的纯 OPML）
+    private static func guessType(url: String) -> String {
+        let u = url.lowercased()
+        if u.contains("youtube.com/feeds/videos.xml") || u.contains("youtube.com/feeds/") { return "youtube" }
+        return "rss"
     }
 
     func parser(_ parser: XMLParser, didEndElement element: String, namespaceURI: String?,

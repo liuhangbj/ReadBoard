@@ -127,6 +127,61 @@ public enum YouTubeResolver {
 }
 
 public final class FeedFetcher {
+    /// 抓一个可能是网站主页的 URL，自动发现 RSS/Atom feed。
+    /// 先直接试抓：是 feed 就返回；不是则按 HTML 解析 <link rel="alternate" type="application/rss+xml">。
+    /// 返回 (feedURL, ParsedFeed)。找不到 feed 抛 parseFailed。
+    static func discoverAndFetch(urlString: String, proxy: String? = nil) async throws -> (feedURL: String, feed: ParsedFeed) {
+        // 1. 直接试抓（已经是 feed URL 的情况）
+        if let feed = try? await fetch(urlString: urlString, proxy: proxy) {
+            return (urlString, feed)
+        }
+        // 2. 当 HTML 主页解析 feed 链接
+        guard let url = URL(string: urlString) else { throw FeedFetchError.badURL }
+        var req = URLRequest(url: url, timeoutInterval: 30)
+        req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+                     forHTTPHeaderField: "User-Agent")
+
+        let config = URLSessionConfiguration.default
+        if let proxy, let purl = URL(string: proxy), let host = purl.host, let port = purl.port {
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable: true, kCFNetworkProxiesHTTPProxy: host,
+                kCFNetworkProxiesHTTPPort: port, kCFNetworkProxiesHTTPSEnable: true,
+                kCFNetworkProxiesHTTPSProxy: host, kCFNetworkProxiesHTTPSPort: port,
+            ]
+        }
+        let session = URLSession(configuration: config)
+        let (data, resp) = try await session.data(for: req)
+        if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+            throw FeedFetchError.httpError(http.statusCode)
+        }
+        guard let html = String(data: data, encoding: .utf8) else { throw FeedFetchError.parseFailed }
+
+        // 提取 <link ... type="application/rss+xml" ... href="...">（也认 atom）。
+        // 用 NSRegularExpression 而非 String.ranges(of:options:)——后者对多选项 + 复杂模式推断不稳。
+        guard let linkRe = try? NSRegularExpression(
+            pattern: #"<link[^>]+type=["']application/(?:rss|atom)\+xml["'][^>]*>"#,
+            options: [.caseInsensitive]) else { throw FeedFetchError.parseFailed }
+        let full = NSRange(html.startIndex..., in: html)
+        let linkTags = linkRe.matches(in: html, range: full).compactMap { Range($0.range, in: html) }
+        guard let hrefRe = try? NSRegularExpression(pattern: #"href=["']([^"']+)["']"#) else {
+            throw FeedFetchError.parseFailed
+        }
+        for tagRange in linkTags {
+            let tag = String(html[tagRange])
+            let tagNS = NSRange(tag.startIndex..., in: tag)
+            guard let hrefMatch = hrefRe.firstMatch(in: tag, range: tagNS),
+                  let hrefNS = Range(hrefMatch.range(at: 1), in: tag) else { continue }
+            let href = String(tag[hrefNS])
+                .replacingOccurrences(of: "&amp;", with: "&")
+            // 相对 URL 补全
+            if let feedURL = URL(string: href, relativeTo: url)?.absoluteURL,
+               let feed = try? await fetch(urlString: feedURL.absoluteString, proxy: proxy) {
+                return (feedURL.absoluteString, feed)
+            }
+        }
+        throw FeedFetchError.parseFailed
+    }
+
     /// 抓取并解析一个 feed
     static func fetch(urlString: String, proxy: String? = nil) async throws -> ParsedFeed {
         guard let url = URL(string: urlString) else { throw FeedFetchError.badURL }

@@ -211,6 +211,7 @@ public struct FolderHeader: View {
 public struct SourceRow: View {
     let src: FeedSource
     @ObservedObject var store: SourceStore
+    @State private var showDeleteConfirm = false
 
     public var body: some View {
         HStack(spacing: 10) {
@@ -313,10 +314,16 @@ public struct SourceRow: View {
                 set: { store.setEnabled(id: src.id, enabled: $0) }
             ))
             .labelsHidden()
-            Button(role: .destructive) { store.removeSource(id: src.id) } label: {
+            Button(role: .destructive) { showDeleteConfirm = true } label: {
                 Image(systemName: "trash")
             }
             .buttonStyle(.borderless)
+            .alert("删除订阅源？", isPresented: $showDeleteConfirm) {
+                Button("取消", role: .cancel) {}
+                Button("删除", role: .destructive) { store.removeSource(id: src.id) }
+            } message: {
+                Text("「\(src.name)」将被移除。\n已抓取的内容会保留，但不再更新此源。")
+            }
         }
         .padding(.vertical, 4)
     }
@@ -371,6 +378,8 @@ public struct AddSourceSheet: View {
     @State private var identifier = ""
     @State private var testing = false
     @State private var testResult = ""
+    @State private var resolvedFeedURL: String? = nil   // testFeed 成功后定稿（自动发现可能改写）
+    @State private var testedOK = false                  // 必须先检测通过才能添加
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -384,8 +393,14 @@ public struct AddSourceSheet: View {
             .pickerStyle(.segmented)
 
             TextField("名称（可选，留空自动用 feed 标题）", text: $name)
-            TextField(stype == "youtube" ? "频道 URL / @handle / UC 开头 ID" : "Feed 地址 (https://…)", text: $identifier)
+            TextField(stype == "youtube" ? "频道 URL / @handle / UC 开头 ID" : "Feed 地址或网站主页 (https://…)", text: $identifier)
                 .textFieldStyle(.roundedBorder)
+                .onChange(of: identifier) { _, _ in
+                    // 输入变了必须重新检测
+                    testedOK = false
+                    resolvedFeedURL = nil
+                    testResult = ""
+                }
 
             if !testResult.isEmpty {
                 Text(testResult)
@@ -401,8 +416,10 @@ public struct AddSourceSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("添加") { add() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(identifier.isEmpty)
+                    .disabled(identifier.isEmpty || !testedOK || testing)
             }
+            Text("添加前请先「检测」通过——确认源可抓取，避免加了死源。")
+                .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(20)
         .frame(width: 460)
@@ -420,20 +437,36 @@ public struct AddSourceSheet: View {
     private func testFeed() {
         testing = true
         testResult = ""
+        testedOK = false
+        resolvedFeedURL = nil
         Task {
             do {
-                let url = try await resolveIdentifier()
-                let feed = try await FeedFetcher.fetch(urlString: url)
-                var msg = "✓ \(feed.title)：\(feed.entries.count) 条，类型 \(feed.kind.rawValue)"
-                // RSS 文章类: 探测全文模式
                 if stype == "rss" {
-                    let mode = await FullTextFetcher.shared.probeMode(feedUrl: url)
+                    // RSS: 自动发现——输入可以是 feed URL 也可以是网站主页
+                    let (feedURL, feed) = try await FeedFetcher.discoverAndFetch(urlString: identifier.trimmingCharacters(in: .whitespaces))
+                    var msg = "✓ \(feed.title)：\(feed.entries.count) 条，类型 \(feed.kind.rawValue)"
+                    if feedURL != identifier.trimmingCharacters(in: .whitespaces) {
+                        msg += "\n（主页自动发现 feed: \(feedURL)）"
+                    }
+                    let mode = await FullTextFetcher.shared.probeMode(feedUrl: feedURL)
                     msg += "，全文 \(mode.displayName)"
-                }
-                await MainActor.run {
-                    testResult = msg
-                    if name.isEmpty { name = feed.title }
-                    testing = false
+                    await MainActor.run {
+                        testResult = msg
+                        resolvedFeedURL = feedURL
+                        testedOK = true
+                        if name.isEmpty { name = feed.title }
+                        testing = false
+                    }
+                } else {
+                    let url = try await resolveIdentifier()
+                    let feed = try await FeedFetcher.fetch(urlString: url)
+                    await MainActor.run {
+                        testResult = "✓ \(feed.title)：\(feed.entries.count) 条，类型 \(feed.kind.rawValue)"
+                        resolvedFeedURL = url
+                        testedOK = true
+                        if name.isEmpty { name = feed.title }
+                        testing = false
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -445,25 +478,22 @@ public struct AddSourceSheet: View {
     }
 
     private func add() {
+        // 必须用检测时定稿的 URL（自动发现可能改写过），防止重复解析不一致
+        guard let url = resolvedFeedURL else {
+            testResult = "✗ 请先检测"
+            return
+        }
         let finalName = name.isEmpty ? identifier : name
         testing = true
         testResult = ""
         Task {
-            do {
-                let url = try await resolveIdentifier()
-                let ok = await store.addSource(stype: stype, name: finalName, identifier: url)
-                await MainActor.run {
-                    testing = false
-                    if ok {
-                        dismiss()
-                    } else {
-                        testResult = "✗ 添加失败（可能已存在相同源）"
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    testing = false
-                    testResult = "✗ \(error.localizedDescription)"
+            let ok = await store.addSource(stype: stype, name: finalName, identifier: url)
+            await MainActor.run {
+                testing = false
+                if ok {
+                    dismiss()
+                } else {
+                    testResult = "✗ 添加失败（可能已存在相同源）"
                 }
             }
         }
