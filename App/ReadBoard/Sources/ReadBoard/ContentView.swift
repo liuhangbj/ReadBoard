@@ -421,6 +421,19 @@ public struct ContentView: View {
                 .controlSize(.small)
                 .onChange(of: vm.readFilter) { _, _ in vm.reload() }
 
+                // 排序选择（最新/最早/评分）
+                Picker(selection: $vm.sortOrder) {
+                    ForEach(ContentViewModel.SortOrder.allCases) { o in
+                        Text(o.display).tag(o)
+                    }
+                } label: { EmptyView() }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: 80)
+                .font(.caption)
+                .controlSize(.small)
+                .onChange(of: vm.sortOrder) { _, _ in vm.reload() }
+
                 Toggle("归档", isOn: $vm.showArchived)
                     .toggleStyle(.checkbox)
                     .font(.caption)

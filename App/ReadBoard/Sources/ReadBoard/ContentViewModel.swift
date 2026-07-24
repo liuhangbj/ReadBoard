@@ -17,6 +17,20 @@ public final class ContentViewModel: ObservableObject {
     /// 多选为「或」关系（满足任一即纳入），符合"我想看已打分或已翻译的"直觉。
     @Published var processedFilters: Set<String> = []
     @Published var keyword: String = ""            // 搜索关键词（标题/正文）
+    /// 文章列表排序：newest（最新优先，默认）/ oldest（最早优先）/ score（评分优先）
+    @Published var sortOrder: SortOrder = .newest
+
+    enum SortOrder: String, CaseIterable, Identifiable {
+        case newest, oldest, score
+        var id: String { rawValue }
+        var display: String {
+            switch self {
+            case .newest: return "最新"
+            case .oldest: return "最早"
+            case .score: return "评分"
+            }
+        }
+    }
 
     enum ReadFilter: String, CaseIterable {
         case all, unread, starred
@@ -109,7 +123,7 @@ public final class ContentViewModel: ObservableObject {
                                     starredOnly: readFilter == .starred,
                                     archived: showArchived,
                                     tagId: selectedTag?.id,
-                                    processedFilters: processedFilters,
+                                    processedFilters: processedFilters, sortOrder: sortOrder.rawValue,
                                     limit: Self.pageSize, offset: 0)
         items = page
         hasMore = page.count >= Self.pageSize
@@ -131,7 +145,7 @@ public final class ContentViewModel: ObservableObject {
                                     starredOnly: readFilter == .starred,
                                     archived: showArchived,
                                     tagId: selectedTag?.id,
-                                    processedFilters: processedFilters,
+                                    processedFilters: processedFilters, sortOrder: sortOrder.rawValue,
                                     limit: Self.pageSize,
                                     offset: items.count)
         hasMore = page.count >= Self.pageSize

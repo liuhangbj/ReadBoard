@@ -499,6 +499,7 @@ public final class Database: @unchecked Sendable {
                        keyword: String? = nil, starredOnly: Bool = false,
                        archived: Bool = false, tagId: Int64? = nil,
                        processedFilters: Set<String> = [],
+                       sortOrder: String = "newest",
                        limit: Int = 200, offset: Int = 0) -> [ContentItem] {
         guard open() else { return [] }
         let useFTS = (keyword?.isEmpty == false) && ftsAvailable()
@@ -555,12 +556,22 @@ public final class Database: @unchecked Sendable {
             conds.append("(\(col)title LIKE ? OR \(col)excerpt LIKE ?)")
         }
         sql += " WHERE " + conds.joined(separator: " AND ")
-        // 有关键词时按发布时间倒序（搜索场景用户找的是"那篇最近的"，不是评分最高的）；
-        // 无关键词保持评分优先（高质量文章置顶）
+        // 排序：
+        // - 有关键词：按时间倒序（搜索场景用户找的是"那篇最近的"）
+        // - newest（默认）：时间倒序，RSS 阅读器标准
+        // - oldest：时间正序（从头读起）
+        // - score：评分优先（已评分按分数排前，未评分沉底），高质量视图
         if keyword?.isEmpty == false {
             sql += " ORDER BY \(col)published_at DESC LIMIT ? OFFSET ?;"
         } else {
-            sql += " ORDER BY (\(col)llm_score IS NULL), \(col)llm_score DESC, \(col)published_at DESC LIMIT ? OFFSET ?;"
+            switch sortOrder {
+            case "oldest":
+                sql += " ORDER BY \(col)published_at ASC LIMIT ? OFFSET ?;"
+            case "score":
+                sql += " ORDER BY (\(col)llm_score IS NULL), \(col)llm_score DESC, \(col)published_at DESC LIMIT ? OFFSET ?;"
+            default: // newest
+                sql += " ORDER BY \(col)published_at DESC LIMIT ? OFFSET ?;"
+            }
         }
 
         var stmt: OpaquePointer?
