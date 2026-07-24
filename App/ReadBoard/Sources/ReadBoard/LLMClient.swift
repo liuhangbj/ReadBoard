@@ -96,14 +96,14 @@ public struct ChatMessage {
 public final class LLMClient {
 
     /// 每次调用都读当前配置（设置页改后立即生效，无需重启）。
-    /// App 内保存的配置排最前，其后是 .env 探测的 fallback 链。
+    /// 三槽按序 fallback：槽1 → 槽2 → 槽3（空槽跳过），其后是 .env 探测的 fallback 链。
     private func activeProviders() -> [LLMProvider] {
         var list: [LLMProvider] = []
-        let s = LLMSettings.current()
-        if s.isValid {
-            list.append(LLMProvider(name: "app", endpoint: s.baseURL, apiKey: s.apiKey, model: s.model))
+        // 三槽按序（非空才入链）
+        for (i, s) in LLMSettings.slots().enumerated() {
+            list.append(LLMProvider(name: "slot\(i + 1)", endpoint: s.baseURL, apiKey: s.apiKey, model: s.model))
         }
-        // fallback：.env 链（去重——若和 App 配置同 endpoint+model 就不重复）
+        // fallback：.env 链（去重——若和槽配置同 endpoint+model 就不重复）
         for p in LLMConfig.defaultProviders() where !p.apiKey.isEmpty {
             if !list.contains(where: { $0.endpoint == p.endpoint && $0.model == p.model }) {
                 list.append(p)
@@ -152,12 +152,11 @@ public final class LLMClient {
         }
     }
 
-    /// 测试连接：只测设置页当前编辑的这条配置，不走 fallback 链
-    /// （走链的话 app 配置失效会被 .env 兜底掩盖，用户误以为自己的配置通了）
-    func testConnection() async -> (Bool, String) {
-        let s = LLMSettings.current()
+    /// 测试连接：只测传入的这条配置，不走 fallback 链
+    /// （走链的话该槽失效会被其他槽/.env 兜底掩盖，用户误以为自己的配置通了）
+    func testConnection(_ s: LLMSettings) async -> (Bool, String) {
         guard s.isValid else { return (false, "配置不完整：baseURL / apiKey / model 都要填") }
-        let p = LLMProvider(name: "app", endpoint: s.baseURL, apiKey: s.apiKey, model: s.model)
+        let p = LLMProvider(name: "test", endpoint: s.baseURL, apiKey: s.apiKey, model: s.model)
         do {
             let text = try await call(
                 p, messages: [ChatMessage(role: "user", content: "回复\"ok\"两个字即可")],

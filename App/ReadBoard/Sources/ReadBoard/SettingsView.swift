@@ -134,67 +134,14 @@ public struct GeneralPane: View {
 // MARK: - AI 与 LLM
 
 public struct AILLMPane: View {
-    @State private var baseURL = ""
-    @State private var apiKey = ""
-    @State private var model = ""
-    @State private var presetId = "deepseek"
-    @State private var testing = false
-    @State private var testResult: String? = nil
-    @State private var testOK = false
-    @State private var savedHint = false
-
     public var body: some View {
         Form {
-            Section("LLM 服务（OpenAI 兼容接口）") {
-                Picker("预设", selection: $presetId) {
-                    ForEach(LLMSettings.presets) { p in
-                        Text(p.name).tag(p.id)
-                    }
-                }
-                .onChange(of: presetId) { _, v in
-                    if let p = LLMSettings.presets.first(where: { $0.id == v }), !p.baseURL.isEmpty {
-                        baseURL = p.baseURL
-                        model = p.defaultModel
-                    }
-                }
-                TextField("Base URL", text: $baseURL)
-                    .textFieldStyle(.roundedBorder)
-                SecureField("API Key（存 Keychain，不落明文）", text: $apiKey)
-                    .textFieldStyle(.roundedBorder)
-                TextField("模型", text: $model)
-                    .textFieldStyle(.roundedBorder)
-
-                HStack {
-                    Button("保存") {
-                        LLMSettings(baseURL: baseURL, apiKey: apiKey, model: model).save()
-                        savedHint = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { savedHint = false }
-                    }
-                    .disabled(baseURL.isEmpty || apiKey.isEmpty || model.isEmpty)
-                    if savedHint {
-                        Text("已保存").font(.caption).foregroundStyle(.green)
-                    }
-                    Spacer()
-                    Button(testing ? "测试中…" : "测试连接") {
-                        testing = true
-                        testResult = nil
-                        Task {
-                            // 先保存再测——testConnection 测的是当前生效配置
-                            LLMSettings(baseURL: baseURL, apiKey: apiKey, model: model).save()
-                            let (ok, msg) = await LLMClient().testConnection()
-                            testOK = ok
-                            testResult = msg
-                            testing = false
-                        }
-                    }
-                    .disabled(testing || baseURL.isEmpty || apiKey.isEmpty || model.isEmpty)
-                }
-                if let r = testResult {
-                    Text(r)
-                        .font(.caption)
-                        .foregroundStyle(testOK ? .green : .red)
-                        .textSelection(.enabled)
-                }
+            Section("LLM 服务（三槽按序 fallback，允许留空）") {
+                Text("槽1 失败自动换槽2，再失败换槽3，最后 .env 兜底。空槽跳过。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(0..<LLMSettings.slotCount, id: \.self) { i in
+                LLMSlotView(slotIndex: i)
             }
 
             Section("AI 子管线开关（需 AI 板块总开关开启）") {
@@ -210,8 +157,84 @@ public struct AILLMPane: View {
         }
         .formStyle(.grouped)
         .navigationTitle("AI 与 LLM")
+    }
+}
+
+/// 单个 LLM 配置槽（baseURL + apiKey + model + 预设 + 测试），允许留空（空槽跳过）
+public struct LLMSlotView: View {
+    let slotIndex: Int
+
+    @State private var baseURL = ""
+    @State private var apiKey = ""
+    @State private var model = ""
+    @State private var presetId = "deepseek"
+    @State private var testing = false
+    @State private var testResult: String? = nil
+    @State private var testOK = false
+    @State private var savedHint = false
+
+    private var slotLabel: String { "槽 \(slotIndex + 1)" }
+    private var filled: Bool { !baseURL.isEmpty || !apiKey.isEmpty || !model.isEmpty }
+
+    public var body: some View {
+        Section("\(slotLabel)\(filled ? "" : "（空）")") {
+            Picker("预设", selection: $presetId) {
+                ForEach(LLMSettings.presets) { p in
+                    Text(p.name).tag(p.id)
+                }
+            }
+            .onChange(of: presetId) { _, v in
+                if let p = LLMSettings.presets.first(where: { $0.id == v }), !p.baseURL.isEmpty {
+                    baseURL = p.baseURL
+                    model = p.defaultModel
+                }
+            }
+            TextField("Base URL", text: $baseURL)
+                .textFieldStyle(.roundedBorder)
+            SecureField("API Key（存 Keychain，不落明文）", text: $apiKey)
+                .textFieldStyle(.roundedBorder)
+            TextField("模型", text: $model)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Button("保存") {
+                    LLMSettings(baseURL: baseURL, apiKey: apiKey, model: model)
+                        .save(toSlot: slotIndex)
+                    savedHint = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { savedHint = false }
+                }
+                .disabled(baseURL.isEmpty || apiKey.isEmpty || model.isEmpty)
+                Button("清空此槽") {
+                    baseURL = ""; apiKey = ""; model = ""
+                    LLMSettings.clear(slot: slotIndex)
+                }
+                .disabled(!filled)
+                if savedHint {
+                    Text("已保存").font(.caption).foregroundStyle(.green)
+                }
+                Spacer()
+                Button(testing ? "测试中…" : "测试连接") {
+                    testing = true
+                    testResult = nil
+                    Task {
+                        let s = LLMSettings(baseURL: baseURL, apiKey: apiKey, model: model)
+                        let (ok, msg) = await LLMClient().testConnection(s)
+                        testOK = ok
+                        testResult = msg
+                        testing = false
+                    }
+                }
+                .disabled(testing || baseURL.isEmpty || apiKey.isEmpty || model.isEmpty)
+            }
+            if let r = testResult {
+                Text(r)
+                    .font(.caption)
+                    .foregroundStyle(testOK ? .green : .red)
+                    .textSelection(.enabled)
+            }
+        }
         .onAppear {
-            let s = LLMSettings.current()
+            let s = LLMSettings.slot(slotIndex)
             baseURL = s.baseURL
             apiKey = s.apiKey
             model = s.model

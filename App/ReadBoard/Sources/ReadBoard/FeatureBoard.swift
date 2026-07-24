@@ -96,9 +96,10 @@ public enum AIPipeline: String, CaseIterable, Identifiable {
     var effective: Bool { FeatureBoard.ai.enabled && enabled }
 }
 
-// MARK: - LLM 配置（baseURL/model 存 UserDefaults；apiKey 存 Keychain）
-// 保留 .env 作为首次启动的默认值填充；一旦设置页保存过，以 App 内配置为准。
-// apiKey 不落 plist——明文可被其他进程读取，也会进备份/同步，统一走 Keychain。
+// MARK: - LLM 配置（三槽 fallback）
+// 三个配置槽按次序 fallback：槽1 失败换槽2，再失败换槽3，最后 .env 兜底。
+// 每槽允许为空（空槽跳过）。baseURL/model 存 UserDefaults；apiKey 按槽存 Keychain。
+// 保留单槽时代的旧 key 做一次性迁移（旧配置 → 槽1）。
 
 public struct LLMSettings {
     var baseURL: String
@@ -123,29 +124,65 @@ public struct LLMSettings {
         Preset(id: "custom", name: "自定义 (OpenAI 兼容)", baseURL: "", defaultModel: ""),
     ]
 
+    /// 槽位数（三槽按序 fallback）
+    static let slotCount = 3
+
     private enum K {
-        static let baseURL = "llm.baseURL"
-        static let apiKey = "llm.apiKey"          // UserDefaults 中的旧明文 key（仅迁移用，迁完即清）
-        static let model = "llm.model"
-        static let saved = "llm.savedInApp"       // 用户是否在 App 内保存过（保存过则以 App 为准，忽略 .env）
-        static let keychainKey = "llm.apiKey"     // Keychain account
+        // 槽位键（i = 0/1/2）
+        static func baseURL(_ i: Int) -> String { "llm.slot\(i).baseURL" }
+        static func model(_ i: Int) -> String { "llm.slot\(i).model" }
+        static func keychainKey(_ i: Int) -> String { "llm.slot\(i).apiKey" }
+        // 旧单槽键（仅迁移用）
+        static let legacyBaseURL = "llm.baseURL"
+        static let legacyApiKey = "llm.apiKey"
+        static let legacyModel = "llm.model"
+        static let legacySaved = "llm.savedInApp"
+        static let migrated = "llm.slotsMigrated"
     }
 
-    /// 当前生效配置：App 内保存过 → 用 App 的；否则回退 .env 探测（旧行为）
-    static func current() -> LLMSettings {
+    /// 读某槽配置（可能为空槽）
+    static func slot(_ i: Int) -> LLMSettings {
+        migrateLegacyIfNeeded()
         let d = UserDefaults.standard
-        if d.bool(forKey: K.saved) {
-            // 一次性迁移：老版本把 apiKey 明文存在 UserDefaults，迁入 Keychain 后清除
-            if let legacy = d.string(forKey: K.apiKey), !legacy.isEmpty {
-                _ = KeychainHelper.save(legacy, forKey: K.keychainKey)
-                d.removeObject(forKey: K.apiKey)
-            }
-            return LLMSettings(
-                baseURL: d.string(forKey: K.baseURL) ?? "",
-                apiKey: KeychainHelper.load(forKey: K.keychainKey) ?? "",
-                model: d.string(forKey: K.model) ?? "")
-        }
-        // 首次：从 .env 探测填充默认值（不写 saved 标记）
+        return LLMSettings(
+            baseURL: d.string(forKey: K.baseURL(i)) ?? "",
+            apiKey: KeychainHelper.load(forKey: K.keychainKey(i)) ?? "",
+            model: d.string(forKey: K.model(i)) ?? "")
+    }
+
+    /// 所有非空槽按序组成 fallback 链（空槽跳过）
+    static func slots() -> [LLMSettings] {
+        (0..<slotCount).map { slot($0) }.filter { $0.isValid }
+    }
+
+    /// 旧单槽配置一次性迁到槽1（老用户升级不丢配置）
+    private static func migrateLegacyIfNeeded() {
+        let d = UserDefaults.standard
+        guard !d.bool(forKey: K.migrated) else { return }
+        defer { d.set(true, forKey: K.migrated) }
+        // 老版本明文 apiKey 也在 UserDefaults 的，一并收
+        let legacyKey = KeychainHelper.load(forKey: "llm.apiKey")
+            ?? d.string(forKey: K.legacyApiKey) ?? ""
+        let legacy = LLMSettings(
+            baseURL: d.string(forKey: K.legacyBaseURL) ?? "",
+            apiKey: legacyKey,
+            model: d.string(forKey: K.legacyModel) ?? "")
+        guard legacy.isValid else { return }
+        // 写入槽1
+        d.set(legacy.baseURL, forKey: K.baseURL(0))
+        d.set(legacy.model, forKey: K.model(0))
+        _ = KeychainHelper.save(legacy.apiKey, forKey: K.keychainKey(0))
+        // 清旧 key（含 Keychain 旧 account 和 UserDefaults 明文）
+        d.removeObject(forKey: K.legacyBaseURL)
+        d.removeObject(forKey: K.legacyModel)
+        d.removeObject(forKey: K.legacyApiKey)
+        KeychainHelper.delete(forKey: "llm.apiKey")
+    }
+
+    /// 当前生效配置：首个非空槽（兼容旧调用方——testConnection 测单条用）
+    static func current() -> LLMSettings {
+        if let first = slots().first { return first }
+        // 全空：回退 .env 探测（旧行为，给设置页填默认值）
         let p = LLMConfig.defaultProviders().first
         return LLMSettings(
             baseURL: p?.endpoint ?? presets[0].baseURL,
@@ -153,19 +190,26 @@ public struct LLMSettings {
             model: p?.model ?? presets[0].defaultModel)
     }
 
-    /// 保存：baseURL/model 进 UserDefaults，apiKey 进 Keychain，并标记"App 内管理"
-    func save() {
+    /// 保存到指定槽：baseURL/model 进 UserDefaults，apiKey 进 Keychain；全空 = 清槽
+    func save(toSlot i: Int) {
         let d = UserDefaults.standard
-        d.set(baseURL, forKey: K.baseURL)
+        d.set(baseURL, forKey: K.baseURL(i))
+        d.set(model, forKey: K.model(i))
         if apiKey.isEmpty {
-            KeychainHelper.delete(forKey: K.keychainKey)
+            KeychainHelper.delete(forKey: K.keychainKey(i))
         } else {
-            _ = KeychainHelper.save(apiKey, forKey: K.keychainKey)
+            _ = KeychainHelper.save(apiKey, forKey: K.keychainKey(i))
         }
-        d.removeObject(forKey: K.apiKey)  // 确保无明文残留
-        d.set(model, forKey: K.model)
-        d.set(true, forKey: K.saved)
+    }
+
+    /// 清空某槽
+    static func clear(slot i: Int) {
+        let d = UserDefaults.standard
+        d.removeObject(forKey: K.baseURL(i))
+        d.removeObject(forKey: K.model(i))
+        KeychainHelper.delete(forKey: K.keychainKey(i))
     }
 
     var isValid: Bool { !baseURL.isEmpty && !apiKey.isEmpty && !model.isEmpty }
+    var isEmpty: Bool { baseURL.isEmpty && apiKey.isEmpty && model.isEmpty }
 }
