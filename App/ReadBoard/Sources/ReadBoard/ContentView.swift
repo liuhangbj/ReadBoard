@@ -712,15 +712,15 @@ public struct ReadingView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     // 标题 + 元信息
                     Text(item.title)
-                        .font(theme.headingSerif ? .system(.title2, design: .serif).bold() : .title2.bold())
-                        .foregroundStyle(theme.text)
+                        .font(theme.palette.headingSerif ? .system(.title2, design: .serif).bold() : .title2.bold())
+                        .foregroundStyle(theme.palette.text)
                     HStack(spacing: 10) {
                         if let a = item.author, !a.isEmpty { Label(a, systemImage: "person") }
                         if let p = item.publishedAt { Label(String(p.prefix(10)), systemImage: "calendar") }
                         if let s = item.llmScore { Label("评分 \(s)", systemImage: "star.fill") }
                     }
                     .font(.caption)
-                    .foregroundStyle(theme.secondaryText)
+                    .foregroundStyle(theme.palette.textSecondary)
 
                     // ── 标签行 ──
                     TagEditorView(contentId: item.id)
@@ -777,10 +777,10 @@ public struct ReadingView: View {
                     if let sum = item.llmSummary, !sum.isEmpty {
                         Text(sum)
                             .font(.callout)
-                            .foregroundStyle(theme.secondaryText)
+                            .foregroundStyle(theme.palette.textSecondary)
                             .padding(10)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(theme.quoteBackground)
+                            .background(theme.palette.backgroundAlt)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
 
@@ -799,7 +799,7 @@ public struct ReadingView: View {
                 .frame(maxWidth: contentWidth)
                 .frame(maxWidth: .infinity)   // 内容限宽后居中
             }
-            .background(theme.background)   // 主题底色
+            .background(theme.palette.background)   // 主题底色
         }
         // 视图随 .id(item.id) 重建，onAppear 即切文章——刷新有效开关与本地状态
         .onAppear {

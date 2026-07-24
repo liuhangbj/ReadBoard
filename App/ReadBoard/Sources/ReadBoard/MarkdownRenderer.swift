@@ -133,14 +133,19 @@ struct MarkdownRenderer {
     }
 
     /// 行内样式：加粗 **x** / 斜体 *x* / 行内代码 `x` / 链接 [t](u)
-    /// 返回 AttributedString（行内级渲染，供段落/列表项/标题用）
-    static func inline(_ text: String) -> AttributedString {
+    /// 返回 AttributedString（行内级渲染，供段落/列表项/标题用）。
+    /// palette 提供各语义元素的着色（bold/italic/inlineCode/link）；不传用默认。
+    static func inline(_ text: String, palette: ThemePalette? = nil) -> AttributedString {
         var result = AttributedString()
         var buf = ""
         var i = text.startIndex
 
         func flushBuf() {
-            if !buf.isEmpty { result.append(AttributedString(buf)); buf = "" }
+            if !buf.isEmpty {
+                var plain = AttributedString(buf)
+                plain.foregroundColor = palette?.text
+                result.append(plain); buf = ""
+            }
         }
 
         while i < text.endIndex {
@@ -149,7 +154,7 @@ struct MarkdownRenderer {
                 flushBuf()
                 var linkAttr = AttributedString(t)
                 linkAttr.link = URL(string: u)
-                linkAttr.foregroundColor = .accentColor
+                linkAttr.foregroundColor = palette?.link ?? .accentColor
                 linkAttr.underlineStyle = .single
                 result.append(linkAttr)
                 i = end
@@ -161,7 +166,8 @@ struct MarkdownRenderer {
                 let code = String(text[text.index(after: i)..<end])
                 var codeAttr = AttributedString(code)
                 codeAttr.font = .system(.body, design: .monospaced)
-                codeAttr.backgroundColor = Color.gray.opacity(0.18)
+                codeAttr.foregroundColor = palette?.inlineCode
+                codeAttr.backgroundColor = palette?.inlineCodeBackground ?? Color.gray.opacity(0.18)
                 result.append(codeAttr)
                 i = text.index(after: end)
                 continue
@@ -173,9 +179,24 @@ struct MarkdownRenderer {
                 let bold = String(text[text.index(i, offsetBy: 2)..<close])
                 var boldAttr = AttributedString(bold)
                 boldAttr.font = .body.bold()
+                boldAttr.foregroundColor = palette?.bold
                 result.append(boldAttr)
                 i = text.index(close, offsetBy: 2)
                 continue
+            }
+            // 斜体 *x*（单星号，非双）
+            if text[i] == "*", text.index(after: i) < text.endIndex, text[text.index(after: i)] != "*",
+               let close = text[text.index(after: i)...].firstIndex(of: "*") {
+                flushBuf()
+                let em = String(text[text.index(after: i)..<close])
+                if !em.isEmpty {
+                    var emAttr = AttributedString(em)
+                    emAttr.font = .body.italic()
+                    emAttr.foregroundColor = palette?.italic
+                    result.append(emAttr)
+                    i = text.index(after: close)
+                    continue
+                }
             }
             buf.append(text[i])
             i = text.index(after: i)
