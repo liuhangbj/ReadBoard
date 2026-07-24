@@ -269,7 +269,7 @@ public final class PipelineWorker: ObservableObject {
         if let sid = onlySourceId { conds.append("source_id = \(sid)") }
         let sql = """
         SELECT id, source, source_id, ctype, title, url, language, content_md, excerpt,
-               llm_score, llm_summary, llm_translated_md, meta
+               llm_score, llm_summary, llm_translated_md, meta, content_html
         FROM content
         WHERE \(conds.joined(separator: " AND "))
         ORDER BY published_at DESC
@@ -281,6 +281,7 @@ public final class PipelineWorker: ObservableObject {
         struct Row {
             let id: Int64, sourceId: Int64?
             let title: String, url: String, language: String?, md: String?, excerpt: String?
+            let html: String?   // content_html：feed 自带全文（md 还没转出来时的正文兜底）
             let hasScore: Bool, hasSummary: Bool, hasTranslated: Bool, isMedia: Bool
             let audioUrl: String?
         }
@@ -296,6 +297,7 @@ public final class PipelineWorker: ObservableObject {
                 id: id, sourceId: sourceId,
                 title: colText(stmt, 4) ?? "", url: colText(stmt, 5) ?? "",
                 language: colText(stmt, 6), md: colText(stmt, 7), excerpt: colText(stmt, 8),
+                html: colText(stmt, 13),
                 hasScore: sqlite3_column_type(stmt, 9) != SQLITE_NULL,
                 hasSummary: sqlite3_column_type(stmt, 10) != SQLITE_NULL,
                 hasTranslated: sqlite3_column_type(stmt, 11) != SQLITE_NULL,
@@ -311,7 +313,10 @@ public final class PipelineWorker: ObservableObject {
 
             // 按具体源查开关; source_id 为 NULL(存量/异常)则无开关, 跳过
             guard let sid = r.sourceId, let pol = srcPolicies[sid], pol.enabled else { continue }
-            let body = (r.md?.isEmpty == false ? r.md! : (r.excerpt ?? ""))
+            // body 三级兜底：content_md（全文）→ content_html 剥标签（feed 自带全文，
+            // md 还没转出来——你 1119 篇翻译源文章就是这样，正文在 content_html 但 md/excerpt
+            // 都空，worker 此前只认 md/excerpt 拿不到正文跳过翻译）→ excerpt（摘要）
+            let body = Self.resolveBody(md: r.md, html: r.html, excerpt: r.excerpt)
             let audioUrl = r.audioUrl
             let isMedia = r.isMedia
             let skip = skipMap[id] ?? [:]
@@ -428,6 +433,23 @@ public final class PipelineWorker: ObservableObject {
         guard let data = metaStr.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return (obj["audio_url"] as? String) ?? (obj["video_url"] as? String)
+    }
+
+    /// body 三级兜底：content_md → content_html 剥标签 → excerpt。
+    /// feed 自带全文（content_html）但 md 还没转出来的文章，正文在 html 里，
+    /// 剥标签压空白后作为正文给打分/翻译/摘要管线。
+    /// nonisolated：纯函数无 MainActor 状态，供非隔离上下文（测试/worker 后台）直接调。
+    nonisolated static func resolveBody(md: String?, html: String?, excerpt: String?) -> String {
+        if let md, !md.isEmpty { return md }
+        if let html, !html.isEmpty {
+            var text = html.replacingOccurrences(of: "<[^>]+>", with: " ",
+                                                 options: .regularExpression)
+            text = text.replacingOccurrences(of: "\\s+", with: " ",
+                                             options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+            if !text.isEmpty { return text }
+        }
+        return excerpt ?? ""
     }
 
     private func markJob(contentId: Int64, jtype: String, ok: Bool) {

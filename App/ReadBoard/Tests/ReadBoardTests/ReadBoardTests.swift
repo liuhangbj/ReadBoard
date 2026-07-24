@@ -276,3 +276,25 @@ final class MarkdownParseTests: XCTestCase {
         XCTAssertTrue(str.contains("链接"))
     }
 }
+
+// MARK: - PipelineWorker body 三级兜底
+
+final class ResolveBodyTests: XCTestCase {
+    func testMdPreferred() {
+        let body = PipelineWorker.resolveBody(md: "全文 markdown", html: "<p>html</p>", excerpt: "摘要")
+        XCTAssertEqual(body, "全文 markdown", "md 非空优先用 md")
+    }
+    func testHtmlFallback() {
+        let body = PipelineWorker.resolveBody(md: nil, html: "<p>正文 <b>加粗</b></p>", excerpt: "摘要")
+        XCTAssertFalse(body.contains("<"), "html 兜底要剥标签")
+        XCTAssertTrue(body.contains("正文"), "html 兜底保留文本")
+    }
+    func testExcerptFallback() {
+        let body = PipelineWorker.resolveBody(md: nil, html: nil, excerpt: "只有摘要")
+        XCTAssertEqual(body, "只有摘要")
+    }
+    func testAllEmpty() {
+        let body = PipelineWorker.resolveBody(md: nil, html: "", excerpt: nil)
+        XCTAssertEqual(body, "")
+    }
+}
