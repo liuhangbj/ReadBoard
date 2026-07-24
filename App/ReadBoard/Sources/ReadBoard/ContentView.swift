@@ -88,10 +88,7 @@ public struct ContentView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     // 全部
-                    sidebarButton(
-                        icon: "tray.full", name: "全部", count: vm.totalCount,
-                        filterKey: nil, isSelected: vm.selectedFilter == nil, indent: 0
-                    )
+                    allRow
 
                     ForEach(vm.sidebarTree) { node in
                         if node.isFolder {
@@ -111,28 +108,16 @@ public struct ContentView: View {
                                 }
                                 .buttonStyle(.plain)
 
-                                sidebarButton(
-                                    icon: "folder.fill", name: node.name, count: node.count,
-                                    filterKey: node.filterKey,
-                                    isSelected: vm.selectedFilter == node.filterKey, indent: 0
-                                )
+                                sidebarRow(node, indent: 0)
                             }
                             // 展开的子源
                             if expandedFolders.contains(node.id) {
                                 ForEach(node.children ?? []) { child in
-                                    sidebarButton(
-                                        icon: nil, name: child.name, count: child.count,
-                                        filterKey: child.filterKey,
-                                        isSelected: vm.selectedFilter == child.filterKey, indent: 1
-                                    )
+                                    sidebarRow(child, indent: 1)
                                 }
                             }
                         } else {
-                            sidebarButton(
-                                icon: nil, name: node.name, count: node.count,
-                                filterKey: node.filterKey,
-                                isSelected: vm.selectedFilter == node.filterKey, indent: 0
-                            )
+                            sidebarRow(node, indent: 0)
                         }
                     }
                 }
@@ -163,34 +148,211 @@ public struct ContentView: View {
         }
     }
 
-    /// 左栏行（可点击过滤）。Button 而非 List.tag——List selection 对 DisclosureGroup/自定义行不可靠。
-    private func sidebarButton(icon: String?, name: String, count: Int,
-                               filterKey: String?, isSelected: Bool, indent: Int) -> some View {
+    /// "全部"行（点击清空过滤）
+    private var allRow: some View {
         Button {
-            vm.selectFilter(filterKey)
+            vm.selectFilter(nil)
         } label: {
             HStack(spacing: 6) {
-                if let icon {
-                    Image(systemName: icon)
+                Image(systemName: "tray.full")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+                Text("全部")
+                    .foregroundStyle(vm.selectedFilter == nil ? .white : .primary)
+                Spacer()
+                Text("\(vm.totalCount)")
+                    .foregroundStyle(vm.selectedFilter == nil ? .white.opacity(0.8) : .secondary)
+                    .font(.caption)
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, 12)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(vm.selectedFilter == nil ? Color.accentColor : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 左栏行（点击过滤 + 未读角标 + 右键设置菜单）。
+    /// Button 而非 List.tag——List selection 对 DisclosureGroup/自定义行不可靠。
+    private func sidebarRow(_ node: SidebarNode, indent: Int) -> some View {
+        Button {
+            vm.selectFilter(node.filterKey)
+        } label: {
+            HStack(spacing: 6) {
+                if node.isFolder {
+                    Image(systemName: "folder.fill")
                         .foregroundStyle(.secondary)
                         .frame(width: 16)
                 }
-                Text(name)
+                Text(node.name)
                     .lineLimit(1)
-                    .foregroundStyle(isSelected ? .white : .primary)
+                    .foregroundStyle(vm.selectedFilter == node.filterKey ? .white : .primary)
                 Spacer()
-                Text("\(count)")
-                    .foregroundStyle(isSelected ? .white.opacity(0.8) : .secondary)
-                    .font(.caption)
+                // 未读角标（未读 > 0 显示；否则显示总数）
+                if node.unread > 0 {
+                    Text("\(node.unread)")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(vm.selectedFilter == node.filterKey ? Color.white.opacity(0.25) : Color.accentColor.opacity(0.2))
+                        .foregroundStyle(vm.selectedFilter == node.filterKey ? .white : .accentColor)
+                        .clipShape(Capsule())
+                } else {
+                    Text("\(node.count)")
+                        .foregroundStyle(vm.selectedFilter == node.filterKey ? .white.opacity(0.8) : .secondary)
+                        .font(.caption)
+                }
             }
             .padding(.leading, CGFloat(indent) * 18 + 12)
             .padding(.trailing, 12)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isSelected ? Color.accentColor : Color.clear)
+            .background(vm.selectedFilter == node.filterKey ? Color.accentColor : Color.clear)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .contextMenu { sidebarContextMenu(node) }
+    }
+
+    /// 左栏右键设置菜单（源/文件夹共用，按类型出不同项）
+    @ViewBuilder
+    private func sidebarContextMenu(_ node: SidebarNode) -> some View {
+        if let sid = node.sourceId {
+            // ── 单源设置 ──
+            Button { Task { await refreshSource(sid) } } label: {
+                Label("立即刷新", systemImage: "arrow.clockwise")
+            }
+            Button { markSourceRead(sid) } label: {
+                Label("全部标为已读", systemImage: "checkmark.circle")
+            }
+            Divider()
+            // 管线开关快速切换
+            if let src = sourceStore.sources.first(where: { $0.id == sid }) {
+                Menu("内容处理管道") {
+                    pipelineToggleMenu(src: src)
+                }
+                Menu("抓取设置") {
+                    fetchSettingsMenu(src: src)
+                }
+                Divider()
+                Menu("移动到文件夹") {
+                    Button("无文件夹") { sourceStore.assignSource(sourceId: sid, folderId: nil); vm.loadAll() }
+                    ForEach(sourceStore.folders) { f in
+                        Button(f.name) { sourceStore.assignSource(sourceId: sid, folderId: f.id); vm.loadAll() }
+                    }
+                }
+                Button(role: .destructive) { sourceStore.removeSource(id: sid); vm.loadAll() } label: {
+                    Label("删除此源", systemImage: "trash")
+                }
+            }
+        } else if let fid = node.folderId {
+            // ── 文件夹设置 ──
+            Button { Task { await refreshFolder(fid) } } label: {
+                Label("刷新此文件夹全部源", systemImage: "arrow.clockwise")
+            }
+            Button { markFolderRead(fid) } label: {
+                Label("全部标为已读", systemImage: "checkmark.circle")
+            }
+            Divider()
+            if let folder = sourceStore.folders.first(where: { $0.id == fid }) {
+                Menu("组级管线总开关") {
+                    folderPipelineMenu(folder: folder)
+                }
+            }
+            Button(role: .destructive) { sourceStore.removeFolder(id: fid); vm.loadAll() } label: {
+                Label("删除文件夹", systemImage: "trash")
+            }
+        }
+    }
+
+    /// 源级管线开关菜单（打勾状态实时反映）
+    @ViewBuilder
+    private func pipelineToggleMenu(src: FeedSource) -> some View {
+        pipelineMenuItem("AI 打分", key: "auto_score", on: src.policy.autoScore, src: src)
+        pipelineMenuItem("AI 翻译", key: "auto_translate", on: src.policy.autoTranslate, src: src)
+        pipelineMenuItem("AI 摘要", key: "auto_summarize", on: src.policy.autoSummarize, src: src)
+        if src.transcribable {
+            pipelineMenuItem("转录", key: "auto_transcribe", on: src.policy.autoTranscribe, src: src)
+        }
+    }
+
+    private func pipelineMenuItem(_ label: String, key: String, on: Bool, src: FeedSource) -> some View {
+        Button {
+            sourceStore.setPolicy(id: src.id, key: key, value: !on)
+        } label: {
+            Label(label, systemImage: on ? "checkmark" : "")
+        }
+    }
+
+    /// 抓取设置菜单（fetch_mode + 频率）
+    @ViewBuilder
+    private func fetchSettingsMenu(src: FeedSource) -> some View {
+        Menu("全文模式：\(src.fetchMode.displayName)") {
+            ForEach(FetchMode.allCases, id: \.rawValue) { m in
+                Button { sourceStore.setFetchMode(id: src.id, mode: m) } label: {
+                    Label(m.displayName, systemImage: src.fetchMode == m ? "checkmark" : "")
+                }
+            }
+            Divider()
+            Button("重新探测") { Task { await sourceStore.reprobeFetchMode(id: src.id) } }
+        }
+        Menu("抓取频率：\(src.fetchIntervalMin < 60 ? "\(src.fetchIntervalMin)分钟" : "\(src.fetchIntervalMin/60)小时")") {
+            ForEach([5, 15, 30, 60, 120, 360, 720], id: \.self) { m in
+                Button { sourceStore.setFetchInterval(id: src.id, minutes: m) } label: {
+                    Label(m < 60 ? "\(m) 分钟" : "\(m/60) 小时",
+                          systemImage: src.fetchIntervalMin == m ? "checkmark" : "")
+                }
+            }
+        }
+    }
+
+    /// 文件夹级管线总开关菜单
+    @ViewBuilder
+    private func folderPipelineMenu(folder: Folder) -> some View {
+        folderMenuItem("AI 打分", key: "auto_score", on: folder.policy.autoScore, folder: folder)
+        folderMenuItem("AI 翻译", key: "auto_translate", on: folder.policy.autoTranslate, folder: folder)
+        folderMenuItem("AI 摘要", key: "auto_summarize", on: folder.policy.autoSummarize, folder: folder)
+        folderMenuItem("转录", key: "auto_transcribe", on: folder.policy.autoTranscribe, folder: folder)
+    }
+
+    private func folderMenuItem(_ label: String, key: String, on: Bool, folder: Folder) -> some View {
+        Button {
+            sourceStore.setFolderPolicy(id: folder.id, key: key, value: !on)
+        } label: {
+            Label(label, systemImage: on ? "checkmark" : "")
+        }
+    }
+
+    // MARK: 左栏操作辅助
+
+    private func refreshSource(_ sid: Int64) async {
+        if let src = sourceStore.sources.first(where: { $0.id == sid }) {
+            _ = try? await sourceStore.syncOne(src)
+            vm.loadAll()
+        }
+    }
+
+    private func refreshFolder(_ fid: Int64) async {
+        for src in sourceStore.sources where src.folderId == fid && src.enabled {
+            _ = try? await sourceStore.syncOne(src)
+        }
+        vm.loadAll()
+    }
+
+    private func markSourceRead(_ sid: Int64) {
+        Database.shared.execute(
+            "UPDATE content SET read_at = datetime('now') WHERE source_id = ? AND read_at IS NULL",
+            params: [sid])
+        vm.loadAll()
+    }
+
+    private func markFolderRead(_ fid: Int64) {
+        Database.shared.execute("""
+            UPDATE content SET read_at = datetime('now')
+            WHERE read_at IS NULL AND source_id IN (SELECT id FROM content_source WHERE folder_id = ?)
+            """, params: [fid])
+        vm.loadAll()
     }
 
     // MARK: 中栏
@@ -317,6 +479,23 @@ public struct ContentView: View {
                             Button(item.isRead ? "标为未读" : "标为已读") { vm.toggleRead(item) }
                             Button(item.starred ? "取消星标" : "加星标") { vm.toggleStar(item) }
                             Button(item.archived ? "取消归档" : "归档") { vm.toggleArchive(item) }
+                            Divider()
+                            Button("复制链接") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(item.url, forType: .string)
+                            }
+                            Button("浏览器打开原文") {
+                                if let url = URL(string: item.url), !item.url.isEmpty {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
+                            Divider()
+                            Button("重新生成归档 md") {
+                                ArchiveService.shared.rearchive(contentId: item.id)
+                            }
+                            Button("触发导出规则") {
+                                Task { await ExportService.shared.runPending(trigger: "manual", contentId: item.id) }
+                            }
                         }
                         // 最后一行出现时自动加载下一页（滚动到底分页，打破 300 条上限）
                         .onAppear {

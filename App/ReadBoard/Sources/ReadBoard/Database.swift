@@ -74,8 +74,11 @@ public struct SidebarNode: Identifiable, Hashable {
     public let id: String
     let name: String
     let count: Int
+    let unread: Int          // 未读数（角标）
     let isFolder: Bool
     let filterKey: String?       // 点击过滤用：source_id=N / folder_id=N / nil=全部
+    let sourceId: Int64?         // 源 id（右键设置用，文件夹为 nil）
+    let folderId: Int64?         // 文件夹 id（右键设置用）
     var children: [SidebarNode]?
 }
 
@@ -421,14 +424,15 @@ public final class Database: @unchecked Sendable {
         return groups
     }
 
-    /// 左栏树：文件夹（含子源）→ 无文件夹的独立源。count = 各源/文件夹的有效内容数。
+    /// 左栏树：文件夹（含子源）→ 无文件夹的独立源。count = 有效内容数，unread = 未读数。
     /// 这是订阅源视角的组织方式（你的文件夹结构），不是按内容类型分。
     func fetchSidebarTree() -> [SidebarNode] {
         guard open() else { return [] }
-        // 文件夹 + 其下源 + 内容数
+        // 文件夹 + 其下源 + 内容数/未读数
         let folderRows = queryRows("""
             SELECT f.id AS fid, f.name AS fname, s.id AS sid, s.name AS sname,
-                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0) AS n
+                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0 AND c.is_archived = 0) AS n,
+                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0 AND c.is_archived = 0 AND c.read_at IS NULL) AS unread
             FROM folder f
             JOIN content_source s ON s.folder_id = f.id AND s.enabled = 1
             ORDER BY f.name, n DESC;
@@ -436,7 +440,8 @@ public final class Database: @unchecked Sendable {
         // 无文件夹的独立源
         let orphanRows = queryRows("""
             SELECT s.id AS sid, s.name AS sname,
-                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0) AS n
+                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0 AND c.is_archived = 0) AS n,
+                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0 AND c.is_archived = 0 AND c.read_at IS NULL) AS unread
             FROM content_source s
             WHERE s.folder_id IS NULL AND s.enabled = 1
             ORDER BY n DESC;
@@ -451,9 +456,12 @@ public final class Database: @unchecked Sendable {
             let fname = r["fname"] ?? "未命名"
             let sname = r["sname"] ?? "未命名源"
             let n = Int(r["n"] ?? "0") ?? 0
+            let unread = Int(r["unread"] ?? "0") ?? 0
+            let sid = Int64(r["sid"] ?? "0") ?? 0
             let sidStr = r["sid"] ?? ""
-            let node = SidebarNode(id: "s\(sidStr)", name: sname, count: n,
-                                   isFolder: false, filterKey: "source_id=\(sidStr)", children: nil)
+            let node = SidebarNode(id: "s\(sidStr)", name: sname, count: n, unread: unread,
+                                   isFolder: false, filterKey: "source_id=\(sidStr)",
+                                   sourceId: sid, folderId: fid, children: nil)
             if folderMap[fid] == nil {
                 folderMap[fid] = (fname, [])
                 folderOrder.append(fid)
@@ -463,16 +471,21 @@ public final class Database: @unchecked Sendable {
         for fid in folderOrder {
             guard let (fname, sources) = folderMap[fid] else { continue }
             let total = sources.reduce(0) { $0 + $1.count }
-            tree.append(SidebarNode(id: "f\(fid)", name: fname, count: total,
-                                    isFolder: true, filterKey: "folder_id=\(fid)", children: sources))
+            let totalUnread = sources.reduce(0) { $0 + $1.unread }
+            tree.append(SidebarNode(id: "f\(fid)", name: fname, count: total, unread: totalUnread,
+                                    isFolder: true, filterKey: "folder_id=\(fid)",
+                                    sourceId: nil, folderId: fid, children: sources))
         }
         // 独立源（无文件夹）
         for r in orphanRows {
             let sname = r["sname"] ?? "未命名源"
             let n = Int(r["n"] ?? "0") ?? 0
+            let unread = Int(r["unread"] ?? "0") ?? 0
+            let sid = Int64(r["sid"] ?? "0") ?? 0
             let sidStr = r["sid"] ?? ""
-            tree.append(SidebarNode(id: "s\(sidStr)", name: sname, count: n,
-                                    isFolder: false, filterKey: "source_id=\(sidStr)", children: nil))
+            tree.append(SidebarNode(id: "s\(sidStr)", name: sname, count: n, unread: unread,
+                                    isFolder: false, filterKey: "source_id=\(sidStr)",
+                                    sourceId: sid, folderId: nil, children: nil))
         }
         return tree
     }
