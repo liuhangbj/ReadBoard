@@ -457,6 +457,19 @@ public struct AddSourceSheet: View {
                         if name.isEmpty { name = feed.title }
                         testing = false
                     }
+                } else if stype == "podcast" {
+                    // 播客也支持主页自动发现（很多播客给的是节目主页而非 feed URL）
+                    let input = identifier.trimmingCharacters(in: .whitespaces)
+                    let (feedURL, feed) = try await FeedFetcher.discoverAndFetch(urlString: input)
+                    var msg = "✓ \(feed.title)：\(feed.entries.count) 条，类型 \(feed.kind.rawValue)"
+                    if feedURL != input { msg += "\n（主页自动发现 feed: \(feedURL)）" }
+                    await MainActor.run {
+                        testResult = msg
+                        resolvedFeedURL = feedURL
+                        testedOK = true
+                        if name.isEmpty { name = feed.title }
+                        testing = false
+                    }
                 } else {
                     let url = try await resolveIdentifier()
                     let feed = try await FeedFetcher.fetch(urlString: url)

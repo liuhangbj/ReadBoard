@@ -152,7 +152,10 @@ public final class BackupService: ObservableObject {
         } catch {
             throw RestoreError.safetyBackupFailed(error.localizedDescription)
         }
-        // 2. 关连接，替换文件
+        // 2. 恢复前先把 WAL 全量 checkpoint 进主文件（TRUNCATE）——
+        //    不 checkpoint 直接替换的话，候选库（旧版）可能与残留 wal（新版）混出错乱页。
+        checkpointCurrentDB()
+        // 3. 关连接，替换文件
         Database.shared.close()
         do {
             // 删掉 wal/shm（候选是完整主文件，残留 wal 会造成错乱）
@@ -162,8 +165,28 @@ public final class BackupService: ObservableObject {
             try fm.removeItem(atPath: dbPath)
             try fm.copyItem(atPath: candidatePath, toPath: dbPath)
         } catch {
-            throw RestoreError.replaceFailed(error.localizedDescription)
+            // 替换失败 = 主库已被删/半替换 + 连接已关——继续跑会在坏库上迁移/写入，
+            // 数据污染风险远大于直接退出。记录安全备份位置后强制终止，用户从安全备份手动恢复。
+            fputs("""
+                [restore] ⛔ 文件替换失败: \(error.localizedDescription)
+                [restore] 当前库可能已损坏。安全备份在 \(backupDir)/readboard-restore-from-*.db
+                [restore] 请将安全备份手动拷回 \(dbPath) 后重启 App。
+                """, stderr)
+            exit(1)
         }
+    }
+
+    /// 恢复前把当前库 WAL checkpoint 进主文件（FULL→TRUNCATE），保证主文件自包含。
+    /// 在 Database.close() 之前调用（连接还活着才能 checkpoint）。
+    private func checkpointCurrentDB() {
+        var h: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &h, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else { return }
+        defer { sqlite3_close(h) }
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(h, "PRAGMA wal_checkpoint(TRUNCATE);", -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
     }
 
     private var fm: FileManager { FileManager.default }

@@ -407,10 +407,16 @@ public final class SourceStore: ObservableObject {
         comps.scheme = comps.scheme?.lowercased()
         comps.host = comps.host?.lowercased()
         comps.fragment = nil
-        let trackPrefixes = ["utm_", "fbclid", "gclid", "ref", "spm", "from", "source", "mc_cid", "mc_eid"]
+        // 精确匹配名单（hasPrefix 会误杀 referral_id/refresh/fromage 等语义参数——
+        // 比如 ?refresh=1 被当 ref 剥掉，导致同页不同参数被误判重复）
+        let trackExact: Set<String> = ["fbclid", "gclid", "ref", "spm", "from", "source",
+                                       "mc_cid", "mc_eid", "igshid", "dclid", "msclkid"]
         if let items = comps.queryItems {
             comps.queryItems = items.filter { item in
-                !trackPrefixes.contains(where: { item.name.lowercased().hasPrefix($0) })
+                let n = item.name.lowercased()
+                // utm_* 前缀是安全的（utm 参数族命名规范，无语义撞车）
+                if n.hasPrefix("utm_") { return false }
+                return !trackExact.contains(n)
             }
             if comps.queryItems?.isEmpty == true { comps.queryItems = nil }
         }

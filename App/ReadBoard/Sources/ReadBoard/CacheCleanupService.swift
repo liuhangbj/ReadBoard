@@ -201,6 +201,11 @@ public final class CacheCleanupService: ObservableObject {
                 """)
             deleted = db.writeChanges()
         }
+
+        // content_job 日志表膨胀控制：每条管线执行都 INSERT，~40k 行/天，
+        // 只留最近 30 天（死信统计只看失败次数，历史成功记录无价值）。
+        db.execute("DELETE FROM content_job WHERE finished_at < datetime('now', '-30 days');")
+
         return (archived, deleted)
     }
 

@@ -81,7 +81,8 @@ public enum YouTubeResolver {
             return "https://www.youtube.com/feeds/videos.xml?channel_id=\(cid)"
         }
         // 其余（@handle、/c/、/user/、视频页）：抓页面 HTML 提取 channelId
-        let cid = try await fetchChannelId(pageURL: url, proxy: proxy)
+        // proxy 传 nil 时回落到全局代理（FeedFetcher.globalProxy）
+        let cid = try await fetchChannelId(pageURL: url, proxy: proxy ?? FeedFetcher.globalProxy)
         return "https://www.youtube.com/feeds/videos.xml?channel_id=\(cid)"
     }
 
@@ -131,8 +132,9 @@ public final class FeedFetcher {
     /// 先直接试抓：是 feed 就返回；不是则按 HTML 解析 <link rel="alternate" type="application/rss+xml">。
     /// 返回 (feedURL, ParsedFeed)。找不到 feed 抛 parseFailed。
     static func discoverAndFetch(urlString: String, proxy: String? = nil) async throws -> (feedURL: String, feed: ParsedFeed) {
+        let effectiveProxy = proxy ?? globalProxy
         // 1. 直接试抓（已经是 feed URL 的情况）
-        if let feed = try? await fetch(urlString: urlString, proxy: proxy) {
+        if let feed = try? await fetch(urlString: urlString, proxy: effectiveProxy) {
             return (urlString, feed)
         }
         // 2. 当 HTML 主页解析 feed 链接
@@ -142,7 +144,7 @@ public final class FeedFetcher {
                      forHTTPHeaderField: "User-Agent")
 
         let config = URLSessionConfiguration.default
-        if let proxy, let purl = URL(string: proxy), let host = purl.host, let port = purl.port {
+        if let proxy = effectiveProxy, let purl = URL(string: proxy), let host = purl.host, let port = purl.port {
             config.connectionProxyDictionary = [
                 kCFNetworkProxiesHTTPEnable: true, kCFNetworkProxiesHTTPProxy: host,
                 kCFNetworkProxiesHTTPPort: port, kCFNetworkProxiesHTTPSEnable: true,
@@ -175,15 +177,27 @@ public final class FeedFetcher {
                 .replacingOccurrences(of: "&amp;", with: "&")
             // 相对 URL 补全
             if let feedURL = URL(string: href, relativeTo: url)?.absoluteURL,
-               let feed = try? await fetch(urlString: feedURL.absoluteString, proxy: proxy) {
+               let feed = try? await fetch(urlString: feedURL.absoluteString, proxy: effectiveProxy) {
                 return (feedURL.absoluteString, feed)
             }
         }
         throw FeedFetchError.parseFailed
     }
 
-    /// 抓取并解析一个 feed
+    /// 全局代理（设置页配置，UserDefaults 持久化）。所有 fetch/discover/probe 调用点统一走这里，
+    /// 不再各处散落传参（此前只有 YouTubeResolver 用 proxy，常规抓取全丢代理）。
+    static var globalProxy: String? {
+        get {
+            let v = UserDefaults.standard.string(forKey: "network.globalProxy")?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            return v.isEmpty ? nil : v
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "network.globalProxy") }
+    }
+
+    /// 抓取并解析一个 feed。proxy 传 nil 时自动回落到全局代理设置。
     static func fetch(urlString: String, proxy: String? = nil) async throws -> ParsedFeed {
+        let effectiveProxy = proxy ?? globalProxy
         guard let url = URL(string: urlString) else { throw FeedFetchError.badURL }
 
         var req = URLRequest(url: url, timeoutInterval: 30)
@@ -191,7 +205,7 @@ public final class FeedFetcher {
         req.setValue("application/rss+xml, application/atom+xml, application/xml, text/xml, */*", forHTTPHeaderField: "Accept")
 
         let config = URLSessionConfiguration.default
-        if let proxy, let purl = URL(string: proxy), let host = purl.host, let port = purl.port {
+        if let proxy = effectiveProxy, let purl = URL(string: proxy), let host = purl.host, let port = purl.port {
             config.connectionProxyDictionary = [
                 kCFNetworkProxiesHTTPEnable: true,
                 kCFNetworkProxiesHTTPProxy: host,

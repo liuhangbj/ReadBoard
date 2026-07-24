@@ -138,6 +138,12 @@ public final class Database: @unchecked Sendable {
             guard let sql = try? String(contentsOfFile: "\(migDir)/\(file)", encoding: .utf8) else { continue }
             var allOK = true
             for statement in Self.splitSQLStatements(sql) {
+                // ALTER TABLE ADD COLUMN 幂等化：列已存在则跳过（此前部分失败后重试会
+                // 因 duplicate column 永远失败，user_version 卡死，后续迁移全不跑）
+                if Self.isRedundantAddColumn(handle, statement) {
+                    fputs("[migration] ℹ \(file): 列已存在，跳过 ADD COLUMN\n", stderr)
+                    continue
+                }
                 if !execRaw(handle, statement) {
                     allOK = false
                     let err = String(cString: sqlite3_errmsg(handle))
@@ -165,6 +171,34 @@ public final class Database: @unchecked Sendable {
         let rc = sqlite3_step(stmt)   // 只 step 一次（DDL→DONE；INSERT rebuild→DONE；查询类→ROW 也只取首步）
         sqlite3_finalize(stmt)
         return rc == SQLITE_DONE || rc == SQLITE_ROW
+    }
+
+    /// 判断一条 SQL 是否是"目标列已存在的 ADD COLUMN"——是则跳过（幂等迁移）。
+    /// 解析 `ALTER TABLE <table> ADD COLUMN <col> ...`，查 PRAGMA table_info。
+    private static func isRedundantAddColumn(_ handle: OpaquePointer?, _ sql: String) -> Bool {
+        let trimmed = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 正则抓表名和列名（容忍反引号/双引号包裹）
+        let pattern = #"^\s*ALTER\s+TABLE\s+[`"']?(\w+)[`"']?\s+ADD\s+COLUMN\s+[`"']?(\w+)[`"']?"#
+        guard let re = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return false }
+        let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+        guard let m = re.firstMatch(in: trimmed, range: range),
+              m.numberOfRanges >= 3,
+              let tRange = Range(m.range(at: 1), in: trimmed),
+              let cRange = Range(m.range(at: 2), in: trimmed) else { return false }
+        let table = String(trimmed[tRange])
+        let column = String(trimmed[cRange])
+        // PRAGMA table_info 查列是否存在
+        var stmt: OpaquePointer?
+        let pragma = "PRAGMA table_info(\(table));"
+        guard sqlite3_prepare_v2(handle, pragma, -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let p = sqlite3_column_text(stmt, 1) {
+                let name = String(cString: p)
+                if name.caseInsensitiveCompare(column) == .orderedSame { return true }
+            }
+        }
+        return false
     }
 
     private func intVal(_ handle: OpaquePointer?, _ sql: String) -> Int? {
@@ -373,7 +407,8 @@ public final class Database: @unchecked Sendable {
     func fetchContents(source: String? = nil, minScore: Int? = nil, includeUnscored: Bool = false,
                        unreadOnly: Bool = false,
                        keyword: String? = nil, starredOnly: Bool = false,
-                       archived: Bool = false, tagId: Int64? = nil, limit: Int = 200) -> [ContentItem] {
+                       archived: Bool = false, tagId: Int64? = nil, limit: Int = 200,
+                       offset: Int = 0) -> [ContentItem] {
         guard open() else { return [] }
         let useFTS = (keyword?.isEmpty == false) && ftsAvailable()
         // 轻列：列表渲染够用，不扛正文。列序固定见 rowToListItem
@@ -408,7 +443,13 @@ public final class Database: @unchecked Sendable {
             conds.append("(\(col)title LIKE ? OR \(col)excerpt LIKE ?)")
         }
         sql += " WHERE " + conds.joined(separator: " AND ")
-        sql += " ORDER BY (\(col)llm_score IS NULL), \(col)llm_score DESC, \(col)published_at DESC LIMIT ?;"
+        // 有关键词时按发布时间倒序（搜索场景用户找的是"那篇最近的"，不是评分最高的）；
+        // 无关键词保持评分优先（高质量文章置顶）
+        if keyword?.isEmpty == false {
+            sql += " ORDER BY \(col)published_at DESC LIMIT ? OFFSET ?;"
+        } else {
+            sql += " ORDER BY (\(col)llm_score IS NULL), \(col)llm_score DESC, \(col)published_at DESC LIMIT ? OFFSET ?;"
+        }
 
         var stmt: OpaquePointer?
         var items: [ContentItem] = []
@@ -425,7 +466,8 @@ public final class Database: @unchecked Sendable {
             } else if let kw = keyword, !kw.isEmpty {
                 let like = "%\(kw)%"; binder(like); binder(like)
             }
-            sqlite3_bind_int64(stmt, idx, Int64(limit))
+            sqlite3_bind_int64(stmt, idx, Int64(limit)); idx += 1
+            sqlite3_bind_int64(stmt, idx, Int64(offset))
 
             while sqlite3_step(stmt) == SQLITE_ROW {
                 items.append(Self.rowToListItem(stmt))
@@ -433,6 +475,24 @@ public final class Database: @unchecked Sendable {
         }
         sqlite3_finalize(stmt)
         return items
+    }
+
+    /// 某内容的有效管线开关（源 OR 文件夹）。source_id 为 NULL（存量/异常）→ 全关。
+    /// 供手动 AI 按钮做开关判定：手动触发也尊重源级配置（用户关掉打分就是不想被打分）。
+    func effectivePolicyFor(contentId: Int64) -> PipelinePolicy {
+        guard let row = queryRows("""
+            SELECT s.config AS src_cfg, f.config AS folder_cfg FROM content c
+            JOIN content_source s ON c.source_id = s.id
+            LEFT JOIN folder f ON s.folder_id = f.id
+            WHERE c.id = ?;
+            """, params: [contentId]).first else { return PipelinePolicy() }
+        let sp = PipelinePolicy.from(configJson: row["src_cfg"] ?? "{}")
+        let fp = PipelinePolicy.from(configJson: row["folder_cfg"] ?? "{}")
+        return PipelinePolicy(
+            autoScore: sp.autoScore || fp.autoScore,
+            autoTranslate: sp.autoTranslate || fp.autoTranslate,
+            autoTranscribe: sp.autoTranscribe || fp.autoTranscribe,
+            autoSummarize: sp.autoSummarize || fp.autoSummarize)
     }
 
     /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl)

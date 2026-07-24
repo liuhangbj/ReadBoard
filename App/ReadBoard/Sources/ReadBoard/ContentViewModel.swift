@@ -56,17 +56,41 @@ public final class ContentViewModel: ObservableObject {
         reload()
     }
 
+    /// 每页条数（滚动到底自动加载下一页）
+    static let pageSize = 300
+    /// 是否可能还有更多（上次取回的数量 == pageSize）
+    @Published var hasMore: Bool = false
+
     func reload() {
         let minS: Int? = minScore > 0 ? minScore : nil
         let kw = keyword.trimmingCharacters(in: .whitespaces)
-        items = db.fetchContents(source: selectedSource, minScore: minS,
-                                 includeUnscored: includeUnscored,
-                                 unreadOnly: unreadOnly, keyword: kw.isEmpty ? nil : kw,
-                                 starredOnly: starredOnly, archived: showArchived,
-                                 tagId: selectedTag?.id, limit: 300)
+        let page = db.fetchContents(source: selectedSource, minScore: minS,
+                                    includeUnscored: includeUnscored,
+                                    unreadOnly: unreadOnly, keyword: kw.isEmpty ? nil : kw,
+                                    starredOnly: starredOnly, archived: showArchived,
+                                    tagId: selectedTag?.id, limit: Self.pageSize, offset: 0)
+        items = page
+        hasMore = page.count >= Self.pageSize
         if let sel = selectedItem, !items.contains(sel) {
             selectedItem = nil
         }
+    }
+
+    /// 加载下一页（滚动到底触发）。追加而非替换。
+    func loadMore() {
+        guard hasMore else { return }
+        let minS: Int? = minScore > 0 ? minScore : nil
+        let kw = keyword.trimmingCharacters(in: .whitespaces)
+        let page = db.fetchContents(source: selectedSource, minScore: minS,
+                                    includeUnscored: includeUnscored,
+                                    unreadOnly: unreadOnly, keyword: kw.isEmpty ? nil : kw,
+                                    starredOnly: starredOnly, archived: showArchived,
+                                    tagId: selectedTag?.id, limit: Self.pageSize,
+                                    offset: items.count)
+        hasMore = page.count >= Self.pageSize
+        // 去重追加（极端情况数据在两次查询间被插入，offset 可能重叠几条）
+        let existing = Set(items.map { $0.id })
+        items.append(contentsOf: page.filter { !existing.contains($0.id) })
     }
 
     func selectSource(_ source: String?) {

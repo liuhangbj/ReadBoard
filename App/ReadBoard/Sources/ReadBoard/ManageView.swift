@@ -91,9 +91,15 @@ public struct StatsPane: View {
             .padding()
         }
         .onAppear {
-            s = StatsService.shared.overview()
-            jobTypes = StatsService.shared.jobByType()
-            topSources = StatsService.shared.topSources()
+            // 统计查询后台跑：全表聚合在 67k 行库上有可见耗时，主线程执行会卡 UI
+            Task.detached {
+                let ov = StatsService.shared.overview()
+                let jt = StatsService.shared.jobByType()
+                let ts = StatsService.shared.topSources()
+                await MainActor.run {
+                    s = ov; jobTypes = jt; topSources = ts
+                }
+            }
         }
     }
 

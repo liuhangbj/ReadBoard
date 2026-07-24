@@ -195,6 +195,14 @@ public struct ContentView: View {
                             Button(item.starred ? "取消星标" : "加星标") { vm.toggleStar(item) }
                             Button(item.archived ? "取消归档" : "归档") { vm.toggleArchive(item) }
                         }
+                        // 最后一行出现时自动加载下一页（滚动到底分页，打破 300 条上限）
+                        .onAppear {
+                            if item.id == vm.items.last?.id { vm.loadMore() }
+                        }
+                }
+                if vm.hasMore {
+                    HStack { Spacer(); ProgressView().controlSize(.small); Spacer() }
+                        .onAppear { vm.loadMore() }
                 }
             }
             .listStyle(.plain)
@@ -313,6 +321,9 @@ public struct ReadingView: View {
     @State private var statusMsg: String?
     /// busy 所属的内容 id——切文章后旧任务完成不再污染新文章的 busy 状态
     @State private var busyForId: Int64? = nil
+    /// 当前内容的有效管线开关（源 OR 文件夹）。手动按钮也尊重开关——
+    /// 用户在某源上关掉自动打分，通常就是不想给这个源的内容打分。
+    @State private var policy = PipelinePolicy()
 
     public var body: some View {
         ScrollView {
@@ -333,8 +344,8 @@ public struct ReadingView: View {
 
                 // ── LLM 操作条 ──
                 HStack(spacing: 10) {
-                    // 转录不依赖 LLM key（whisper 本地），单独判断
-                    if isMediaItem, item.llmTranslatedMd == nil {
+                    // 转录不依赖 LLM key（whisper 本地），单独判断；也尊重源转录开关
+                    if isMediaItem, item.llmTranslatedMd == nil, policy.autoTranscribe {
                         Button {
                             runTranscribe()
                         } label: {
@@ -349,7 +360,7 @@ public struct ReadingView: View {
                                 .foregroundStyle(.red)
                         }
                     } else {
-                        if item.llmScore == nil {
+                        if item.llmScore == nil, policy.autoScore {
                             Button {
                                 runScore()
                             } label: {
@@ -357,7 +368,7 @@ public struct ReadingView: View {
                             }
                             .disabled(busy)
                         }
-                        if item.llmSummary == nil {
+                        if item.llmSummary == nil, policy.autoSummarize {
                             Button {
                                 runSummarize()
                             } label: {
@@ -365,7 +376,7 @@ public struct ReadingView: View {
                             }
                             .disabled(busy)
                         }
-                        if !isMediaItem, item.llmTranslatedMd == nil {
+                        if !isMediaItem, item.llmTranslatedMd == nil, policy.autoTranslate {
                             Button {
                                 runTranslate()
                             } label: {
@@ -417,6 +428,8 @@ public struct ReadingView: View {
             }
             .padding(24)
         }
+        // 视图随 .id(item.id) 重建，onAppear 即切文章——刷新有效开关
+        .onAppear { policy = Database.shared.effectivePolicyFor(contentId: item.id) }
     }
 
     private var bodyText: String {

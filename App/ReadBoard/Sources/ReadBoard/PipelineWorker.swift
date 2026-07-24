@@ -376,7 +376,9 @@ public final class PipelineWorker: ObservableObject {
                 """, params: batch)
             // 内存聚合：每 (content_id, jtype) 第一行是最近一次（ORDER BY id DESC）
             var lastStatus: [String: (status: String, finishedAt: String?)] = [:]
-            var failCount: [String: Int] = [:]
+            // 连续失败次数（遇到成功即清零）——比"累计失败"更合理：
+            // 历史上零星失败叠加不该判死信；真死信是"一直在失败"。
+            var consecFail: [String: Int] = [:]
             for r in rows {
                 guard let cidStr = r["content_id"], let cid = Int64(cidStr),
                       let jt = r["jtype"], let st = r["status"] else { continue }
@@ -384,15 +386,22 @@ public final class PipelineWorker: ObservableObject {
                 if lastStatus[key] == nil {
                     lastStatus[key] = (st, r["finished_at"])
                 }
-                if st == "3" { failCount[key, default: 0] += 1 }
+                // 只统计"最近一次之后"的连续失败——碰到成功就停（该 key 已有 consecFail 即已遇到更早的失败）
+                if consecFail[key] == nil {
+                    if st == "3" { consecFail[key] = 1 }
+                } else if consecFail[key]! > 0 {
+                    if st == "3" { consecFail[key]! += 1 }
+                    else { consecFail[key] = -(consecFail[key]!) }  // 遇到成功：封存（负号标记不再累加）
+                }
             }
             for (key, last) in lastStatus {
                 let parts = key.split(separator: "|", maxSplits: 1)
                 guard let cid = Int64(parts[0]) else { continue }
                 let jt = String(parts[1])
                 var skip = false
-                if (failCount[key] ?? 0) >= 3 {
-                    skip = true   // 死信
+                let consec = abs(consecFail[key] ?? 0)
+                if consec >= 3 {
+                    skip = true   // 死信（连续 3 次失败）
                 } else if last.status == "3", let ts = last.finishedAt,
                           let lastDate = Self.utcDate(ts),
                           Date().timeIntervalSince(lastDate) < 3600 {
@@ -414,21 +423,41 @@ public final class PipelineWorker: ObservableObject {
 
     // MARK: 死信管理（设置页可查看/重置）
 
-    /// 死信任务数（某 content+jtype 累计失败 >=3）
+    /// 死信任务数（连续失败 >=3，与 failureSkipMap 口径一致）。
+    /// 用窗口函数算每组最近一次状态后的连续失败数，纯 SQL 一趟完成。
     func countDeadLetters() -> Int {
-        let rows = db.queryRows("""
-            SELECT content_id, jtype, COUNT(*) AS fails FROM content_job
-            WHERE status = 3 GROUP BY content_id, jtype HAVING fails >= 3;
-            """)
-        return rows.count
+        deadLetterPairs().count
     }
 
-    /// 死信任务明细（设置页列表）
+    /// 死信任务明细（设置页列表）：连续失败 >= 3
     func deadLetters() -> [(contentId: Int64, jtype: String, fails: Int)] {
+        deadLetterPairs()
+    }
+
+    /// 死信对（content_id, jtype, 连续失败次数）。窗口函数：
+    /// 按 (content_id,jtype) 分组、id 倒序编号，rn 递增即时间倒序；
+    /// 连续失败 = 从头开始 status=3 直到遇到第一个非 3。
+    private func deadLetterPairs() -> [(contentId: Int64, jtype: String, fails: Int)] {
+        // SQLite 窗口函数需要 3.25+，macOS 系统库满足。
+        // 思路：每组按 id DESC 编号，取"前缀里全是 3"的最大前缀长度作为连续失败数。
         db.queryRows("""
-            SELECT content_id, jtype, COUNT(*) AS fails FROM content_job
-            WHERE status = 3 GROUP BY content_id, jtype HAVING fails >= 3
-            ORDER BY fails DESC LIMIT 100;
+            WITH ranked AS (
+              SELECT content_id, jtype, status,
+                     ROW_NUMBER() OVER (PARTITION BY content_id, jtype ORDER BY id DESC) AS rn
+              FROM content_job
+            ),
+            consec AS (
+              SELECT content_id, jtype, COUNT(*) AS fails
+              FROM ranked
+              WHERE rn <= (
+                SELECT COALESCE(MIN(rn) - 1, 999999) FROM ranked r2
+                WHERE r2.content_id = ranked.content_id AND r2.jtype = ranked.jtype
+                  AND r2.status != 3
+              ) AND status = 3
+              GROUP BY content_id, jtype
+            )
+            SELECT content_id, jtype, fails FROM consec WHERE fails >= 3
+            ORDER BY fails DESC LIMIT 200;
             """).compactMap { r in
             guard let cid = Int64(r["content_id"] ?? ""), let jt = r["jtype"] else { return nil }
             return (cid, jt, Int(r["fails"] ?? "0") ?? 0)

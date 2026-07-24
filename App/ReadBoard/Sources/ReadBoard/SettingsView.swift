@@ -58,6 +58,8 @@ public struct SettingsView: View {
 // MARK: - 通用
 
 public struct GeneralPane: View {
+    @State private var proxyInput: String = FeedFetcher.globalProxy ?? ""
+
     public var body: some View {
         Form {
             Section("feed 自动抓取") {
@@ -66,6 +68,26 @@ public struct GeneralPane: View {
                     set: { SourceStore.shared.autoSyncEnabled = $0 }
                 ))
                 Text("关闭后只能手动点「全部刷新」抓 feed")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("网络代理") {
+                TextField("代理地址（如 http://127.0.0.1:7890，留空直连）", text: $proxyInput)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        let v = proxyInput.trimmingCharacters(in: .whitespaces)
+                        FeedFetcher.globalProxy = v.isEmpty ? nil : v
+                    }
+                HStack {
+                    Button("保存") {
+                        let v = proxyInput.trimmingCharacters(in: .whitespaces)
+                        FeedFetcher.globalProxy = v.isEmpty ? nil : v
+                    }
+                    Button("清除") {
+                        proxyInput = ""
+                        FeedFetcher.globalProxy = nil
+                    }
+                }
+                Text("所有 feed 抓取 / 全文回填 / YouTube 解析统一走此代理")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

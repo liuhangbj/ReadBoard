@@ -28,27 +28,52 @@ public final class StatsService: @unchecked Sendable {
     private let db = Database.shared
     private init() {}
 
+    /// content 表各维度计数合并成一次全表扫（原 10 条独立 COUNT，每条都全表扫一遍，
+    /// 67k 行 × 10 次扫主线程卡顿明显）。CASE WHEN 聚合只扫一次。
     func overview() -> StatsOverview {
         var s = StatsOverview()
         func int(_ sql: String) -> Int { db.scalarInt(sql) ?? 0 }
 
         s.totalSources = int("SELECT COUNT(*) FROM content_source")
         s.enabledSources = int("SELECT COUNT(*) FROM content_source WHERE enabled = 1")
-        // 有效内容口径统一：全部统计都排除 is_duplicate（列表/阅读/导出都不见重复，
-        // 统计却算进去会虚高）。totalContent = 去重后可见总量；duplicateCount 单列。
-        s.totalContent = int("SELECT COUNT(*) FROM content WHERE is_duplicate = 0")
-        s.unreadCount = int("SELECT COUNT(*) FROM content WHERE read_at IS NULL AND is_archived = 0 AND is_duplicate = 0")
-        s.starredCount = int("SELECT COUNT(*) FROM content WHERE starred = 1 AND is_duplicate = 0")
-        s.archivedCount = int("SELECT COUNT(*) FROM content WHERE is_archived = 1 AND is_duplicate = 0")
-        s.duplicateCount = int("SELECT COUNT(*) FROM content WHERE is_duplicate = 1")
-        s.withFulltext = int("SELECT COUNT(*) FROM content WHERE content_md IS NOT NULL AND content_md != '' AND is_duplicate = 0")
-        s.scored = int("SELECT COUNT(*) FROM content WHERE llm_score IS NOT NULL AND is_duplicate = 0")
-        s.translated = int("SELECT COUNT(*) FROM content WHERE llm_translated_md IS NOT NULL AND llm_translated_md != '' AND is_duplicate = 0")
-        s.summarized = int("SELECT COUNT(*) FROM content WHERE llm_summary IS NOT NULL AND llm_summary != '' AND is_duplicate = 0")
+
+        // 单趟聚合：9 个 content 维度一次扫完
+        if let row = db.queryRows("""
+            SELECT
+              SUM(CASE WHEN is_duplicate = 0 THEN 1 ELSE 0 END) AS total,
+              SUM(CASE WHEN read_at IS NULL AND is_archived = 0 AND is_duplicate = 0 THEN 1 ELSE 0 END) AS unread,
+              SUM(CASE WHEN starred = 1 AND is_duplicate = 0 THEN 1 ELSE 0 END) AS starred,
+              SUM(CASE WHEN is_archived = 1 AND is_duplicate = 0 THEN 1 ELSE 0 END) AS archived,
+              SUM(CASE WHEN is_duplicate = 1 THEN 1 ELSE 0 END) AS dup,
+              SUM(CASE WHEN content_md IS NOT NULL AND content_md != '' AND is_duplicate = 0 THEN 1 ELSE 0 END) AS fulltext,
+              SUM(CASE WHEN llm_score IS NOT NULL AND is_duplicate = 0 THEN 1 ELSE 0 END) AS scored,
+              SUM(CASE WHEN llm_translated_md IS NOT NULL AND llm_translated_md != '' AND is_duplicate = 0 THEN 1 ELSE 0 END) AS translated,
+              SUM(CASE WHEN llm_summary IS NOT NULL AND llm_summary != '' AND is_duplicate = 0 THEN 1 ELSE 0 END) AS summarized
+            FROM content;
+            """).first {
+            func v(_ k: String) -> Int { Int(row[k] ?? "0") ?? 0 }
+            s.totalContent = v("total")
+            s.unreadCount = v("unread")
+            s.starredCount = v("starred")
+            s.archivedCount = v("archived")
+            s.duplicateCount = v("dup")
+            s.withFulltext = v("fulltext")
+            s.scored = v("scored")
+            s.translated = v("translated")
+            s.summarized = v("summarized")
+        }
+
         s.tagCount = int("SELECT COUNT(*) FROM tag")
         s.folderCount = int("SELECT COUNT(*) FROM folder")
-        s.jobTotal = int("SELECT COUNT(*) FROM content_job")
-        s.jobFailed = int("SELECT COUNT(*) FROM content_job WHERE status = 3")
+        // job 两维合并一次扫
+        if let row = db.queryRows("""
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN status = 3 THEN 1 ELSE 0 END) AS failed
+            FROM content_job;
+            """).first {
+            s.jobTotal = Int(row["total"] ?? "0") ?? 0
+            s.jobFailed = Int(row["failed"] ?? "0") ?? 0
+        }
 
         // DB 文件大小
         let path = NSHomeDirectory() + "/readboard/Data/readboard.db"
