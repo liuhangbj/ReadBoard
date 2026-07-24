@@ -406,20 +406,6 @@ public struct ContentView: View {
                         .onChange(of: vm.includeUnscored) { _, _ in vm.reload() }
                 }
 
-                // 标签筛选
-                Picker(selection: $vm.selectedTag) {
-                    Text("标签: 全部").tag(nil as Tag?)
-                    ForEach(vm.tags) { t in
-                        Text("🏷 \(t.name)").tag(t as Tag?)
-                    }
-                } label: { EmptyView() }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(maxWidth: 110)
-                .font(.caption)
-                .controlSize(.small)
-                .onChange(of: vm.selectedTag) { _, _ in vm.reload() }
-
                 Spacer()
 
                 // 未读/全部/星标 三选一单选（分段控件）
@@ -806,9 +792,6 @@ public struct ReadingView: View {
                     .font(.system(size: metaFontSize))
                     .foregroundStyle(p.textSecondary)
 
-                    // ── 标签行 ──
-                    TagEditorView(contentId: item.id)
-
                     // ── LLM 操作条 ──
                     HStack(spacing: 10) {
                         if isMediaItem, item.llmTranslatedMd == nil, policy.autoTranscribe {
@@ -1159,48 +1142,6 @@ public struct ReadingView: View {
 
 extension Notification.Name {
     static let contentUpdated = Notification.Name("contentUpdated")
-}
-
-// MARK: - 标签编辑（阅读区）
-// 显示当前内容标签 + 输入新标签(回车添加) + 点标签移除
-
-public struct TagEditorView: View {
-    let contentId: Int64
-    @State private var tags: [Tag] = []
-    @State private var input = ""
-
-    public var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "tag").foregroundStyle(.secondary).font(.caption)
-            ForEach(tags) { tag in
-                Text(tag.name)
-                    .font(.caption)
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(.blue.opacity(0.15)).foregroundStyle(.blue)
-                    .clipShape(Capsule())
-                    .onTapGesture {
-                        TagService.shared.untag(contentId: contentId, tagId: tag.id)
-                        reload()
-                    }
-                    .help("点击移除")
-            }
-            TextField("加标签", text: $input)
-                .textFieldStyle(.plain)
-                .font(.caption)
-                .frame(minWidth: 60)
-                .onSubmit {
-                    let t = input.trimmingCharacters(in: .whitespaces)
-                    if !t.isEmpty {
-                        TagService.shared.tag(contentId: contentId, tagName: t)
-                        input = ""
-                        reload()
-                    }
-                }
-        }
-        .onAppear { reload() }
-    }
-
-    private func reload() { tags = TagService.shared.tagsFor(contentId: contentId) }
 }
 
 // MARK: - 分享 / 后处理（阅读区）

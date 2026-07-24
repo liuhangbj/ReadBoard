@@ -42,8 +42,6 @@ public final class ContentViewModel: ObservableObject {
             }
         }
     }
-    @Published var selectedTag: Tag? = nil         // 标签筛选 nil=不限
-    @Published var tags: [Tag] = []                // 全部标签（筛选下拉）
     @Published var totalCount: Int = 0
     @Published var showTranslated: Bool = false    // 阅读区显示原文/翻译
     @Published var searchFocused: Bool = false     // 搜索框焦点（快捷键避让）
@@ -103,7 +101,6 @@ public final class ContentViewModel: ObservableObject {
     func loadAll() {
         totalCount = db.totalCount()
         sidebarTree = db.fetchSidebarTree()
-        tags = TagService.shared.allTags()
         reload()
     }
 
@@ -122,7 +119,6 @@ public final class ContentViewModel: ObservableObject {
                                     keyword: kw.isEmpty ? nil : kw,
                                     starredOnly: readFilter == .starred,
                                     archived: showArchived,
-                                    tagId: selectedTag?.id,
                                     processedFilters: processedFilters, sortOrder: sortOrder.rawValue,
                                     limit: Self.pageSize, offset: 0)
         items = page
@@ -144,7 +140,6 @@ public final class ContentViewModel: ObservableObject {
                                     keyword: kw.isEmpty ? nil : kw,
                                     starredOnly: readFilter == .starred,
                                     archived: showArchived,
-                                    tagId: selectedTag?.id,
                                     processedFilters: processedFilters, sortOrder: sortOrder.rawValue,
                                     limit: Self.pageSize,
                                     offset: items.count)

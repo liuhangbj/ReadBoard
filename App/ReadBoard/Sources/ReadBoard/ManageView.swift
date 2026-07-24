@@ -1,7 +1,7 @@
 import SwiftUI
 
 // MARK: - 管理面板
-// 统一承载：统计概览 / 源健康 / 失败重试 / 标签管理 / 过滤规则
+// 统一承载：统计概览 / 源健康 / 失败重试 / 过滤规则
 
 public struct ManageView: View {
     @State private var tab = 0
@@ -12,7 +12,6 @@ public struct ManageView: View {
                 Text("统计").tag(0)
                 Text("源健康").tag(1)
                 Text("失败重试").tag(2)
-                Text("标签").tag(3)
                 Text("过滤规则").tag(4)
             }
             .pickerStyle(.segmented)
@@ -23,7 +22,6 @@ public struct ManageView: View {
                 case 0: StatsPane()
                 case 1: SourceHealthPane()
                 case 2: FailedJobPane()
-                case 3: TagManagePane()
                 default: FilterRulePane()
                 }
             }
