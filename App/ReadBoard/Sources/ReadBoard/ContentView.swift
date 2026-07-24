@@ -881,10 +881,12 @@ public struct ReadingView: View {
                     }
 
                     // 正文：有译文时双语逐段对照（Follo 核心交互），否则单语 markdown
-                    if bilingualMode, let translated = item.llmTranslatedMd, !translated.isEmpty,
-                       let original = item.contentMd, !original.isEmpty {
+                    // 双语原文用 bodyText（contentMd ?? excerpt）——绝大多数文章 content_md
+                    // 是空的（正文在 content_html/excerpt，全文未抓），只看 contentMd 会把
+                    // 几乎所有译文文章挡在双语门外，掉到单语只显示原文。
+                    if bilingualMode, let translated = item.llmTranslatedMd, !translated.isEmpty {
                         BilingualBodyView(
-                            original: original,
+                            original: bodyText,
                             translated: translated,
                             theme: theme,
                             mode: themeMode,
