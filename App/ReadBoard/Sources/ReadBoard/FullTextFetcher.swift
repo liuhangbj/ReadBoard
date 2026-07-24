@@ -42,6 +42,13 @@ public final class FullTextFetcher: @unchecked Sendable {
 
     /// 探测一个 feed 源最合适抓取方式。取前 2 篇文章试验。
     /// 返回探测到的 mode（不持久化，由调用方写入 config）。
+    ///
+    /// 逻辑（与你的理解一致）：
+    ///   1. feed 自带全文（content_html 够长）→ feedFull，直接 html 转 md
+    ///   2. 否则调工具抓原页——clip_core 内部已按域名自动路由
+    ///      （微信/jiqizhixin 走 CDP 浏览器，虎嗅走预处理，其余 defuddle 直连），
+    ///      抓到 → 按域名记 defuddle 或 cdp（语义标记，实际路由 clip_core 定）
+    ///   3. 都抓不到 → summary 兜底（留 feed 摘要）
     func probeMode(feedUrl: String) async -> FetchMode {
         guard let feed = try? await FeedFetcher.fetch(urlString: feedUrl) else {
             return .summary
@@ -53,21 +60,15 @@ public final class FullTextFetcher: @unchecked Sendable {
         let feedLongEnough = samples.contains { $0.html.count >= fullTextMinChars }
         if feedLongEnough { return .feedFull }
 
-        // 第 2 级：defuddle 直连
+        // 第 2 级：抓原页（clip_core 按域名自动路由 defuddle/CDP/预处理）。
+        // 能抓到就按域名标记 mode——cdp 域名（微信/jiqizhixin）记 .cdp，其余记 .defuddle。
         for entry in samples where !entry.url.isEmpty {
             if let md = runCLI(mode: "url", input: entry.url), md.count >= fullTextMinChars {
-                return .defuddle
+                return Self.needsBrowser(entry.url) ? .cdp : .defuddle
             }
         }
 
-        // 第 3 级：CDP 浏览器渲染（只对已知需要浏览器的域名尝试, 避免无差别拉起 Chrome）
-        for entry in samples where !entry.url.isEmpty {
-            if Self.needsBrowser(entry.url),
-               let md = runCLI(mode: "url", input: entry.url), md.count >= fullTextMinChars {
-                return .cdp
-            }
-        }
-
+        // 第 3 级：兜底——feed 摘要
         return .summary
     }
 
@@ -85,10 +86,11 @@ public final class FullTextFetcher: @unchecked Sendable {
     /// 返回是否成功拿到全文。
     @discardableResult
     func fetchAndStore(contentId: Int64, url: String, feedHtml: String?, mode: FetchMode) async -> Bool {
-        // media 类（播客/视频）没有正文网页, 直接跳过
         switch mode {
         case .feedFull:
-            guard let html = feedHtml, html.count >= 40 else {
+            // feed 自带全文：html 转 md。阈值与 probeMode 对齐（800）——
+            // 低于它的"feed 全文"其实是摘要，转出来没价值。
+            guard let html = feedHtml, html.count >= fullTextMinChars else {
                 markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
                 return false
             }
@@ -96,7 +98,7 @@ public final class FullTextFetcher: @unchecked Sendable {
                 markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
                 return false
             }
-            storeMd(contentId: contentId, md: md, engine: mode.rawValue, direct: true)
+            storeMd(contentId: contentId, md: md, engine: mode.rawValue)
             return true
 
         case .defuddle, .cdp:
@@ -104,23 +106,43 @@ public final class FullTextFetcher: @unchecked Sendable {
                 markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
                 return false
             }
-            storeMd(contentId: contentId, md: md, engine: mode.rawValue, direct: true)
+            storeMd(contentId: contentId, md: md, engine: mode.rawValue)
             return true
 
         case .summary:
-            // 抓不到全文: 保留 feed 摘要, fetch_status=4(直入)
+            // 抓不到全文：保留 feed 摘要。fetch_status=4（直入）。
+            // 兜底：excerpt 为空时把 content_html 剥标签填上——阅读器/归档都用 excerpt，
+            // 空 excerpt 显示"（无内容）"（机器之心修解析器前就这状态）。
             markFetched(contentId: contentId, ok: true, engine: mode.rawValue)
+            backfillExcerptIfEmpty(contentId: contentId, feedHtml: feedHtml)
             return false
         }
     }
 
     // MARK: - 私有
 
-    private func storeMd(contentId: Int64, md: String, engine: String, direct: Bool) {
+    private func storeMd(contentId: Int64, md: String, engine: String) {
         db.execute(
             "UPDATE content SET content_md = ?, fetch_status = 2, fetch_engine = ? WHERE id = ?",
             params: [md, engine, contentId]
         )
+    }
+
+    /// summary 模式兜底：excerpt 空时从 content_html 剥标签生成
+    private func backfillExcerptIfEmpty(contentId: Int64, feedHtml: String?) {
+        let hasExcerpt = (db.scalarInt(
+            "SELECT LENGTH(COALESCE(excerpt,'')) FROM content WHERE id = ?",
+            params: [contentId]) ?? 0) > 0
+        guard !hasExcerpt, let html = feedHtml, !html.isEmpty else { return }
+        // 剥标签 + 压空白，取前 300 字
+        var text = html.replacingOccurrences(of: "<[^>]+>", with: " ",
+                                             options: .regularExpression)
+        text = text.replacingOccurrences(of: "\\s+", with: " ",
+                                         options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return }
+        db.execute("UPDATE content SET excerpt = ? WHERE id = ?",
+                   params: [String(text.prefix(300)), contentId])
     }
 
     private func markFetched(contentId: Int64, ok: Bool, engine: String) {
@@ -137,9 +159,20 @@ public final class FullTextFetcher: @unchecked Sendable {
         runProcess(args: [cliPath, mode, input], stdinData: nil)
     }
 
-    /// 调 node CLI 的 html 模式（stdin 喂 HTML）
+    /// 调 node CLI 的 html 模式（stdin 喂 HTML）。
+    /// content_html 常是正文片段（微信/wechat2rss 只给正文 <p> 序列，无 <html> 包裹），
+    /// defuddle 对裸片段提取失败（"No content could be extracted"）。
+    /// 包一层文档壳再喂——defuddle 需要完整 document 结构才能跑 Readability。
     private func runCLI(stdinHTML html: String) -> String? {
-        runProcess(args: [cliPath, "html"], stdinData: html.data(using: .utf8))
+        let wrapped: String
+        let lower = html.lowercased()
+        if lower.contains("<html") || lower.contains("<!doctype") {
+            wrapped = html   // 已是完整文档
+        } else {
+            wrapped = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>"
+                    + html + "</body></html>"
+        }
+        return runProcess(args: [cliPath, "html"], stdinData: wrapped.data(using: .utf8))
     }
 
     private func runProcess(args: [String], stdinData: Data?) -> String? {
