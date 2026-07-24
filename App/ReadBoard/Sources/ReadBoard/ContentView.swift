@@ -56,36 +56,64 @@ public struct ContentView: View {
         guard let item = vm.selectedItem, let url = URL(string: item.url), !item.url.isEmpty else { return }
         NSWorkspace.shared.open(url)
     }
-    // MARK: 左栏
+    // MARK: 左栏（文件夹→源 两级树，订阅源视角）
     private var sourceSidebar: some View {
         List(selection: Binding(
-            get: { vm.selectedSource },
-            set: { vm.selectSource($0) }
+            get: { vm.selectedFilter },
+            set: { vm.selectFilter($0) }
         )) {
-            Section("来源") {
-                HStack {
-                    Text("全部")
-                    Spacer()
-                    Text("\(vm.totalCount)")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
-                }
-                .tag(nil as String?)
-                ForEach(vm.sourceGroups) { g in
-                    HStack {
-                        Text(iconFor(g.kind))
-                        Text(g.name)
-                            .lineLimit(1)
-                        Spacer()
-                        Text("\(g.count)")
-                            .foregroundStyle(.secondary)
-                            .font(.caption)
+            // 全部
+            HStack {
+                Image(systemName: "tray.full")
+                    .foregroundStyle(.secondary)
+                Text("全部")
+                Spacer()
+                Text("\(vm.totalCount)")
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+            }
+            .tag(nil as String?)
+
+            // 文件夹（可展开）→ 源
+            ForEach(vm.sidebarTree) { node in
+                if node.isFolder {
+                    DisclosureGroup {
+                        ForEach(node.children ?? []) { child in
+                            sidebarRow(child)
+                                .tag(child.filterKey as String?)
+                        }
+                    } label: {
+                        HStack {
+                            Image(systemName: "folder.fill")
+                                .foregroundStyle(.secondary)
+                            Text(node.name)
+                            Spacer()
+                            Text("\(node.count)")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                        }
                     }
-                    .tag(g.kind as String?)
+                } else {
+                    sidebarRow(node)
+                        .tag(node.filterKey as String?)
                 }
             }
         }
         .listStyle(.sidebar)
+    }
+
+    private func sidebarRow(_ node: SidebarNode) -> some View {
+        HStack {
+            if node.isFolder {
+                Image(systemName: "folder").foregroundStyle(.secondary)
+            }
+            Text(node.name)
+                .lineLimit(1)
+            Spacer()
+            Text("\(node.count)")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
     }
 
     // MARK: 中栏
@@ -219,18 +247,9 @@ public struct ContentView: View {
                 ContentUnavailableView(
                     "选择一篇文章",
                     systemImage: "doc.text",
-                    description: Text("共 \(vm.totalCount) 条内容 · \(vm.sourceGroups.count) 个来源")
+                    description: Text("共 \(vm.totalCount) 条内容")
                 )
             }
-        }
-    }
-
-    private func iconFor(_ kind: String) -> String {
-        switch kind {
-        case "podcast": return "🎙"
-        case "youtube": return "▶️"
-        case "wechat":  return "💬"
-        default:        return "📰"
         }
     }
 }

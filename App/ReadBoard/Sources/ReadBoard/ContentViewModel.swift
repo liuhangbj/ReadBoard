@@ -3,9 +3,10 @@ import SwiftUI
 
 @MainActor
 public final class ContentViewModel: ObservableObject {
-    @Published var sourceGroups: [SourceGroup] = []
+    @Published var sidebarTree: [SidebarNode] = []   // 左栏树：文件夹→源
     @Published var items: [ContentItem] = []
-    @Published var selectedSource: String? = nil   // nil = 全部
+    /// 左栏选中的过滤键：nil=全部，"source_id=N"=单源，"folder_id=N"=文件夹
+    @Published var selectedFilter: String? = nil
     @Published var selectedItem: ContentItem? = nil
     @Published var minScore: Int = 0               // 评分筛选 0=不限
     @Published var includeUnscored: Bool = false   // 评分筛选时是否含未评分
@@ -18,6 +19,16 @@ public final class ContentViewModel: ObservableObject {
     @Published var totalCount: Int = 0
     @Published var showTranslated: Bool = false    // 阅读区显示原文/翻译
     @Published var searchFocused: Bool = false     // 搜索框焦点（快捷键避让）
+
+    /// 从 selectedFilter 解析 sourceId / folderId
+    private var selectedSourceId: Int64? {
+        guard let f = selectedFilter, f.hasPrefix("source_id=") else { return nil }
+        return Int64(f.replacingOccurrences(of: "source_id=", with: ""))
+    }
+    private var selectedFolderId: Int64? {
+        guard let f = selectedFilter, f.hasPrefix("folder_id=") else { return nil }
+        return Int64(f.replacingOccurrences(of: "folder_id=", with: ""))
+    }
 
     private let db = Database.shared
     /// 搜索防抖：连续输入时取消上一次未执行的 reload
@@ -63,7 +74,7 @@ public final class ContentViewModel: ObservableObject {
 
     func loadAll() {
         totalCount = db.totalCount()
-        sourceGroups = db.fetchSourceGroups()
+        sidebarTree = db.fetchSidebarTree()
         tags = TagService.shared.allTags()
         reload()
     }
@@ -76,7 +87,8 @@ public final class ContentViewModel: ObservableObject {
     func reload() {
         let minS: Int? = minScore > 0 ? minScore : nil
         let kw = keyword.trimmingCharacters(in: .whitespaces)
-        let page = db.fetchContents(source: selectedSource, minScore: minS,
+        let page = db.fetchContents(sourceId: selectedSourceId, folderId: selectedFolderId,
+                                    minScore: minS,
                                     includeUnscored: includeUnscored,
                                     unreadOnly: unreadOnly, keyword: kw.isEmpty ? nil : kw,
                                     starredOnly: starredOnly, archived: showArchived,
@@ -93,7 +105,8 @@ public final class ContentViewModel: ObservableObject {
         guard hasMore else { return }
         let minS: Int? = minScore > 0 ? minScore : nil
         let kw = keyword.trimmingCharacters(in: .whitespaces)
-        let page = db.fetchContents(source: selectedSource, minScore: minS,
+        let page = db.fetchContents(sourceId: selectedSourceId, folderId: selectedFolderId,
+                                    minScore: minS,
                                     includeUnscored: includeUnscored,
                                     unreadOnly: unreadOnly, keyword: kw.isEmpty ? nil : kw,
                                     starredOnly: starredOnly, archived: showArchived,
@@ -105,8 +118,9 @@ public final class ContentViewModel: ObservableObject {
         items.append(contentsOf: page.filter { !existing.contains($0.id) })
     }
 
-    func selectSource(_ source: String?) {
-        selectedSource = source
+    /// 左栏选中：nil=全部，"source_id=N" / "folder_id=N"
+    func selectFilter(_ filter: String?) {
+        selectedFilter = filter
         reload()
     }
 
@@ -184,7 +198,8 @@ public final class ContentViewModel: ObservableObject {
     func markAllRead() -> Int {
         let minS: Int? = minScore > 0 ? minScore : nil
         let kw = keyword.trimmingCharacters(in: .whitespaces)
-        let n = db.markAllRead(source: selectedSource, minScore: minS, keyword: kw.isEmpty ? nil : kw)
+        let n = db.markAllRead(sourceId: selectedSourceId, folderId: selectedFolderId,
+                               minScore: minS, keyword: kw.isEmpty ? nil : kw)
         reload()
         return n
     }

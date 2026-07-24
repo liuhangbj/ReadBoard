@@ -64,9 +64,19 @@ public struct ContentItem: Identifiable, Hashable {
 
 public struct SourceGroup: Identifiable, Hashable {
     public var id: String { name }
-    let name: String      // source 或 feed 显示名
-    let kind: String      // rss / podcast / youtube / wechat
+    let name: String      // 显示名
+    let kind: String      // 过滤用：source_id 或 folder_id（带前缀）
     let count: Int
+}
+
+/// 左栏树节点：文件夹（含子源）或独立源
+public struct SidebarNode: Identifiable, Hashable {
+    public let id: String
+    let name: String
+    let count: Int
+    let isFolder: Bool
+    let filterKey: String?       // 点击过滤用：source_id=N / folder_id=N / nil=全部
+    var children: [SidebarNode]?
 }
 
 // MARK: - SQLite 只读访问
@@ -389,7 +399,7 @@ public final class Database: @unchecked Sendable {
 
     // MARK: 查询
 
-    /// 各 source 分组及数量（用于左侧源列表）
+    /// 各 source 分组及数量（旧版按 ctype 分组，已废弃——左栏改用 fetchSidebarTree）
     func fetchSourceGroups() -> [SourceGroup] {
         guard open() else { return [] }
         let sql = """
@@ -411,9 +421,66 @@ public final class Database: @unchecked Sendable {
         return groups
     }
 
+    /// 左栏树：文件夹（含子源）→ 无文件夹的独立源。count = 各源/文件夹的有效内容数。
+    /// 这是订阅源视角的组织方式（你的文件夹结构），不是按内容类型分。
+    func fetchSidebarTree() -> [SidebarNode] {
+        guard open() else { return [] }
+        // 文件夹 + 其下源 + 内容数
+        let folderRows = queryRows("""
+            SELECT f.id AS fid, f.name AS fname, s.id AS sid, s.name AS sname,
+                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0) AS n
+            FROM folder f
+            JOIN content_source s ON s.folder_id = f.id AND s.enabled = 1
+            ORDER BY f.name, n DESC;
+            """)
+        // 无文件夹的独立源
+        let orphanRows = queryRows("""
+            SELECT s.id AS sid, s.name AS sname,
+                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0) AS n
+            FROM content_source s
+            WHERE s.folder_id IS NULL AND s.enabled = 1
+            ORDER BY n DESC;
+            """)
+
+        var tree: [SidebarNode] = []
+        // 按文件夹聚合
+        var folderMap: [Int64: (name: String, sources: [SidebarNode])] = [:]
+        var folderOrder: [Int64] = []
+        for r in folderRows {
+            guard let fidStr = r["fid"], let fid = Int64(fidStr) else { continue }
+            let fname = r["fname"] ?? "未命名"
+            let sname = r["sname"] ?? "未命名源"
+            let n = Int(r["n"] ?? "0") ?? 0
+            let sidStr = r["sid"] ?? ""
+            let node = SidebarNode(id: "s\(sidStr)", name: sname, count: n,
+                                   isFolder: false, filterKey: "source_id=\(sidStr)", children: nil)
+            if folderMap[fid] == nil {
+                folderMap[fid] = (fname, [])
+                folderOrder.append(fid)
+            }
+            folderMap[fid]?.sources.append(node)
+        }
+        for fid in folderOrder {
+            guard let (fname, sources) = folderMap[fid] else { continue }
+            let total = sources.reduce(0) { $0 + $1.count }
+            tree.append(SidebarNode(id: "f\(fid)", name: fname, count: total,
+                                    isFolder: true, filterKey: "folder_id=\(fid)", children: sources))
+        }
+        // 独立源（无文件夹）
+        for r in orphanRows {
+            let sname = r["sname"] ?? "未命名源"
+            let n = Int(r["n"] ?? "0") ?? 0
+            let sidStr = r["sid"] ?? ""
+            tree.append(SidebarNode(id: "s\(sidStr)", name: sname, count: n,
+                                    isFolder: false, filterKey: "source_id=\(sidStr)", children: nil))
+        }
+        return tree
+    }
+
     /// 拉取内容列表（轻列，不取正文 content_md/llm_translated_md/meta —— 正文点开再按 id 查）
-    /// 可按 source 过滤、评分筛选、未读过滤、关键词搜索(FTS5)、星标/归档筛选
-    func fetchContents(source: String? = nil, minScore: Int? = nil, includeUnscored: Bool = false,
+    /// 可按 source/stype、sourceId、folderId 过滤 + 评分/未读/星标/归档/标签/关键词筛选
+    func fetchContents(source: String? = nil, sourceId: Int64? = nil, folderId: Int64? = nil,
+                       minScore: Int? = nil, includeUnscored: Bool = false,
                        unreadOnly: Bool = false,
                        keyword: String? = nil, starredOnly: Bool = false,
                        archived: Bool = false, tagId: Int64? = nil, limit: Int = 200,
@@ -438,6 +505,10 @@ public final class Database: @unchecked Sendable {
         var conds: [String] = [useFTS ? "c.is_archived = \(archived ? 1 : 0)" : "is_archived = \(archived ? 1 : 0)"]
         let col = useFTS ? "c." : ""
         if source != nil { conds.append("\(col)source = ?") }
+        if sourceId != nil { conds.append("\(col)source_id = ?") }
+        if folderId != nil {
+            conds.append("\(col)source_id IN (SELECT id FROM content_source WHERE folder_id = ?)")
+        }
         if minScore != nil {
             // 含未评分：未评分（NULL）也纳入，避免筛选把未评分文章藏掉
             conds.append(includeUnscored ? "(\(col)llm_score >= ? OR \(col)llm_score IS NULL)" : "\(col)llm_score >= ?")
@@ -468,6 +539,8 @@ public final class Database: @unchecked Sendable {
                 sqlite3_bind_text(stmt, idx, s, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)); idx += 1
             }
             if let s = source { binder(s) }
+            if let sid = sourceId { sqlite3_bind_int64(stmt, idx, sid); idx += 1 }
+            if let fid = folderId { sqlite3_bind_int64(stmt, idx, fid); idx += 1 }
             if let m = minScore { sqlite3_bind_int64(stmt, idx, Int64(m)); idx += 1 }
             if let t = tagId { sqlite3_bind_int64(stmt, idx, t); idx += 1 }
             if useFTS {
@@ -587,10 +660,13 @@ public final class Database: @unchecked Sendable {
     /// 批量标已读（按条件：source/当前筛选）。返回影响条数。
     /// 关键词语义与 fetchContents 对齐：FTS 可用走 MATCH（与列表口径一致），否则 LIKE 回退。
     @discardableResult
-    func markAllRead(source: String? = nil, minScore: Int? = nil, keyword: String? = nil) -> Int {
+    func markAllRead(source: String? = nil, sourceId: Int64? = nil, folderId: Int64? = nil,
+                     minScore: Int? = nil, keyword: String? = nil) -> Int {
         var sql = "UPDATE content SET read_at = datetime('now') WHERE read_at IS NULL AND is_archived = 0"
         var conds: [String] = []
         if source != nil { conds.append("source = ?") }
+        if sourceId != nil { conds.append("source_id = ?") }
+        if folderId != nil { conds.append("source_id IN (SELECT id FROM content_source WHERE folder_id = ?)") }
         if minScore != nil { conds.append("llm_score >= ?") }
         let useFTS = (keyword?.isEmpty == false) && ftsAvailable()
         if useFTS {
@@ -599,13 +675,17 @@ public final class Database: @unchecked Sendable {
             conds.append("(title LIKE ? OR excerpt LIKE ? OR content_md LIKE ?)")
         }
         if !conds.isEmpty { sql += " AND " + conds.joined(separator: " AND ") }
-        execute(sql, params: buildMarkParams(source: source, minScore: minScore, keyword: keyword, useFTS: useFTS))
+        execute(sql, params: buildMarkParams(source: source, sourceId: sourceId, folderId: folderId,
+                                             minScore: minScore, keyword: keyword, useFTS: useFTS))
         return writeChanges()
     }
 
-    private func buildMarkParams(source: String?, minScore: Int?, keyword: String?, useFTS: Bool) -> [Any?] {
+    private func buildMarkParams(source: String?, sourceId: Int64?, folderId: Int64?,
+                                 minScore: Int?, keyword: String?, useFTS: Bool) -> [Any?] {
         var params: [Any?] = []
         if let s = source { params.append(s) }
+        if let sid = sourceId { params.append(Int(sid)) }
+        if let fid = folderId { params.append(Int(fid)) }
         if let m = minScore { params.append(m) }
         if useFTS, let kw = keyword {
             params.append(ftsQuery(kw))
