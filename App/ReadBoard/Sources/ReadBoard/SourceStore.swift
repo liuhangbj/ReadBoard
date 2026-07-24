@@ -113,6 +113,10 @@ public final class SourceStore: ObservableObject {
     /// 自动调度走 manual=false：只抓到期的源（按各自抓取间隔）。
     func startAutoSync() {
         guard autoSyncEnabled, syncTimer == nil else { return }
+        // 关键：sources 数组初始为空（只在 reload()/syncAll 末尾填充）。
+        // 启动时若不调 reload()，syncAll 遍历空 sources → 一个源都不抓（实测重启 0 抓取）。
+        // 先 reload 填充，再启动调度。
+        reload()
         Task { await syncAll(manual: false) }
         syncTimer = Timer.scheduledTimer(withTimeInterval: syncInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.syncAll(manual: false) }

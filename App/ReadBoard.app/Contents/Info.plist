@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>ReadBoard</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.liuhangbj.readboard</string>
+    <key>CFBundleName</key>
+    <string>ReadBoard</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <!-- RSS 阅读器要抓各种源的 feed，大量是明文 HTTP（本地 NAS wechat2rss、
+             自建服务、部分公开源），macOS 默认 ATS 要求 HTTPS 会全部拦截。
+             放开任意 HTTP——阅读器只读公开 feed，不涉及敏感传输。 -->
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+</dict>
+</plist>
