@@ -28,12 +28,13 @@ public struct ContentView: View {
         .overlay(alignment: .bottom) {
             if let toast = vm.toastMessage {
                 Text(toast)
-                    .font(.caption)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.rbText)
                     .padding(.horizontal, 14).padding(.vertical, 8)
                     .background(.regularMaterial)
                     .clipShape(Capsule())
-                    .shadow(radius: 4)
-                    .padding(.bottom, 16)
+                    .rbFloatingShadow()
+                    .padding(.bottom, 20)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -107,8 +108,8 @@ public struct ContentView: View {
 
     private var sourceSidebar: some View {
         VStack(spacing: 0) {
-            // 顶部工具条：标题 + 添加文件夹 / 添加源
-            HStack(spacing: 6) {
+            // 顶部眉题条：小标题 + 添加文件夹 / 添加源
+            HStack(spacing: 4) {
                 SectionLabel(text: "订阅源")
                 Spacer()
                 Button { showAddFolder = true } label: {
@@ -122,8 +123,8 @@ public struct ContentView: View {
                 .buttonStyle(.quiet)
                 .help("添加订阅源")
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
 
             Hairline()
 
@@ -171,7 +172,7 @@ public struct ContentView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
         }
-        .background(Color.rbBgSidebar)   // 左栏略灰分出层次（极简留白）
+        .background(Color.rbBgSidebar)   // 左栏略灰分出层次（纸墨留白）
         .sheet(isPresented: $showAddSource) {
             AddSourceSheet(store: sourceStore)
                 .onDisappear { vm.loadAll() }
@@ -262,14 +263,14 @@ public struct ContentView: View {
                 Image(systemName: icon)
                     .font(.system(size: 12))
                 Text(label)
-                    .font(.caption)
+                    .font(.system(size: 11, weight: .medium))
             }
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.rbText2)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 5)
+            .padding(.vertical, 6)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.rowHover)
         .help("打开「\(label)」页面")
     }
 
@@ -305,12 +306,11 @@ public struct ContentView: View {
             .contentShape(Rectangle())
             .rbSelection(active)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.rowHover)
     }
 
     /// 左栏行（点击过滤 + 未读角标 + 右键设置菜单）。
     /// Button 而非 List.tag——List selection 对 DisclosureGroup/自定义行不可靠。
-    /// 左栏行（点击过滤 + 未读角标 + 右键设置菜单）。
     /// showChevronSlot：是否预留 chevron 占位宽度（子源/无 chevron 的源行用来对齐有 chevron 的文件夹行）
     private func sidebarRow(_ node: SidebarNode, indent: Int, showChevronSlot: Bool) -> some View {
         let scale = uiFontScale
@@ -351,7 +351,7 @@ public struct ContentView: View {
             .contentShape(Rectangle())
             .rbSelection(selected)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.rowHover)
         .contextMenu { sidebarContextMenu(node) }
     }
 
@@ -550,32 +550,41 @@ public struct ContentView: View {
 
     // MARK: 中栏
 
-    /// 处理状态平铺多选按钮（激活高亮，点击切换加入/移出多选集）
-    private func processedToggle(key: String, label: String) -> some View {
-        let active = vm.processedFilters.contains(key)
-        return Button {
-            if active { vm.processedFilters.remove(key) }
-            else { vm.processedFilters.insert(key) }
-            vm.reload()
-        } label: {
+    /// 筛选 chip（纸墨胶囊：激活墨蓝浅底+描边，未激活 surface+hairline）
+    private func filterChip(label: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
             Text(label)
-                .font(.caption)
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                // 选中：浅墨蓝底+墨蓝字（不再实心反白）；未选：surface 底
-                .background(active ? Color.rbAccent.opacity(0.12) : Color.rbSurface)
+                .font(.system(size: 11))
+                .padding(.horizontal, 8).padding(.vertical, 3.5)
+                .background(active ? Color.rbAccent.opacity(0.10) : Color.rbSurface)
                 .foregroundStyle(active ? Color.rbAccent : Color.rbText2)
                 .clipShape(RoundedRectangle(cornerRadius: RB.Radius.md))
+                .overlay(
+                    RoundedRectangle(cornerRadius: RB.Radius.md)
+                        .strokeBorder(active ? Color.rbAccent.opacity(0.30) : Color.rbHairline,
+                                      lineWidth: RB.Line.hair)
+                )
         }
         .buttonStyle(.plain)
     }
 
+    /// 处理状态平铺多选按钮（激活高亮，点击切换加入/移出多选集）
+    private func processedToggle(key: String, label: String) -> some View {
+        let active = vm.processedFilters.contains(key)
+        return filterChip(label: label, active: active) {
+            if active { vm.processedFilters.remove(key) }
+            else { vm.processedFilters.insert(key) }
+            vm.reload()
+        }
+    }
+
     private var articleList: some View {
         VStack(spacing: 0) {
-            // 搜索框
+            // 搜索框（胶囊输入：surface 底 + hairline 描边，聚焦转墨蓝）
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                    .font(.caption)
+                    .foregroundStyle(Color.rbText3)
+                    .font(.system(size: 12))
                 TextField("搜索标题 / 正文", text: $vm.keyword)
                     .textFieldStyle(.plain)
                     .font(.callout)
@@ -584,69 +593,89 @@ public struct ContentView: View {
                     .onChange(of: vm.keyword) { _, _ in vm.reloadDebounced() }
                 if !vm.keyword.isEmpty {
                     Button { vm.keyword = "" } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(Color.rbText3)
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color.rbSurface)
+            .rbFieldBackground(focused: searchFocused)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
 
             // 筛选条行1：评分(输入框) + 标签 + 未读/全部/星标(单选) + 归档
             HStack(spacing: 8) {
                 Text("评分 ≥")
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(Color.rbText3)
                 TextField("0", value: $vm.minScore, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 48)
-                    .font(.caption)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11, design: .monospaced))
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 30)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3.5)
+                    .background(
+                        RoundedRectangle(cornerRadius: RB.Radius.md)
+                            .fill(Color.rbSurface)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: RB.Radius.md)
+                            .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
+                    )
                     .onSubmit { vm.reload() }
                     .onChange(of: vm.minScore) { _, _ in vm.reloadDebounced() }
                 if vm.minScore > 0 {
-                    Toggle("含未评分", isOn: $vm.includeUnscored)
-                        .toggleStyle(.checkbox)
-                        .font(.caption)
-                        .controlSize(.small)
-                        .onChange(of: vm.includeUnscored) { _, _ in vm.reload() }
+                    filterChip(label: "含未评分", active: vm.includeUnscored) {
+                        vm.includeUnscored.toggle()
+                        vm.reload()
+                    }
                 }
 
                 Spacer()
 
-                // 全部/未读/星标/归档 四选一单选（分段控件，墨蓝 tint）
-                Picker("", selection: $vm.readFilter) {
-                    ForEach(ContentViewModel.ReadFilter.allCases, id: \.self) { f in
-                        Text(f.display).tag(f)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 240)
-                .controlSize(.small)
-                .tint(Color.rbAccent)
+                // 全部/未读/星标/归档 四选一单选（纸墨分段，替代原生 segmented）
+                RBSegmented(
+                    items: ContentViewModel.ReadFilter.allCases.map { ($0, $0.display) },
+                    selection: $vm.readFilter
+                )
                 .onChange(of: vm.readFilter) { _, _ in vm.reload() }
 
-                // 排序选择（最新/最早/评分）
-                Picker(selection: $vm.sortOrder) {
+                // 排序选择（最新/最早/评分；胶囊 Menu，替代原生弹出按钮）
+                Menu {
                     ForEach(ContentViewModel.SortOrder.allCases) { o in
-                        Text(o.display).tag(o)
+                        Button { vm.sortOrder = o } label: {
+                            Label(o.display, systemImage: vm.sortOrder == o ? "checkmark" : "")
+                        }
                     }
-                } label: { EmptyView() }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(maxWidth: 80)
-                .font(.caption)
-                .controlSize(.small)
-                .tint(Color.rbAccent)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.rbText3)
+                        Text(vm.sortOrder.display)
+                            .font(.system(size: 11))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundStyle(Color.rbText3)
+                    }
+                    .foregroundStyle(Color.rbText2)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4.5)
+                    .background(Capsule().fill(Color.rbSurface))
+                    .overlay(
+                        Capsule().strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
+                    )
+                }
+                .menuStyle(.borderlessButton)
                 .onChange(of: vm.sortOrder) { _, _ in vm.reload() }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 7)
+            .padding(.vertical, 8)
 
             // 筛选条行2：处理状态平铺多选按钮（打分/摘要/翻译/转录，可多选）
             HStack(spacing: 6) {
                 Text("处理")
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(Color.rbText3)
                 processedToggle(key: "score", label: "已打分")
                 processedToggle(key: "summary", label: "已摘要")
@@ -655,7 +684,7 @@ public struct ContentView: View {
                 Spacer()
             }
             .padding(.horizontal, 12)
-            .padding(.bottom, 7)
+            .padding(.bottom, 8)
 
             Hairline()
 
@@ -668,7 +697,7 @@ public struct ContentView: View {
                     _ = n
                 } label: {
                     Label("全部已读", systemImage: "checkmark.circle")
-                        .font(.caption)
+                        .font(.system(size: 11))
                 }
                 .controlSize(.small)
                 .buttonStyle(.quiet)
@@ -807,13 +836,13 @@ public struct ArticleRow: View {
                         .lineLimit(excerptLines)
                 }
                 // 来源 + 评分标签 + 日期（评分挪到标题下面这行，在 RSS 来源旁边）
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     if showSource {
                         Text(item.source)
                             .font(.system(size: RB.F.rowMeta * scale, weight: .medium))
                             .foregroundStyle(Color.rbText2)
                     }
-                    // 评分 badge（降饱和语义色，去 bold，底 12%）
+                    // 评分 badge（降饱和语义色，去 bold，底 10% + 描边）
                     if let s = item.llmScore {
                         RBadge(text: "\(s)", color: scoreColor(s), scale: scale)
                     }
@@ -836,7 +865,7 @@ public struct ArticleRow: View {
                     }
                 }
             }
-            // 右侧缩略图（可关；紧凑模式更小；失败占位 surface 更干净）
+            // 右侧缩略图（可关；紧凑模式更小；失败占位 surface 更干净；hairline 描边挺边）
             if showThumbnails, let img = item.imageUrl, let url = URL(string: img) {
                 AsyncImage(url: url) { phase in
                     switch phase {
@@ -850,6 +879,10 @@ public struct ArticleRow: View {
                 }
                 .frame(width: (isCompact ? 48 : 72) * scale, height: (isCompact ? 48 : 72) * scale)
                 .clipShape(RoundedRectangle(cornerRadius: RB.Radius.md))
+                .overlay(
+                    RoundedRectangle(cornerRadius: RB.Radius.md)
+                        .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
+                )
             }
         }
         .padding(.horizontal, 12)
@@ -1039,20 +1072,22 @@ public struct ReadingView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // ── 顶部操作条：快捷操作（星标/已读/归档/分享）+ 版面设置 ──
-            HStack(spacing: 10) {
-                // 快捷操作（QuietButtonStyle：hover 浮现 surface 底，激活态柔金/墨蓝）
+            // ── 顶部操作条：左快捷操作 / 中双语切换 / 右版面设置（三段分组式）──
+            HStack(spacing: 2) {
+                // 快捷操作簇（统一 15pt + frame 24×24 对齐，SF Symbol 视觉大小归一）
                 Button { toggleStar() } label: {
                     Image(systemName: isStarred ? "star.fill" : "star")
-                        .font(.system(size: 15))
+                        .font(.system(size: 15, weight: .regular))
+                        .frame(width: 24, height: 24)
                         .foregroundStyle(isStarred ? Color.rbStar : Color.rbText2)
                 }
                 .buttonStyle(.quiet)
                 .help(isStarred ? "取消星标" : "加星标")
 
                 Button { toggleRead() } label: {
-                    Image(systemName: isRead ? "envelope.open" : "envelope.badge")
-                        .font(.system(size: 15))
+                    Image(systemName: isRead ? "envelope.open" : "envelope")
+                        .font(.system(size: 15, weight: .regular))
+                        .frame(width: 24, height: 24)
                         .foregroundStyle(Color.rbText2)
                 }
                 .buttonStyle(.quiet)
@@ -1060,7 +1095,8 @@ public struct ReadingView: View {
 
                 Button { toggleArchive() } label: {
                     Image(systemName: item.archived ? "tray.and.arrow.up" : "archivebox")
-                        .font(.system(size: 15))
+                        .font(.system(size: 15, weight: .regular))
+                        .frame(width: 24, height: 24)
                         .foregroundStyle(Color.rbText2)
                 }
                 .buttonStyle(.quiet)
@@ -1068,7 +1104,8 @@ public struct ReadingView: View {
 
                 Button { showShareSheet = true } label: {
                     Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 15))
+                        .font(.system(size: 15, weight: .regular))
+                        .frame(width: 24, height: 24)
                         .foregroundStyle(Color.rbText2)
                 }
                 .buttonStyle(.quiet)
@@ -1078,21 +1115,19 @@ public struct ReadingView: View {
 
                 // 双语/原文/翻译切换（有翻译时）：双语对照 / 仅原文 / 仅译文
                 if item.llmTranslatedMd != nil {
-                    Picker("", selection: $viewMode) {
-                        Text("双语").tag(0)
-                        Text("原文").tag(1)
-                        Text("译文").tag(2)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 200)
-                    .controlSize(.small)
-                    .tint(Color.rbAccent)
+                    RBSegmented(
+                        items: [(0, "双语"), (1, "原文"), (2, "译文")],
+                        selection: $viewMode
+                    )
                 }
+
+                Spacer()
 
                 // 版面设置
                 Button { showLayoutPopover = true } label: {
                     Image(systemName: "textformat.size")
-                        .font(.system(size: 15))
+                        .font(.system(size: 15, weight: .regular))
+                        .frame(width: 24, height: 24)
                         .foregroundStyle(Color.rbText2)
                 }
                 .buttonStyle(.quiet)
@@ -1100,24 +1135,8 @@ public struct ReadingView: View {
                 .popover(isPresented: $showLayoutPopover, arrowEdge: .bottom) {
                     layoutPanel
                 }
-
-                // 上一篇/下一篇（键盘 j/k 的图形化对应）
-                HStack(spacing: 0) {
-                    Button { onPrev?() } label: {
-                        Image(systemName: "chevron.up").font(.system(size: 14, weight: .medium))
-                    }
-                    .buttonStyle(.quiet)
-                    .help("上一篇（k）")
-                    .disabled(onPrev == nil)
-                    Button { onNext?() } label: {
-                        Image(systemName: "chevron.down").font(.system(size: 14, weight: .medium))
-                    }
-                    .buttonStyle(.quiet)
-                    .help("下一篇（j）")
-                    .disabled(onNext == nil)
-                }
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(Color.rbBg)   // 弃 .bar 材质（实时模糊有开销）改纯色更干净
 
@@ -1130,14 +1149,12 @@ public struct ReadingView: View {
                     Text(item.title)
                         .font(fontChoice.font(size: titleFontSize).bold())
                         .foregroundStyle(p.text)
-                    // 元信息（作者/日期/评分，frontmatter 块在正文里单独折叠）
-                    HStack(spacing: 10) {
-                        if let a = item.author, !a.isEmpty { Label(a, systemImage: "person") }
-                        if let pd = item.publishedAt { Label(String(pd.prefix(10)), systemImage: "calendar") }
-                        if let s = item.llmScore { Label("评分 \(s)", systemImage: "star.fill") }
+                    // 元信息（作者 · 日期 · 评分，编辑部点分隔；frontmatter 块在正文里单独折叠）
+                    if !metaParts.isEmpty {
+                        Text(metaParts.joined(separator: "  ·  "))
+                            .font(.system(size: metaFontSize))
+                            .foregroundStyle(p.textSecondary)
                     }
-                    .font(.system(size: metaFontSize))
-                    .foregroundStyle(p.textSecondary)
 
                     // ── LLM 操作条（胶囊按钮组 + 状态提示，精致排版）──
                     HStack(spacing: 8) {
@@ -1176,15 +1193,22 @@ public struct ReadingView: View {
 
                     Hairline()
 
-                    // 摘要（独立字号设置）
+                    // 摘要（灰紫缘引用卡：独立字号设置）
                     if let sum = item.llmSummary, !sum.isEmpty {
                         Text(sum)
                             .font(.system(size: summaryFontSize))
                             .foregroundStyle(p.textSecondary)
-                            .padding(10)
+                            .lineSpacing(3)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(p.backgroundAlt)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(alignment: .leading) {
+                                Rectangle()
+                                    .fill(Color.rbSummary.opacity(0.85))
+                                    .frame(width: 3)
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
                     }
 
                     // 正文：有译文时双语逐段对照（Follo 核心交互），否则单语 markdown
@@ -1216,7 +1240,8 @@ public struct ReadingView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .padding(24)
+                .padding(.horizontal, 32)
+                .padding(.vertical, 28)
                 .frame(maxWidth: contentWidth)
                 .frame(maxWidth: .infinity)   // 内容限宽后居中
             }
@@ -1231,6 +1256,15 @@ public struct ReadingView: View {
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(item: item)
         }
+    }
+
+    /// 元信息片段（作者/日期/评分）——编辑部点分隔风格，有则收集
+    private var metaParts: [String] {
+        var parts: [String] = []
+        if let a = item.author, !a.isEmpty { parts.append(a) }
+        if let pd = item.publishedAt { parts.append(String(pd.prefix(10))) }
+        if let s = item.llmScore { parts.append("评分 \(s)") }
+        return parts
     }
 
     /// 版面设置面板（极简分组：外观 / 字号 / 排版，标签统一 text2 右对齐，数值等宽）
@@ -1302,7 +1336,7 @@ public struct ReadingView: View {
                 .tint(Color.rbAccent)
             }
         }
-        .padding(16)
+        .padding(18)
         .frame(width: 340)
     }
 
@@ -1511,69 +1545,104 @@ public struct ShareSheet: View {
     @State private var message = ""
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("分享 / 后处理").font(.title3.bold())
-            Text(item.title).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+        VStack(alignment: .leading, spacing: 0) {
+            // 头部：标题 + 文章名（两行克制排版）
+            VStack(alignment: .leading, spacing: 6) {
+                Text("分享 / 后处理")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.rbText)
+                Text(item.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.rbText3)
+                    .lineLimit(2)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Button {
+            Hairline()
+
+            // 动作行（hover 浮现 surface 底，hairline 分组）
+            VStack(alignment: .leading, spacing: 2) {
+                shareActionRow("复制链接", icon: "link") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(item.url, forType: .string)
                     message = "✅ 链接已复制"
-                } label: {
-                    Label("复制链接", systemImage: "link")
                 }
-
-                Button {
+                shareActionRow("复制标题 + 链接", icon: "doc.on.doc") {
                     let text = "\(item.title)\n\(item.url)"
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
                     message = "✅ 标题+链接已复制"
-                } label: {
-                    Label("复制标题+链接", systemImage: "doc.on.doc")
                 }
-
-                Button {
+                shareActionRow("在浏览器打开原文", icon: "safari") {
                     if let url = URL(string: item.url), !item.url.isEmpty {
                         NSWorkspace.shared.open(url)
                     }
                     dismiss()
-                } label: {
-                    Label("在浏览器打开原文", systemImage: "safari")
                 }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
 
-                Divider()
+            Hairline()
 
-                Button {
+            VStack(alignment: .leading, spacing: 2) {
+                shareActionRow("重新生成 md 文件", icon: "arrow.clockwise.doc") {
                     ArchiveService.shared.rearchive(contentId: item.id)
                     message = "✅ 已重新生成 md 文件"
-                } label: {
-                    Label("重新生成 md 文件", systemImage: "arrow.clockwise.doc")
                 }
-
-                Button {
+                shareActionRow("触发导出规则（Obsidian / webhook）", icon: "square.and.arrow.up.on.square") {
                     Task {
                         await ExportService.shared.runPending(trigger: "manual", contentId: item.id)
                         message = "✅ 已触发手动导出规则"
                     }
-                } label: {
-                    Label("触发导出规则（Obsidian/webhook）", systemImage: "square.and.arrow.up.on.square")
                 }
             }
-            .buttonStyle(.borderless)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
 
             if !message.isEmpty {
-                Text(message).font(.caption).foregroundStyle(.green)
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.rbScoreHigh)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
             }
 
             Spacer()
+
+            Hairline()
             HStack {
                 Spacer()
-                Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.primaryCapsule)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
         }
-        .padding(20)
-        .frame(width: 380, height: 420)
+        .frame(width: 400, height: 430)
+    }
+
+    /// 分享动作行：图标 + 文字整行可点，hover 浮现 surface 底
+    private func shareActionRow(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.rbText2)
+                    .frame(width: 18)
+                Text(title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.rbText)
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.rowHover)
     }
 }
 
@@ -1604,26 +1673,37 @@ struct ShortcutHelpView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Text("键盘快捷键").font(.title3.bold())
+                Text("键盘快捷键")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.rbText)
                 Spacer()
                 Button { dismiss() } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.rbText3)
                 }
                 .buttonStyle(.plain)
             }
 
             ForEach(groups, id: \.0) { group, rows in
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(group).font(.headline).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionLabel(text: group)
                     ForEach(rows, id: \.0) { key, desc in
-                        HStack {
+                        HStack(spacing: 10) {
                             Text(key)
-                                .font(.system(.callout, design: .monospaced))
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(Color.rbText2)
                                 .padding(.horizontal, 8).padding(.vertical, 3)
-                                .background(.quaternary)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                                .frame(minWidth: 70, alignment: .center)
-                            Text(desc).font(.callout)
+                                .background(Color.rbSurface)
+                                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.md))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: RB.Radius.md)
+                                        .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
+                                )
+                                .frame(minWidth: 72, alignment: .center)
+                            Text(desc)
+                                .font(.system(size: 13))
+                                .foregroundStyle(Color.rbText)
                             Spacer()
                         }
                     }
@@ -1631,10 +1711,10 @@ struct ShortcutHelpView: View {
             }
 
             Text("提示：搜索框聚焦时，j/k/空格 等单键快捷键自动禁用，避免与输入冲突。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.rbText3)
         }
         .padding(24)
-        .frame(width: 420)
+        .frame(width: 430)
     }
 }
