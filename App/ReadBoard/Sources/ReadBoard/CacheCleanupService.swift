@@ -33,10 +33,20 @@ public final class CacheCleanupService: ObservableObject {
         get { let v = UserDefaults.standard.integer(forKey: "cleanup.archiveAfterDays"); return v > 0 ? v : 30 }
         set { UserDefaults.standard.set(newValue, forKey: "cleanup.archiveAfterDays") }
     }
+    /// 「已读 N 天后自动归档」是否启用（默认开；关闭则已读老文章不自动归档）
+    var archiveEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "cleanup.archiveEnabled") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "cleanup.archiveEnabled") }
+    }
     /// 归档内容超过该天数自动删除（默认 90；0 = 不删除）
     var deleteAfterDays: Int {
         get { UserDefaults.standard.integer(forKey: "cleanup.deleteAfterDays") }  // 0 是合法值（不删），未设过也是 0→给默认
         set { UserDefaults.standard.set(newValue, forKey: "cleanup.deleteAfterDays") }
+    }
+    /// 「归档 N 天后自动删除」是否启用（默认开；关闭则归档内容永不自动删除）
+    var deleteEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "cleanup.deleteEnabled") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "cleanup.deleteEnabled") }
     }
     /// deleteAfterDays 是否初始化过（区分"未设过"和"用户显式设为 0"）
     private var deleteDaysInitialized: Bool {
@@ -47,6 +57,11 @@ public final class CacheCleanupService: ObservableObject {
     var backupKeepCount: Int {
         get { let v = UserDefaults.standard.integer(forKey: "cleanup.backupKeep"); return v > 0 ? v : 5 }
         set { UserDefaults.standard.set(newValue, forKey: "cleanup.backupKeep") }
+    }
+    /// 「备份滚动保留」是否启用（默认开；关闭则备份不自动滚动清理）
+    var backupKeepEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "cleanup.backupKeepEnabled") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "cleanup.backupKeepEnabled") }
     }
     /// 是否清理全文 HTML（默认开）
     var cleanContentHtml: Bool {
@@ -162,9 +177,10 @@ public final class CacheCleanupService: ObservableObject {
         return (count, bytes)
     }
 
-    /// 备份滚动：只保留最新 backupKeepCount 份
+    /// 备份滚动：只保留最新 backupKeepCount 份（可通过 backupKeepEnabled 关闭）
     @discardableResult
     func pruneBackups() -> Int {
+        guard backupKeepEnabled else { return 0 }
         guard let items = try? FileManager.default.contentsOfDirectory(atPath: backupDir) else { return 0 }
         let backups = items.filter { $0.hasPrefix("readboard-") && $0.hasSuffix(".db") }.sorted()
         let excess = backups.count - backupKeepCount
@@ -182,17 +198,22 @@ public final class CacheCleanupService: ObservableObject {
     /// 只清 html 中间产物（cleanHtml A 路径），记录本身是可检索的统一视图。
     @discardableResult
     func runRetention() -> (archived: Int, deleted: Int) {
-        db.execute("""
-            UPDATE content SET is_archived = 1
-            WHERE is_archived = 0 AND starred = 0
-              AND read_at IS NOT NULL
-              AND read_at < datetime('now', '-\(archiveAfterDays) days')
-              AND id NOT IN (SELECT content_id FROM content_tag);
-            """)
-        let archived = db.writeChanges()
+        // 「已读 N 天后自动归档」可关闭——关闭则已读老文章留在活跃列表不自动归档
+        var archived = 0
+        if archiveEnabled {
+            db.execute("""
+                UPDATE content SET is_archived = 1
+                WHERE is_archived = 0 AND starred = 0
+                  AND read_at IS NOT NULL
+                  AND read_at < datetime('now', '-\(archiveAfterDays) days')
+                  AND id NOT IN (SELECT content_id FROM content_tag);
+                """)
+            archived = db.writeChanges()
+        }
 
+        // 「归档 N 天后自动删除」可关闭——关闭则归档内容永不自动删除
         var deleted = 0
-        if deleteAfterDays > 0 {
+        if deleteEnabled && deleteAfterDays > 0 {
             // 先备份待删内容，再删
             backupBeforeDelete(days: deleteAfterDays)
             db.execute("""

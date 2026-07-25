@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - 独立设置窗口（⌘, 打开，NavigationSplitView 分页）
 // 六页：通用 / AI 与 LLM / 依赖 / 功能板块 / 导出规则 / 缓存清理
@@ -65,31 +66,45 @@ public struct GeneralPane: View {
     public var body: some View {
         Form {
             Section("feed 自动抓取") {
-                Toggle("自动周期抓取（默认 15 分钟）", isOn: Binding(
+                Toggle("自动周期抓取", isOn: Binding(
                     get: { SourceStore.shared.autoSyncEnabled },
                     set: { SourceStore.shared.autoSyncEnabled = $0 }
                 ))
+                // 抓取周期间隔下拉（15/30/60/120/360 分钟）
+                HStack {
+                    Text("抓取间隔")
+                    Picker("", selection: Binding(
+                        get: { Int(SourceStore.shared.syncInterval / 60) },
+                        set: { SourceStore.shared.setSyncInterval(minutes: $0) }
+                    )) {
+                        Text("15 分钟").tag(15)
+                        Text("30 分钟").tag(30)
+                        Text("60 分钟").tag(60)
+                        Text("120 分钟").tag(120)
+                        Text("360 分钟").tag(360)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 110)
+                }
                 Text("关闭后只能手动点「全部刷新」抓 feed")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("md 文件生成（管线完成后落盘）") {
-                TextField("保存目录（默认 ~/readboard/archive）", text: $archiveDirInput)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit {
-                        let v = archiveDirInput.trimmingCharacters(in: .whitespaces)
-                        UserDefaults.standard.set(v.isEmpty ? nil : v, forKey: "archive.dir")
-                        refreshArchiveStats()
-                    }
+                // 目录用系统文件夹选择器（NSOpenPanel），不手填路径
                 HStack {
-                    Button("保存") {
-                        let v = archiveDirInput.trimmingCharacters(in: .whitespaces)
-                        UserDefaults.standard.set(v.isEmpty ? nil : v, forKey: "archive.dir")
-                        refreshArchiveStats()
-                    }
-                    Button("恢复默认") {
-                        archiveDirInput = ""
-                        UserDefaults.standard.removeObject(forKey: "archive.dir")
-                        refreshArchiveStats()
+                    Text(archiveDirInput.isEmpty ? "默认：~/readboard/archive" : archiveDirInput)
+                        .font(.callout)
+                        .foregroundStyle(archiveDirInput.isEmpty ? .secondary : .primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Button("选择目录…") { pickArchiveDir() }
+                    if !archiveDirInput.isEmpty {
+                        Button("恢复默认") {
+                            archiveDirInput = ""
+                            UserDefaults.standard.removeObject(forKey: "archive.dir")
+                            refreshArchiveStats()
+                        }
                     }
                 }
                 Text("管线全部跑完的内容自动落成双语 md 存到这里，按源名分子目录。数据库记录保留（可检索），只清 HTML 中间产物。")
@@ -128,6 +143,22 @@ public struct GeneralPane: View {
 
     private func refreshArchiveStats() {
         archivedCount = ArchiveService.shared.archivedFileCount()
+    }
+
+    /// 系统文件夹选择器选 md 保存目录（不手填路径）
+    private func pickArchiveDir() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "选择"
+        panel.message = "选择 md 文件保存目录"
+        if panel.runModal() == .OK, let url = panel.url {
+            archiveDirInput = url.path
+            UserDefaults.standard.set(url.path, forKey: "archive.dir")
+            refreshArchiveStats()
+        }
     }
 }
 
@@ -413,9 +444,34 @@ public struct CleanupPane: View {
     @State private var archiveDays = 30
     @State private var deleteDays = 90
     @State private var keepCount = 5
+    @State private var archiveEnabled = true
+    @State private var deleteEnabled = true
+    @State private var backupKeepEnabled = true
     @State private var cleanHtml = true
     @State private var cleanHtmlDays = 7
     @State private var showCleanConfirm = false
+
+    /// 清理策略行：开关（可关闭）+ 天数自填（关闭时天数输入禁用）
+    private func cleanupDayRow(title: String, unit: String,
+                               enabled: Binding<Bool>, days: Binding<Int>,
+                               onEnable: @escaping (Bool) -> Void,
+                               onDays: @escaping (Int) -> Void) -> some View {
+        HStack {
+            Toggle(title, isOn: enabled)
+                .onChange(of: enabled.wrappedValue) { _, v in onEnable(v) }
+            Spacer()
+            TextField("", value: days, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 56)
+                .multilineTextAlignment(.trailing)
+                .disabled(!enabled.wrappedValue)
+                .onChange(of: days.wrappedValue) { _, v in
+                    if v > 0 { onDays(v) }
+                }
+            Text(unit)
+                .foregroundStyle(enabled.wrappedValue ? .secondary : Color(nsColor: .tertiaryLabelColor))
+        }
+    }
 
     public var body: some View {
         Form {
@@ -448,12 +504,25 @@ public struct CleanupPane: View {
             }
 
             Section("清理策略") {
-                Stepper("已读 \(archiveDays) 天后自动归档", value: $archiveDays, in: 1...365)
-                    .onChange(of: archiveDays) { _, v in cleanup.archiveAfterDays = v }
-                Stepper(deleteDays == 0 ? "归档内容永不删除（已禁用自动删除）" : "归档 \(deleteDays) 天后自动删除", value: $deleteDays, in: 0...730)
-                    .onChange(of: deleteDays) { _, v in cleanup.deleteAfterDays = v }
-                Stepper("备份保留最近 \(keepCount) 份", value: $keepCount, in: 1...30)
-                    .onChange(of: keepCount) { _, v in cleanup.backupKeepCount = v }
+                // 每项：开关（可关闭）+ 天数自填（TextField 数字）
+                cleanupDayRow(
+                    title: "已读自动归档", unit: "天后归档",
+                    enabled: $archiveEnabled, days: $archiveDays,
+                    onEnable: { cleanup.archiveEnabled = $0 },
+                    onDays: { cleanup.archiveAfterDays = $0 }
+                )
+                cleanupDayRow(
+                    title: "归档自动删除", unit: "天后删除",
+                    enabled: $deleteEnabled, days: $deleteDays,
+                    onEnable: { cleanup.deleteEnabled = $0 },
+                    onDays: { cleanup.deleteAfterDays = $0 }
+                )
+                cleanupDayRow(
+                    title: "备份滚动保留", unit: "份",
+                    enabled: $backupKeepEnabled, days: $keepCount,
+                    onEnable: { cleanup.backupKeepEnabled = $0 },
+                    onDays: { cleanup.backupKeepCount = $0 }
+                )
                 Toggle("清理已转 Markdown 的全文 HTML", isOn: $cleanHtml)
                     .onChange(of: cleanHtml) { _, v in cleanup.cleanContentHtml = v }
                 if cleanHtml {
@@ -503,6 +572,9 @@ public struct CleanupPane: View {
             archiveDays = cleanup.archiveAfterDays
             deleteDays = cleanup.deleteAfterDays
             keepCount = cleanup.backupKeepCount
+            archiveEnabled = cleanup.archiveEnabled
+            deleteEnabled = cleanup.deleteEnabled
+            backupKeepEnabled = cleanup.backupKeepEnabled
             cleanHtml = cleanup.cleanContentHtml
             cleanHtmlDays = cleanup.cleanHtmlAfterDays
             cleanup.refreshStats()

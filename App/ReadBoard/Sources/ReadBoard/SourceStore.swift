@@ -98,8 +98,22 @@ public final class SourceStore: ObservableObject {
     // MARK: 自动抓取调度
 
     private var syncTimer: Timer?
-    /// 自动抓取间隔（秒），默认 15 分钟
-    var syncInterval: TimeInterval = 15 * 60
+    /// 自动抓取间隔（秒），默认 15 分钟。持久化到 UserDefaults，启动时读回。
+    var syncInterval: TimeInterval {
+        get {
+            let v = UserDefaults.standard.double(forKey: "sourceStore.syncIntervalMin")
+            return (v > 0 ? v : 15) * 60
+        }
+    }
+    /// 设置抓取间隔（分钟），持久化 + 重启调度 Timer 生效
+    func setSyncInterval(minutes: Int) {
+        UserDefaults.standard.set(Double(minutes), forKey: "sourceStore.syncIntervalMin")
+        // 重启调度让新间隔生效
+        if syncTimer != nil {
+            stopAutoSync()
+            startAutoSync()
+        }
+    }
     /// 是否开启自动抓取（默认开）
     var autoSyncEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "sourceStore.autoSync") as? Bool ?? true }
