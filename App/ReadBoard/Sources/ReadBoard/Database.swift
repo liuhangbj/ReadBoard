@@ -838,6 +838,19 @@ public final class Database: @unchecked Sendable {
         return n
     }
 
+    /// 「全部文章」未读数——与 totalCount 同口径（活跃有效 + 未读）。
+    /// 全部文章行显示「未读/总数」，和文件夹行的计数格式一致。
+    func totalUnread() -> Int {
+        guard open() else { return 0 }
+        var stmt: OpaquePointer?
+        var n = 0
+        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM content WHERE is_archived = 0 AND is_duplicate = 0 AND read_at IS NULL;", -1, &stmt, nil) == SQLITE_OK {
+            if sqlite3_step(stmt) == SQLITE_ROW { n = Int(sqlite3_column_int64(stmt, 0)) }
+        }
+        sqlite3_finalize(stmt)
+        return n
+    }
+
     // MARK: 辅助
 
     /// 轻列列表行 → ContentItem（正文/audioUrl 留空，点开时 fetchContentBody 补）

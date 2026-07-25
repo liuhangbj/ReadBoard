@@ -288,9 +288,15 @@ public struct ContentView: View {
                     .font(.system(size: RB.F.sidebar * scale))
                     .foregroundStyle(Color.rbText)
                 Spacer()
-                Text("\(vm.totalCount)")
-                    .foregroundStyle(Color.rbText3)
-                    .font(.system(size: RB.F.count * scale))
+                // 未读/总数（和文件夹行格式一致：未读>0 墨蓝 medium，读完纯 text3）
+                HStack(spacing: 1) {
+                    Text("\(vm.totalUnread)")
+                        .font(.system(size: RB.F.count * scale, weight: vm.totalUnread > 0 ? .medium : .regular))
+                        .foregroundStyle(vm.totalUnread > 0 ? Color.rbAccent : Color.rbText3)
+                    Text("/\(vm.totalCount)")
+                        .font(.system(size: RB.F.count * scale))
+                        .foregroundStyle(Color.rbText3)
+                }
             }
             .padding(.leading, 12)
             .padding(.trailing, 12)

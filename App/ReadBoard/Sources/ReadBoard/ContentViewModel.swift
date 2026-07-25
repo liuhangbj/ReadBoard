@@ -45,6 +45,7 @@ public final class ContentViewModel: ObservableObject {
         }
     }
     @Published var totalCount: Int = 0
+    @Published var totalUnread: Int = 0   // 全部文章未读数（左栏「全部文章」行显示 未读/总数）
     @Published var showTranslated: Bool = false    // 阅读区显示原文/翻译
     @Published var searchFocused: Bool = false     // 搜索框焦点（快捷键避让）
 
@@ -102,6 +103,7 @@ public final class ContentViewModel: ObservableObject {
 
     func loadAll() {
         totalCount = db.totalCount()
+        totalUnread = db.totalUnread()
         sidebarTree = db.fetchSidebarTree()
         reload()
     }
@@ -132,6 +134,7 @@ public final class ContentViewModel: ObservableObject {
         // 只刷中栏会导致左栏角标不更新（用户：全部标已读后未读数字不刷新）。
         sidebarTree = db.fetchSidebarTree()
         totalCount = db.totalCount()
+        totalUnread = db.totalUnread()
     }
 
     /// 加载下一页（滚动到底触发）。追加而非替换。
