@@ -811,6 +811,16 @@ public struct ArticleRow: View {
     /// 紧凑密度下缩略图更小、行距更紧
     private var isCompact: Bool { density == "compact" }
 
+    /// 源类型图标（统一辨识度：RSS 文章/播客/视频/社交媒体）
+    private var ctypeIcon: String {
+        switch item.ctype {
+        case "podcast": return "mic"
+        case "video", "youtube": return "play.rectangle"
+        case "wechat", "social": return "bubble.left.and.bubble.right"
+        default: return "doc.text"  // article/rss
+        }
+    }
+
     public var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: isCompact ? 2 : 5) {
@@ -838,20 +848,26 @@ public struct ArticleRow: View {
                 // 来源 + 评分标签 + 日期（评分挪到标题下面这行，在 RSS 来源旁边）
                 HStack(spacing: 6) {
                     if showSource {
-                        Text(item.source)
-                            .font(.system(size: RB.F.rowMeta * scale, weight: .medium))
-                            .foregroundStyle(Color.rbText2)
+                        HStack(spacing: 4) {
+                            // 源类型图标（统一 11pt，辨识度优先）
+                            Image(systemName: ctypeIcon)
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color.rbText3)
+                            Text(item.source)
+                                .font(.system(size: RB.F.rowMeta * scale, weight: .medium))
+                                .foregroundStyle(Color.rbText2)
+                        }
                     }
-                    // 评分 badge（降饱和语义色，去 bold，底 10% + 描边）
+                    // 评分 badge（加「评分」前缀）
                     if let s = item.llmScore {
-                        RBadge(text: "\(s)", color: scoreColor(s), scale: scale)
+                        RBadge(text: "评分 \(s)", color: scoreColor(s), scale: scale)
                     }
-                    // 管线已处理 badge（摘/译/录，降饱和）
+                    // 管线已处理 badge（两字标签）
                     if let sum = item.llmSummary, !sum.isEmpty {
-                        RBadge(text: "摘", color: .rbSummary, scale: scale)
+                        RBadge(text: "摘要", color: .rbSummary, scale: scale)
                     }
                     if item.hasTranslation {
-                        RBadge(text: item.isMedia ? "录" : "译", color: .rbTranslate, scale: scale)
+                        RBadge(text: item.isMedia ? "转录" : "翻译", color: .rbTranslate, scale: scale)
                     }
                     if showDate, let pd = item.publishedAt, pd.count >= 10 {
                         Text(formattedDate(pd))
@@ -859,7 +875,7 @@ public struct ArticleRow: View {
                             .foregroundStyle(Color.rbText3)
                     }
                     Spacer()
-                    // 未读点：6pt 墨蓝（原 7pt accentColor，选中态不再隐藏——浅底下保持可见）
+                    // 未读点：6pt 墨蓝（选中态不隐藏——浅底下保持可见）
                     if !item.isRead {
                         Circle().fill(Color.rbAccent).frame(width: 6, height: 6)
                     }
