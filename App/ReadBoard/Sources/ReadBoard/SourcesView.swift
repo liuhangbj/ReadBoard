@@ -300,73 +300,46 @@ public struct SourceRow: View {
     @State private var pendingBackfillKey: String? = nil
 
     public var body: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .center, spacing: 14) {
+            // ── 左：图标 + 名称 + 地址（标识信息，固定宽度截断）──
             Text(icon)
                 .font(.title3)
-            VStack(alignment: .leading, spacing: 2) {
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
                 Text(src.name)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(Color.rbText)
+                    .lineLimit(1)
                 Text(src.identifier)
                     .font(.caption)
                     .foregroundStyle(Color.rbText3)
                     .lineLimit(1)
                     .truncationMode(.middle)
+            }
+            .frame(minWidth: 180, maxWidth: 280, alignment: .leading)
+
+            // ── 中：徽标 + 管线开关（配置信息，垂直两小组，占中间弹性区）──
+            VStack(alignment: .leading, spacing: 6) {
+                // 徽标行：类型 + 全文模式 + 抓取频率 + 上次抓取 + 错误
                 HStack(spacing: 6) {
                     RBadge(text: src.stype, color: .rbText3)
-                    // 全文模式徽标（仅文章类源显示）
                     if src.stype == "rss" {
-                        Menu {
-                            ForEach(FetchMode.allCases, id: \.rawValue) { m in
-                                Button {
-                                    store.setFetchMode(id: src.id, mode: m)
-                                } label: {
-                                    if src.fetchMode == m { Label(m.displayName, systemImage: "checkmark") }
-                                    else { Text(m.displayName) }
-                                }
-                            }
-                            Divider()
-                            Button("重新探测") { Task { await store.reprobeFetchMode(id: src.id) } }
-                        } label: {
-                            Text(src.fetchMode.displayName)
-                                .font(.system(size: 9, weight: .medium))
-                                .padding(.horizontal, 4).padding(.vertical, 1)
-                                .background(fetchModeColor.opacity(0.12))
-                                .foregroundStyle(fetchModeColor)
-                                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
-                        }
-                        .menuStyle(.borderlessButton)
-                        .help("全文获取方式（点击可修改）")
+                        fetchModeMenu
                     }
+                    intervalMenu
                     if let t = src.lastFetchedAt {
-                        Text("上次 \(String(t.prefix(16)))").font(.caption2).foregroundStyle(Color.rbText3)
-                    }
-                    // 抓取频率徽标
-                    Menu {
-                        ForEach([5, 15, 30, 60, 360, 720], id: \.self) { m in
-                            Button {
-                                store.setFetchInterval(id: src.id, minutes: m)
-                            } label: {
-                                let label = m < 60 ? "\(m) 分钟" : "\(m/60) 小时"
-                                if src.fetchIntervalMin == m { Label(label, systemImage: "checkmark") }
-                                else { Text(label) }
-                            }
-                        }
-                    } label: {
-                        Text("⏱ \(intervalLabel(src.fetchIntervalMin))")
-                            .font(.system(size: 9, weight: .medium))
-                            .padding(.horizontal, 4).padding(.vertical, 1)
-                            .background(Color.rbSurface)
+                        Text("上次 \(String(t.prefix(16)))")
+                            .font(.caption2)
                             .foregroundStyle(Color.rbText3)
-                            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
                     }
-                    .menuStyle(.borderlessButton)
-                    .help("自动抓取间隔（点击可修改）")
                     if let err = src.error {
-                        Text(err).font(.caption2).foregroundStyle(Color.rbScoreLow).lineLimit(1)
+                        Text(err)
+                            .font(.caption2)
+                            .foregroundStyle(Color.rbScoreLow)
+                            .lineLimit(1)
                     }
                 }
-                // ── 管线开关（生效 = 源 OR 文件夹；文件夹已开的项标墨蓝）──
+                // 管线开关行（生效 = 源 OR 文件夹；文件夹已开的项标墨蓝）
                 HStack(spacing: 14) {
                     pipelineToggle("打分", key: "auto_score", on: src.policy.autoScore, inherited: fp.autoScore)
                     pipelineToggle("翻译", key: "auto_translate", on: src.policy.autoTranslate, inherited: fp.autoTranslate)
@@ -375,47 +348,103 @@ public struct SourceRow: View {
                         pipelineToggle("转录", key: "auto_transcribe", on: src.policy.autoTranscribe, inherited: fp.autoTranscribe)
                     }
                 }
-                .padding(.top, 2)
             }
-            Spacer()
-            // 指派到文件夹
-            Menu {
-                Button("未分组") { store.assignSource(sourceId: src.id, folderId: nil) }
-                Divider()
-                ForEach(store.folders) { f in
-                    Button {
-                        store.assignSource(sourceId: src.id, folderId: f.id)
-                    } label: {
-                        if src.folderId == f.id { Label(f.name, systemImage: "checkmark") }
-                        else { Text(f.name) }
-                    }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // ── 右：启用开关 + 指派文件夹 + 删除（操作区，垂直紧凑）──
+            HStack(spacing: 8) {
+                Toggle("", isOn: Binding(
+                    get: { src.enabled },
+                    set: { store.setEnabled(id: src.id, enabled: $0) }
+                ))
+                .labelsHidden()
+                .tint(Color.rbAccent)
+                folderAssignMenu
+                Button(role: .destructive) { showDeleteConfirm = true } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.rbText3)
                 }
-            } label: {
-                Image(systemName: "folder")
-                    .foregroundStyle(Color.rbText3)
-            }
-            .menuStyle(.borderlessButton)
-            .frame(width: 24)
-            Toggle("", isOn: Binding(
-                get: { src.enabled },
-                set: { store.setEnabled(id: src.id, enabled: $0) }
-            ))
-            .labelsHidden()
-            .tint(Color.rbAccent)
-            Button(role: .destructive) { showDeleteConfirm = true } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.rbText3)
-            }
-            .buttonStyle(.quiet)
-            .alert("删除订阅源？", isPresented: $showDeleteConfirm) {
-                Button("取消", role: .cancel) {}
-                Button("删除", role: .destructive) { store.removeSource(id: src.id) }
-            } message: {
-                Text("「\(src.name)」将被移除。\n已抓取的内容会保留，但不再更新此源。")
+                .buttonStyle(.quiet)
+                .alert("删除订阅源？", isPresented: $showDeleteConfirm) {
+                    Button("取消", role: .cancel) {}
+                    Button("删除", role: .destructive) { store.removeSource(id: src.id) }
+                } message: {
+                    Text("「\(src.name)」将被移除。\n已抓取的内容会保留，但不再更新此源。")
+                }
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
+    }
+
+    /// 全文模式选择菜单（仅文章类源）
+    private var fetchModeMenu: some View {
+        Menu {
+            ForEach(FetchMode.allCases, id: \.rawValue) { m in
+                Button {
+                    store.setFetchMode(id: src.id, mode: m)
+                } label: {
+                    if src.fetchMode == m { Label(m.displayName, systemImage: "checkmark") }
+                    else { Text(m.displayName) }
+                }
+            }
+            Divider()
+            Button("重新探测") { Task { await store.reprobeFetchMode(id: src.id) } }
+        } label: {
+            Text(src.fetchMode.displayName)
+                .font(.system(size: 9, weight: .medium))
+                .padding(.horizontal, 4).padding(.vertical, 1)
+                .background(fetchModeColor.opacity(0.12))
+                .foregroundStyle(fetchModeColor)
+                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
+        }
+        .menuStyle(.borderlessButton)
+        .help("全文获取方式（点击可修改）")
+    }
+
+    /// 抓取频率选择菜单
+    private var intervalMenu: some View {
+        Menu {
+            ForEach([5, 15, 30, 60, 360, 720], id: \.self) { m in
+                Button {
+                    store.setFetchInterval(id: src.id, minutes: m)
+                } label: {
+                    let label = m < 60 ? "\(m) 分钟" : "\(m/60) 小时"
+                    if src.fetchIntervalMin == m { Label(label, systemImage: "checkmark") }
+                    else { Text(label) }
+                }
+            }
+        } label: {
+            Text("⏱ \(intervalLabel(src.fetchIntervalMin))")
+                .font(.system(size: 9, weight: .medium))
+                .padding(.horizontal, 4).padding(.vertical, 1)
+                .background(Color.rbSurface)
+                .foregroundStyle(Color.rbText3)
+                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
+        }
+        .menuStyle(.borderlessButton)
+        .help("自动抓取间隔（点击可修改）")
+    }
+
+    /// 指派到文件夹菜单
+    private var folderAssignMenu: some View {
+        Menu {
+            Button("未分组") { store.assignSource(sourceId: src.id, folderId: nil) }
+            Divider()
+            ForEach(store.folders) { f in
+                Button {
+                    store.assignSource(sourceId: src.id, folderId: f.id)
+                } label: {
+                    if src.folderId == f.id { Label(f.name, systemImage: "checkmark") }
+                    else { Text(f.name) }
+                }
+            }
+        } label: {
+            Image(systemName: "folder")
+                .foregroundStyle(Color.rbText3)
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 24)
     }
 
     /// 该源所属文件夹的开关（用于"已继承"高亮）
