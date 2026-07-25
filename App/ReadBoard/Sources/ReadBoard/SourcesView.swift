@@ -5,6 +5,7 @@ import SwiftUI
 public struct SourcesView: View {
     @ObservedObject private var store = SourceStore.shared
     @ObservedObject private var worker = PipelineWorker.shared
+    @EnvironmentObject private var appTab: AppTab
     @State private var showAddSheet = false
     @State private var showAddFolder = false
     @State private var newFolderName = ""
@@ -14,6 +15,12 @@ public struct SourcesView: View {
         VStack(spacing: 0) {
             // 顶部工具条
             HStack {
+                // 返回阅读（左栏底部导航切过来的入口）
+                Button { appTab.selection = 0 } label: {
+                    Label("阅读", systemImage: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                .help("返回阅读")
                 Text("订阅源")
                     .font(.title2.bold())
                 Text("\(store.sources.count)")

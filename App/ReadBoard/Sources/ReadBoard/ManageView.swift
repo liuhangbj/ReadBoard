@@ -5,9 +5,22 @@ import SwiftUI
 
 public struct ManageView: View {
     @State private var tab = 0
+    @EnvironmentObject private var appTab: AppTab
 
     public var body: some View {
         VStack(spacing: 0) {
+            HStack {
+                // 返回阅读（左栏底部导航切过来的入口）
+                Button { appTab.selection = 0 } label: {
+                    Label("阅读", systemImage: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                .help("返回阅读")
+                .padding(.leading, 12)
+                Spacer()
+            }
+            .padding(.top, 8)
+
             Picker("", selection: $tab) {
                 Text("统计").tag(0)
                 Text("源健康").tag(1)

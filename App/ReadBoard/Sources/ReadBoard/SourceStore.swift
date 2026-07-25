@@ -154,6 +154,12 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
+    /// 重命名订阅源
+    func renameSource(id: Int64, name: String) {
+        db.execute("UPDATE content_source SET name = ? WHERE id = ?", params: [name, id])
+        reload()
+    }
+
     /// 把源指派到文件夹(nil = 移出到未分组)
     func assignSource(sourceId: Int64, folderId: Int64?) {
         db.execute("UPDATE content_source SET folder_id = ? WHERE id = ?",

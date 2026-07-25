@@ -40,19 +40,27 @@ public struct ReadBoardApp: App {
 }
 
 public struct RootView: View {
-    @State private var tab = 0
+    @StateObject private var tab = AppTab()
 
     public var body: some View {
-        TabView(selection: $tab) {
-            ContentView()
-                .tabItem { Label("阅读", systemImage: "doc.text") }
-                .tag(0)
-            SourcesView()
-                .tabItem { Label("订阅源", systemImage: "dot.radiowaves.left.and.right") }
-                .tag(1)
-            ManageView()
-                .tabItem { Label("管理", systemImage: "chart.bar.doc.horizontal") }
-                .tag(3)
+        // 无底部 Tab 栏——导航入口移到阅读页左栏底部（订阅源/管理），
+        // 通过共享 AppTab 状态切换。阅读是主视图，订阅源/管理全窗切换。
+        Group {
+            switch tab.selection {
+            case 1:
+                SourcesView()
+            case 3:
+                ManageView()
+            default:
+                ContentView()
+            }
         }
+        .environmentObject(tab)
+        .frame(minWidth: 900, minHeight: 600)
     }
+}
+
+/// 全局 Tab 导航状态（阅读/订阅源/管理），左栏底部按钮切换
+final class AppTab: ObservableObject {
+    @Published var selection = 0
 }

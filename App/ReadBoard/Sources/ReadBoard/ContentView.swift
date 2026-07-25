@@ -2,6 +2,7 @@ import SwiftUI
 
 public struct ContentView: View {
     @StateObject private var vm = ContentViewModel()
+    @EnvironmentObject private var appTab: AppTab
     @FocusState private var listFocused: Bool
     @FocusState private var searchFocused: Bool
     /// 界面缩放（@AppStorage 直接绑 UserDefaults——改值视图自动重建，静态读取不会触发刷新）
@@ -75,6 +76,9 @@ public struct ContentView: View {
     @State private var showAddSource = false
     @State private var showAddFolder = false
     @State private var newFolderName = ""
+    /// 重命名目标（source: 源 id / folder: 文件夹 id）+ 输入名 + 弹窗状态
+    @State private var renameTarget: (kind: String, id: Int64, currentName: String)? = nil
+    @State private var renameInput = ""
     /// 展开的文件夹 id 集合（自己控制，DisclosureGroup 的 label 无法响应点击过滤）
     @State private var expandedFolders: Set<String> = []
 
@@ -134,6 +138,15 @@ public struct ContentView: View {
                 }
                 .padding(.vertical, 4)
             }
+
+            // ── 底部导航：订阅源管理 / 数据统计（替代底部 Tab 栏）──
+            Divider()
+            HStack(spacing: 0) {
+                sidebarNavButton(icon: "dot.radiowaves.left.and.right", label: "订阅源", tab: 1)
+                sidebarNavButton(icon: "chart.bar.doc.horizontal", label: "管理", tab: 3)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
         }
         .sheet(isPresented: $showAddSource) {
             AddSourceSheet(store: sourceStore)
@@ -153,10 +166,47 @@ public struct ContentView: View {
         } message: {
             Text("文件夹用于给订阅源分组（如「快讯」「深度」），并可设置组级管线总开关。")
         }
+        // 重命名对话框（源/文件夹共用）
+        .alert("重命名", isPresented: Binding(
+            get: { renameTarget != nil },
+            set: { if !$0 { renameTarget = nil } }
+        )) {
+            TextField("名称", text: $renameInput)
+            Button("保存") {
+                let name = renameInput.trimmingCharacters(in: .whitespaces)
+                if !name.isEmpty, let t = renameTarget {
+                    if t.kind == "source" { sourceStore.renameSource(id: t.id, name: name) }
+                    else { sourceStore.renameFolder(id: t.id, name: name) }
+                    vm.loadAll()
+                }
+                renameTarget = nil
+            }
+            Button("取消", role: .cancel) { renameTarget = nil }
+        }
         .onAppear {
             // 默认展开所有文件夹（用户能直接看到源，不用先点一下）
             expandedFolders = Set(vm.sidebarTree.filter { $0.isFolder }.map { $0.id })
         }
+    }
+
+    /// 左栏底部导航按钮（切到 订阅源管理/数据统计 全窗视图）
+    private func sidebarNavButton(icon: String, label: String, tab: Int) -> some View {
+        Button {
+            appTab.selection = tab
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 12))
+                Text(label)
+                    .font(.caption)
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("打开「\(label)」页面")
     }
 
     /// 左栏行（点击过滤 + 未读角标 + 右键设置菜单）。
@@ -208,6 +258,12 @@ public struct ContentView: View {
     private func sidebarContextMenu(_ node: SidebarNode) -> some View {
         if let sid = node.sourceId {
             // ── 单源设置 ──
+            Button {
+                renameTarget = ("source", sid, node.name)
+                renameInput = node.name
+            } label: {
+                Label("重命名", systemImage: "pencil")
+            }
             Button { Task { await refreshSource(sid) } } label: {
                 Label("立即刷新", systemImage: "arrow.clockwise")
             }
@@ -236,6 +292,12 @@ public struct ContentView: View {
             }
         } else if let fid = node.folderId {
             // ── 文件夹设置 ──
+            Button {
+                renameTarget = ("folder", fid, node.name)
+                renameInput = node.name
+            } label: {
+                Label("重命名", systemImage: "pencil")
+            }
             Button { Task { await refreshFolder(fid) } } label: {
                 Label("刷新此文件夹全部源", systemImage: "arrow.clockwise")
             }
