@@ -25,6 +25,9 @@ public struct ContentItem: Identifiable, Hashable {
     let starred: Bool         // 星标
     let archived: Bool        // 归档
     var imageUrl: String? = nil  // 首图（列表缩略图，从 content_html 抽）
+    /// 列表标签用轻量标记（不扛译文全文/媒体地址，只存是否有）
+    var hasTranslation: Bool = false  // 有译文/转写（llm_translated_md 非空）
+    var isMedia: Bool = false          // 媒体项（podcast/video/含 audio_url）
 
     /// 返回一个标记为已读的副本（本地状态同步用）
     func markingRead() -> ContentItem {
@@ -510,14 +513,18 @@ public final class Database: @unchecked Sendable {
             sql = """
             SELECT c.id, c.ctype, c.source, c.title, c.author, c.url, c.language, c.published_at,
                    c.excerpt, c.llm_score, c.llm_summary, c.fetch_status, c.read_at, c.starred, c.is_archived,
-                   c.content_html
+                   c.content_html,
+                   (c.llm_translated_md IS NOT NULL AND c.llm_translated_md != '') AS has_trans,
+                   (c.ctype IN ('podcast','video') OR c.meta LIKE '%audio_url%') AS is_media
             FROM content c JOIN content_fts f ON f.rowid = c.id
             """
         } else {
             sql = """
             SELECT id, ctype, source, title, author, url, language, published_at,
                    excerpt, llm_score, llm_summary, fetch_status, read_at, starred, is_archived,
-                   content_html
+                   content_html,
+                   (llm_translated_md IS NOT NULL AND llm_translated_md != '') AS has_trans,
+                   (ctype IN ('podcast','video') OR meta LIKE '%audio_url%') AS is_media
             FROM content
             """
         }
@@ -785,6 +792,11 @@ public final class Database: @unchecked Sendable {
         // 抽首图（列 15 content_html，可能不存在——旧查询无此列时容错）
         if sqlite3_column_count(stmt) > 15, let html = text(15) {
             item.imageUrl = Self.firstImageUrl(in: html)
+        }
+        // 列表标签轻量标记（列 16 has_trans / 列 17 is_media）
+        if sqlite3_column_count(stmt) > 17 {
+            item.hasTranslation = sqlite3_column_int(stmt, 16) == 1
+            item.isMedia = sqlite3_column_int(stmt, 17) == 1
         }
         return item
     }

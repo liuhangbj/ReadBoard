@@ -747,6 +747,14 @@ public struct ArticleRow: View {
                             .foregroundStyle(isSelected ? .white : scoreColor(s))
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
+                    // 四项管线已处理标签（有结果才显示，跟在评分后）
+                    if let sum = item.llmSummary, !sum.isEmpty {
+                        pipelineBadge("摘", color: .purple, isSelected: isSelected)
+                    }
+                    if item.hasTranslation {
+                        // 媒体项译文来自转录，标「录」；文章标「译」
+                        pipelineBadge(item.isMedia ? "录" : "译", color: .blue, isSelected: isSelected)
+                    }
                     if showDate, let pd = item.publishedAt, pd.count >= 10 {
                         Text(formattedDate(pd))
                             .font(.system(size: 11 * scale))
@@ -814,6 +822,16 @@ public struct ArticleRow: View {
         case 40..<60: return .yellow
         default: return .gray
         }
+    }
+
+    /// 管线已处理小标签（摘/译/录，单字背景色标签）
+    private func pipelineBadge(_ text: String, color: Color, isSelected: Bool) -> some View {
+        Text(text)
+            .font(.system(size: 9 * scale).bold())
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(isSelected ? Color.white.opacity(0.25) : color.opacity(0.18))
+            .foregroundStyle(isSelected ? .white : color)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
     }
 }
 
