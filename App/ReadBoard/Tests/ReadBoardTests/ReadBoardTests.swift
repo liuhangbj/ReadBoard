@@ -298,3 +298,27 @@ final class ResolveBodyTests: XCTestCase {
         XCTAssertEqual(body, "")
     }
 }
+
+// MARK: - ArticleRow 相对时间
+
+final class RelativeDateTests: XCTestCase {
+    func testMinutesAgo() {
+        let iso = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-300))
+        let r = ArticleRow.relativeDate(from: iso)
+        XCTAssertTrue(r.contains("分钟前"), "5 分钟前应显示分钟前，实际: \(r)")
+    }
+    func testHoursAgo() {
+        let iso = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-7200))
+        let r = ArticleRow.relativeDate(from: iso)
+        XCTAssertTrue(r.contains("小时前"), "2 小时前应显示小时前，实际: \(r)")
+    }
+    func testDaysAgo() {
+        let iso = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-86400 * 2))
+        let r = ArticleRow.relativeDate(from: iso)
+        XCTAssertTrue(r.contains("天前"), "2 天前应显示天前，实际: \(r)")
+    }
+    func testInvalidFallsBack() {
+        let r = ArticleRow.relativeDate(from: "not-a-date")
+        XCTAssertFalse(r.isEmpty, "非法日期应回退不崩溃")
+    }
+}

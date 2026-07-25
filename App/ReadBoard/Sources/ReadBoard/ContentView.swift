@@ -694,19 +694,28 @@ public struct ContentView: View {
 public struct ArticleRow: View {
     let item: ContentItem
     let isSelected: Bool
-    /// @AppStorage 让缩放值变化时行自动重建（静态 ReadingLayout.uiFontScale 不触发刷新）
+    /// @AppStorage 让设置变化时行自动重建（静态 ReadingLayout 读取不触发刷新）
     @AppStorage("reading.uiFontScale") private var scale: Double = 1.0
+    @AppStorage("list.showThumbnails") private var showThumbnails: Bool = true
+    @AppStorage("list.excerptLines") private var excerptLines: Int = 2
+    @AppStorage("list.density") private var density: String = "comfortable"
+    @AppStorage("list.showSource") private var showSource: Bool = true
+    @AppStorage("list.showDate") private var showDate: Bool = true
+    @AppStorage("list.unreadBold") private var unreadBold: Bool = true
+    @AppStorage("list.dateFormat") private var dateFormat: String = "absolute"
+
+    /// 紧凑密度下缩略图更小、行距更紧
+    private var isCompact: Bool { density == "compact" }
 
     public var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            // 缩略图（有首图才显示，右侧 Follo 式）
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: isCompact ? 2 : 5) {
                 // 标题行
                 HStack(alignment: .top, spacing: 6) {
                     Text(item.title)
-                        .font(.system(size: 15 * scale, weight: item.isRead ? .regular : .semibold))
+                        .font(.system(size: 15 * scale, weight: (unreadBold && !item.isRead) ? .semibold : .regular))
                         .foregroundStyle(isSelected ? .white : (item.isRead ? .secondary : .primary))
-                        .lineLimit(2)
+                        .lineLimit(isCompact ? 1 : 2)
                         .fixedSize(horizontal: false, vertical: true)
                     if item.starred {
                         Image(systemName: "star.fill")
@@ -723,20 +732,22 @@ public struct ArticleRow: View {
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
                 }
-                // 摘要
-                if let ex = item.excerpt, !ex.isEmpty {
+                // 摘要（行数可配，0 = 不显示）
+                if excerptLines > 0, let ex = item.excerpt, !ex.isEmpty {
                     Text(ex)
                         .font(.system(size: 12.5 * scale))
                         .foregroundStyle(isSelected ? .white.opacity(0.85) : .secondary)
-                        .lineLimit(2)
+                        .lineLimit(excerptLines)
                 }
-                // 来源 + 日期
+                // 来源 + 日期（各自可关）
                 HStack(spacing: 8) {
-                    Text(item.source)
-                        .font(.system(size: 11 * scale, weight: .medium))
-                        .foregroundStyle(isSelected ? .white.opacity(0.9) : .secondary)
-                    if let pd = item.publishedAt, pd.count >= 10 {
-                        Text(String(pd.prefix(10)))
+                    if showSource {
+                        Text(item.source)
+                            .font(.system(size: 11 * scale, weight: .medium))
+                            .foregroundStyle(isSelected ? .white.opacity(0.9) : .secondary)
+                    }
+                    if showDate, let pd = item.publishedAt, pd.count >= 10 {
+                        Text(formattedDate(pd))
                             .font(.system(size: 11 * scale))
                             .foregroundStyle(isSelected ? .white.opacity(0.7) : Color(nsColor: .tertiaryLabelColor))
                     }
@@ -746,8 +757,8 @@ public struct ArticleRow: View {
                     }
                 }
             }
-            // 右侧缩略图（有首图才显示）
-            if let img = item.imageUrl, let url = URL(string: img) {
+            // 右侧缩略图（可关；紧凑模式更小）
+            if showThumbnails, let img = item.imageUrl, let url = URL(string: img) {
                 AsyncImage(url: url) { phase in
                     switch phase {
                     case .success(let image):
@@ -758,15 +769,41 @@ public struct ArticleRow: View {
                         Rectangle().fill(Color.gray.opacity(0.15))
                     }
                 }
-                .frame(width: 72 * scale, height: 72 * scale)
+                .frame(width: (isCompact ? 48 : 72) * scale, height: (isCompact ? 48 : 72) * scale)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.vertical, isCompact ? 5 : 10)
         .background(isSelected ? Color.accentColor : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .contentShape(Rectangle())
+    }
+
+    /// 日期格式：relative=相对（x 分钟/小时/天前）/ absolute=绝对（yyyy-MM-dd）
+    private func formattedDate(_ publishedAt: String) -> String {
+        if dateFormat == "relative" {
+            return Self.relativeDate(from: publishedAt)
+        }
+        return String(publishedAt.prefix(10))
+    }
+
+    /// 相对时间（ISO8601 → x 分钟/小时/天前）
+    static func relativeDate(from iso: String) -> String {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var date = f.date(from: iso)
+        if date == nil {
+            f.formatOptions = [.withInternetDateTime]
+            date = f.date(from: iso)
+        }
+        guard let d = date else { return String(iso.prefix(10)) }
+        let secs = Int(Date().timeIntervalSince(d))
+        if secs < 60 { return "刚刚" }
+        if secs < 3600 { return "\(secs / 60) 分钟前" }
+        if secs < 86400 { return "\(secs / 3600) 小时前" }
+        if secs < 86400 * 7 { return "\(secs / 86400) 天前" }
+        return String(iso.prefix(10))
     }
 
     private func scoreColor(_ s: Int) -> Color {
@@ -812,6 +849,44 @@ struct ReadingLayout {
     static var uiFontScale: Double {
         get { let v = UserDefaults.standard.double(forKey: "reading.uiFontScale"); return v > 0 ? v : 1.0 }
         set { UserDefaults.standard.set(newValue, forKey: "reading.uiFontScale") }
+    }
+
+    // MARK: 文章列表外观（常见 RSS 阅读器设置项）
+
+    /// 列表是否显示缩略图（右侧小图）
+    static var showThumbnails: Bool {
+        get { UserDefaults.standard.object(forKey: "list.showThumbnails") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "list.showThumbnails") }
+    }
+    /// 摘要显示行数（0 = 不显示摘要）
+    static var excerptLines: Int {
+        get { UserDefaults.standard.object(forKey: "list.excerptLines") as? Int ?? 2 }
+        set { UserDefaults.standard.set(newValue, forKey: "list.excerptLines") }
+    }
+    /// 列表密度：compact=紧凑 / comfortable=舒适（默认）
+    static var listDensity: String {
+        get { UserDefaults.standard.string(forKey: "list.density") ?? "comfortable" }
+        set { UserDefaults.standard.set(newValue, forKey: "list.density") }
+    }
+    /// 列表是否显示来源名
+    static var showSource: Bool {
+        get { UserDefaults.standard.object(forKey: "list.showSource") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "list.showSource") }
+    }
+    /// 列表是否显示日期
+    static var showDate: Bool {
+        get { UserDefaults.standard.object(forKey: "list.showDate") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "list.showDate") }
+    }
+    /// 未读文章标题是否加粗（视觉区分已读/未读）
+    static var unreadBold: Bool {
+        get { UserDefaults.standard.object(forKey: "list.unreadBold") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "list.unreadBold") }
+    }
+    /// 日期格式：relative=相对（x 分钟前）/ absolute=绝对（yyyy-MM-dd）
+    static var dateFormat: String {
+        get { UserDefaults.standard.string(forKey: "list.dateFormat") ?? "absolute" }
+        set { UserDefaults.standard.set(newValue, forKey: "list.dateFormat") }
     }
 }
 

@@ -2,15 +2,16 @@ import SwiftUI
 import AppKit
 
 // MARK: - 独立设置窗口（⌘, 打开，NavigationSplitView 分页）
-// 六页：通用 / 功能板块 / AI 与 LLM / 依赖 / 导出规则 / 缓存清理
+// 七页：通用 / 阅读器 / 功能板块 / AI 与 LLM / 依赖 / 导出规则 / 缓存清理
 
 public enum SettingsPage: String, CaseIterable, Identifiable {
-    case general, boards, ai, deps, export, cleanup
+    case general, reader, boards, ai, deps, export, cleanup
     public var id: String { rawValue }
 
     var title: String {
         switch self {
         case .general: return "通用"
+        case .reader: return "阅读器"
         case .ai: return "AI 与 LLM"
         case .deps: return "依赖"
         case .boards: return "功能板块"
@@ -22,6 +23,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .general: return "gearshape"
+        case .reader: return "doc.text"
         case .ai: return "brain.head.profile"
         case .deps: return "shippingbox"
         case .boards: return "square.grid.2x2"
@@ -45,6 +47,7 @@ public struct SettingsView: View {
         } detail: {
             switch selection ?? .general {
             case .general: GeneralPane()
+            case .reader: ReaderPane()
             case .boards: BoardsPane()
             case .ai: AILLMPane()
             case .deps: DepsPane()
@@ -799,5 +802,116 @@ public struct DeadLetterView: View {
 
     private func reload() {
         items = worker.deadLetters()
+    }
+}
+
+// MARK: - 阅读器（版面 + 文章列表外观 + 阅读行为）
+
+public struct ReaderPane: View {
+    // 版面（阅读区）
+    @AppStorage("reading.theme") private var themeRaw: String = "claude"
+    @AppStorage("reading.themeMode") private var themeModeRaw: String = ReadingTheme.Mode.light.rawValue
+    @AppStorage("reading.font") private var fontRaw: String = "system"
+    @AppStorage("reading.fontSize") private var fontSize: Double = 16
+    @AppStorage("reading.titleFontSize") private var titleFontSize: Double = 24
+    @AppStorage("reading.metaFontSize") private var metaFontSize: Double = 12
+    @AppStorage("reading.summaryFontSize") private var summaryFontSize: Double = 14
+    @AppStorage("reading.lineSpacing") private var lineSpacing: Double = 6
+    @AppStorage("reading.contentWidth") private var contentWidth: Double = 720
+    @AppStorage("reading.uiFontScale") private var uiFontScale: Double = 1.0
+    @AppStorage("reading.viewMode") private var viewMode: Int = 0
+
+    // 文章列表外观
+    @AppStorage("list.showThumbnails") private var showThumbnails: Bool = true
+    @AppStorage("list.excerptLines") private var excerptLines: Int = 2
+    @AppStorage("list.density") private var density: String = "comfortable"
+    @AppStorage("list.showSource") private var showSource: Bool = true
+    @AppStorage("list.showDate") private var showDate: Bool = true
+    @AppStorage("list.unreadBold") private var unreadBold: Bool = true
+    @AppStorage("list.dateFormat") private var dateFormat: String = "absolute"
+
+    public var body: some View {
+        Form {
+            // ── 阅读区版面 ──
+            Section("阅读区版面") {
+                Picker("主题", selection: $themeRaw) {
+                    ForEach(ReadingTheme.allCases) { t in
+                        Text(t.displayName).tag(t.rawValue)
+                    }
+                }
+                Picker("亮暗", selection: $themeModeRaw) {
+                    ForEach(ReadingTheme.Mode.allCases) { m in
+                        Text(m.displayName).tag(m.rawValue)
+                    }
+                }
+                Picker("正文/标题字体", selection: $fontRaw) {
+                    ForEach(ReadingFont.presets, id: \.self) { f in
+                        Text(f.displayName).tag(fontKey(f))
+                    }
+                    Divider()
+                    ForEach(ReadingFont.availableFontFamilies, id: \.self) { family in
+                        Text(family).font(.custom(family, size: 13)).tag("custom:\(family)")
+                    }
+                }
+                Stepper("正文字号 \(Int(fontSize))", value: $fontSize, in: 12...28, step: 1)
+                Stepper("标题字号 \(Int(titleFontSize))", value: $titleFontSize, in: 16...40, step: 1)
+                Stepper("信息字号 \(Int(metaFontSize))", value: $metaFontSize, in: 9...18, step: 1)
+                Stepper("摘要字号 \(Int(summaryFontSize))", value: $summaryFontSize, in: 10...22, step: 1)
+                HStack {
+                    Text("行距 \(Int(lineSpacing))")
+                    Slider(value: $lineSpacing, in: 0...16, step: 1)
+                }
+                HStack {
+                    Text("内容宽度 \(Int(contentWidth))")
+                    Slider(value: $contentWidth, in: 560...1200, step: 20)
+                }
+                HStack {
+                    Text("界面缩放 \(Int(uiFontScale * 100))%")
+                    Slider(value: $uiFontScale, in: 0.8...1.5, step: 0.05)
+                }
+                Picker("默认正文视图", selection: $viewMode) {
+                    Text("双语对照").tag(0)
+                    Text("仅原文").tag(1)
+                    Text("仅译文").tag(2)
+                }
+            }
+
+            // ── 文章列表外观 ──
+            Section("文章列表") {
+                Toggle("显示缩略图（右侧小图）", isOn: $showThumbnails)
+                Picker("摘要显示", selection: $excerptLines) {
+                    Text("不显示").tag(0)
+                    Text("1 行").tag(1)
+                    Text("2 行").tag(2)
+                    Text("3 行").tag(3)
+                }
+                Picker("列表密度", selection: $density) {
+                    Text("舒适").tag("comfortable")
+                    Text("紧凑").tag("compact")
+                }
+                Toggle("显示来源名", isOn: $showSource)
+                Toggle("显示日期", isOn: $showDate)
+                if showDate {
+                    Picker("日期格式", selection: $dateFormat) {
+                        Text("绝对（2026-07-25）").tag("absolute")
+                        Text("相对（3 小时前）").tag("relative")
+                    }
+                }
+                Toggle("未读文章标题加粗", isOn: $unreadBold)
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("阅读器")
+    }
+
+    /// ReadingFont → 持久化 key（和 ReadingFont.current 的存储格式一致）
+    private func fontKey(_ f: ReadingFont) -> String {
+        switch f {
+        case .system: return "system"
+        case .heiti: return "heiti"
+        case .kaiti: return "kaiti"
+        case .fangsong: return "fangsong"
+        case .custom(let name): return "custom:\(name)"
+        }
     }
 }
