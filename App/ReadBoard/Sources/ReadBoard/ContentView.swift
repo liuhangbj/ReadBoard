@@ -1186,6 +1186,12 @@ public struct ReadingView: View {
                     Text(item.title)
                         .font(fontChoice.font(size: titleFontSize).bold())
                         .foregroundStyle(p.text)
+                    // 中文标题（有译文时显示在英文标题下方——从 translatedHead 第一行取）
+                    if let chineseTitle = chineseTitle, chineseTitle != item.title {
+                        Text(chineseTitle)
+                            .font(fontChoice.font(size: titleFontSize * 0.75).weight(.medium))
+                            .foregroundStyle(p.textSecondary)
+                    }
                     // 元信息（作者 · 日期 · 评分，编辑部点分隔；frontmatter 块在正文里单独折叠）
                     if !metaParts.isEmpty {
                         Text(metaParts.joined(separator: "  ·  "))
@@ -1464,6 +1470,15 @@ public struct ReadingView: View {
     /// 是否媒体项（播客/视频，可转录）
     private var isMediaItem: Bool {
         item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil
+    }
+
+    /// 中文标题（有译文时从 translatedHead 第一行取，用于显示在英文标题下方）
+    private var chineseTitle: String? {
+        guard let head = item.translatedHead, !head.isEmpty else { return nil }
+        let firstLine = head.components(separatedBy: "\n").first ?? ""
+        let cleaned = firstLine.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+        return cleaned.isEmpty ? nil : cleaned
     }
 
     /// 当前 palette（按 themeMode 取——亮/暗切换即时生效）
