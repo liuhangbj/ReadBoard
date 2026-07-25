@@ -334,10 +334,29 @@ public final class Database: @unchecked Sendable {
 
     /// 执行无返回值的写 SQL（带参数绑定，走写连接 + 串行队列）。
     /// 嵌套（事务内/已在队列上）直接跑不入队防死锁。
+    /// writeQueue.sync 阻塞调用方——需要返回值的场景用（多数在后台 worker）。
     @discardableResult
     func execute(_ sql: String, params: [Any?] = []) -> Bool {
         if onWriteQueue { return executeInner(sql, params: params) }
         return writeQueue.sync { executeInner(sql, params: params) }
+    }
+
+    /// UI 触发的单条写（标已读/星标/归档等）：writeQueue.async 不阻塞主线程。
+    /// 复查发现 execute 的 sync 会让主线程等队列里的大任务（清理/批量插入）跑完，
+    /// UI 卡顿（P0-3 修复的副作用）。UI 触发、不需立即知道结果的写用这个。
+    /// 完成回调在 MainActor（供 UI 刷新状态）。
+    func executeAsync(_ sql: String, params: [Any?] = [], completion: ((Bool) -> Void)? = nil) {
+        if onWriteQueue {
+            let ok = executeInner(sql, params: params)
+            completion?(ok)
+            return
+        }
+        writeQueue.async {
+            let ok = self.executeInner(sql, params: params)
+            if let completion {
+                DispatchQueue.main.async { completion(ok) }
+            }
+        }
     }
 
     private func executeInner(_ sql: String, params: [Any?]) -> Bool {
@@ -724,31 +743,32 @@ public final class Database: @unchecked Sendable {
         })
     }
 
-    /// 标记已读（写入当前时间）
+    /// 标记已读（写入当前时间）。UI 触发，executeAsync 不阻塞主线程。
     func markRead(contentId: Int64) {
-        execute("UPDATE content SET read_at = datetime('now') WHERE id = ?", params: [contentId])
+        executeAsync("UPDATE content SET read_at = datetime('now') WHERE id = ?", params: [contentId])
     }
 
-    /// 标记未读
+    /// 标记未读。UI 触发，executeAsync 不阻塞主线程。
     func markUnread(contentId: Int64) {
-        execute("UPDATE content SET read_at = NULL WHERE id = ?", params: [contentId])
+        executeAsync("UPDATE content SET read_at = NULL WHERE id = ?", params: [contentId])
     }
 
-    /// 切换星标，返回新状态
+    /// 切换星标，返回新状态。返回值在写前已确定（读当前状态取反），
+    /// 写入 executeAsync 不阻塞主线程——读（scalarInt）走读连接不排队，快。
     @discardableResult
     func toggleStar(contentId: Int64) -> Bool {
         let cur = scalarInt("SELECT starred FROM content WHERE id = ?", params: [contentId]) ?? 0
         let new = cur == 1 ? 0 : 1
-        execute("UPDATE content SET starred = ? WHERE id = ?", params: [new, contentId])
+        executeAsync("UPDATE content SET starred = ? WHERE id = ?", params: [new, contentId])
         return new == 1
     }
 
-    /// 切换归档，返回新状态
+    /// 切换归档，返回新状态。同 toggleStar——返回值写前确定，写入 async 不阻塞。
     @discardableResult
     func toggleArchive(contentId: Int64) -> Bool {
         let cur = scalarInt("SELECT is_archived FROM content WHERE id = ?", params: [contentId]) ?? 0
         let new = cur == 1 ? 0 : 1
-        execute("UPDATE content SET is_archived = ? WHERE id = ?", params: [new, contentId])
+        executeAsync("UPDATE content SET is_archived = ? WHERE id = ?", params: [new, contentId])
         return new == 1
     }
 
