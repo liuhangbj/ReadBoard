@@ -128,6 +128,10 @@ public final class ContentViewModel: ObservableObject {
         if let sel = selectedItem, !items.contains(sel) {
             selectedItem = nil
         }
+        // 同步刷左栏未读数——已读/全部已读/归档等操作改变了未读计数，
+        // 只刷中栏会导致左栏角标不更新（用户：全部标已读后未读数字不刷新）。
+        sidebarTree = db.fetchSidebarTree()
+        totalCount = db.totalCount()
     }
 
     /// 加载下一页（滚动到底触发）。追加而非替换。
