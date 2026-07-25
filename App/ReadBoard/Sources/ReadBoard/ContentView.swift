@@ -828,15 +828,16 @@ public struct ArticleRow: View {
         item.ctype != "wechat" && item.ctype != "social"
     }
 
-    /// 显示标题：有译文时取 translatedHead 第一行（中文标题），否则原标题
+    /// 显示标题：有译文时取 translatedHead 第一个非空行（中文标题），否则原标题
     private var displayTitle: String {
         guard let head = item.translatedHead, !head.isEmpty else {
             return item.title
         }
-        // 译文第一行通常是中文标题（去掉 markdown 标题符 #）
-        let firstLine = head.components(separatedBy: "\n").first ?? ""
-        let cleaned = firstLine.trimmingCharacters(in: .whitespaces)
-            .replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+        // 跳过空行取第一个非空行（llm_translated_md 开头常是空行，第二行才是标题）
+        let firstNonEmpty = head.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? ""
+        let cleaned = firstNonEmpty.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
         return cleaned.isEmpty ? item.title : cleaned
     }
 
@@ -1472,12 +1473,14 @@ public struct ReadingView: View {
         item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil
     }
 
-    /// 中文标题（有译文时从 translatedHead 第一行取，用于显示在英文标题下方）
+    /// 中文标题（有译文时从 translatedHead 取第一个非空行，用于显示在英文标题下方）
     private var chineseTitle: String? {
         guard let head = item.translatedHead, !head.isEmpty else { return nil }
-        let firstLine = head.components(separatedBy: "\n").first ?? ""
-        let cleaned = firstLine.trimmingCharacters(in: .whitespaces)
-            .replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+        // 跳过空行，取第一个非空行（llm_translated_md 开头常是空行，第二行才是标题）
+        let firstNonEmpty = head.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? ""
+        let cleaned = firstNonEmpty.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
         return cleaned.isEmpty ? nil : cleaned
     }
 
