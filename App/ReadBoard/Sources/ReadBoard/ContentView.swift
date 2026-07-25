@@ -283,18 +283,16 @@ public struct ContentView: View {
                     .font(.system(size: 13 * scale))
                     .foregroundStyle(vm.selectedFilter == node.filterKey ? .white : .primary)
                 Spacer()
-                // 未读角标（未读 > 0 显示；否则显示总数）
-                if node.unread > 0 {
+                // 始终显示 未读/总数（未读 > 0 时未读部分蓝色高亮，读完则灰色）
+                HStack(spacing: 1) {
                     Text("\(node.unread)")
-                        .font(.system(size: 11 * scale).bold())
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(vm.selectedFilter == node.filterKey ? Color.white.opacity(0.25) : Color.accentColor.opacity(0.2))
-                        .foregroundStyle(vm.selectedFilter == node.filterKey ? .white : .accentColor)
-                        .clipShape(Capsule())
-                } else {
-                    Text("\(node.count)")
-                        .foregroundStyle(vm.selectedFilter == node.filterKey ? .white.opacity(0.8) : .secondary)
+                        .font(.system(size: 11 * scale, weight: node.unread > 0 ? .bold : .regular))
+                        .foregroundStyle(node.unread > 0
+                            ? (vm.selectedFilter == node.filterKey ? .white : .accentColor)
+                            : (vm.selectedFilter == node.filterKey ? .white.opacity(0.8) : .secondary))
+                    Text("/\(node.count)")
                         .font(.system(size: 11 * scale))
+                        .foregroundStyle(vm.selectedFilter == node.filterKey ? .white.opacity(0.8) : .secondary)
                 }
             }
             .padding(.leading, CGFloat(indent) * 18 + 12)
