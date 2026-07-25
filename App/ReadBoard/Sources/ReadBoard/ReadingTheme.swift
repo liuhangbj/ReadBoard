@@ -395,7 +395,7 @@ struct MarkdownBodyView: View {
                     .padding(.horizontal, 12).padding(.vertical, 8)
             }
             .background(p.backgroundAlt)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.md))
 
         case .codeBlock(_, let code):
             ScrollView(.horizontal, showsIndicators: false) {
@@ -405,10 +405,14 @@ struct MarkdownBodyView: View {
                     .padding(12)
             }
             .background(p.codeBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
+            .overlay(
+                RoundedRectangle(cornerRadius: RB.Radius.lg)
+                    .strokeBorder(p.divider.opacity(0.6), lineWidth: RB.Line.hair)
+            )
 
         case .divider:
-            Rectangle().fill(p.divider).frame(height: 1)
+            Rectangle().fill(p.divider).frame(height: RB.Line.hair)
 
         case .image(let alt, let url):
             VStack(alignment: .leading, spacing: 4) {
@@ -546,7 +550,7 @@ struct BilingualBodyView: View {
                             .overlay(alignment: .leading) {
                                 Rectangle().fill(p.link).frame(width: 3)
                             }
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
                     }
                 }
             }

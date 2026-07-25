@@ -9,6 +9,7 @@ public struct ManageView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
+            // 页头：返回 + 居中分段（三段式平衡布局）
             HStack {
                 // 返回阅读（左栏底部导航切过来的入口）
                 Button { appTab.selection = 0 } label: {
@@ -16,20 +17,23 @@ public struct ManageView: View {
                 }
                 .buttonStyle(.quiet)
                 .help("返回阅读")
-                .padding(.leading, 16)
                 Spacer()
+                Picker("", selection: $tab) {
+                    Text("统计").tag(0)
+                    Text("源健康").tag(1)
+                    Text("失败重试").tag(2)
+                    Text("过滤规则").tag(4)
+                }
+                .pickerStyle(.segmented)
+                .tint(Color.rbAccent)
+                .frame(maxWidth: 380)
+                Spacer()
+                // 右侧占位平衡返回按钮宽度，让分段真正居中
+                Color.clear.frame(width: 64, height: 1)
             }
-            .padding(.top, 10)
-
-            Picker("", selection: $tab) {
-                Text("统计").tag(0)
-                Text("源健康").tag(1)
-                Text("失败重试").tag(2)
-                Text("过滤规则").tag(4)
-            }
-            .pickerStyle(.segmented)
-            .tint(Color.rbAccent)
-            .padding()
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
 
             Group {
                 switch tab {
@@ -53,9 +57,9 @@ public struct StatsPane: View {
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                // 概览卡片（surface 底无阴影，图标降饱和统一，数值 text 主色）
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+            VStack(alignment: .leading, spacing: 24) {
+                // 概览卡片（小图标 + 大数字 + 小标签的编辑部统计卡；hairline 描边无阴影）
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                     statCard("订阅源", "\(s.enabledSources)/\(s.totalSources)", "dot.radiowaves.left.and.right", .rbAccent)
                     statCard("内容总数", "\(s.totalContent)", "doc.text", .rbText2)
                     statCard("未读", "\(s.unreadCount)", "circlebadge.fill", .rbAccent)
@@ -69,10 +73,10 @@ public struct StatsPane: View {
                 }
 
                 // 管线 job 分布
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     SectionLabel(text: "管线处理（成功/失败）")
                     ForEach(jobTypes, id: \.jtype) { j in
-                        HStack {
+                        HStack(spacing: 10) {
                             Text(j.jtype)
                                 .font(.caption)
                                 .foregroundStyle(Color.rbText2)
@@ -85,28 +89,43 @@ public struct StatsPane: View {
                                 }
                                 .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
                             }
-                            .frame(height: 14)
-                            Text("\(j.ok)/\(j.failed)").font(.caption).foregroundStyle(Color.rbText3)
+                            .frame(height: 10)
+                            Text("\(j.ok)/\(j.failed)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(Color.rbText3)
+                                .frame(width: 56, alignment: .trailing)
                         }
                     }
                 }
 
                 // 内容最多的源
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 8) {
                     SectionLabel(text: "内容最多的源 Top 10")
-                    ForEach(Array(topSources.enumerated()), id: \.offset) { _, t in
-                        HStack {
-                            Text(t.name)
-                                .font(.callout)
-                                .foregroundStyle(Color.rbText)
-                                .lineLimit(1)
-                            Spacer()
-                            Text("\(t.count)").foregroundStyle(Color.rbText3).font(.caption)
+                    VStack(spacing: 0) {
+                        ForEach(Array(topSources.enumerated()), id: \.offset) { idx, t in
+                            HStack(spacing: 10) {
+                                Text("\(idx + 1)")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(Color.rbText3)
+                                    .frame(width: 20, alignment: .trailing)
+                                Text(t.name)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Color.rbText)
+                                    .lineLimit(1)
+                                Spacer()
+                                Text("\(t.count)")
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(Color.rbText3)
+                            }
+                            .padding(.vertical, 7)
+                            if idx < topSources.count - 1 {
+                                Hairline()
+                            }
                         }
                     }
                 }
             }
-            .padding()
+            .padding(20)
         }
         .onAppear {
             // 统计查询后台跑：全表聚合在 67k 行库上有可见耗时，主线程执行会卡 UI
@@ -121,20 +140,27 @@ public struct StatsPane: View {
         }
     }
 
+    /// 统计卡：小图标（降饱和语义色）+ 大数字（等宽）+ 小标签，hairline 描边
     private func statCard(_ title: String, _ value: String, _ icon: String, _ color: Color) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon).foregroundStyle(color).font(.title3)
-            VStack(alignment: .leading) {
-                Text(value)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(Color.rbText)
-                Text(title).font(.caption).foregroundStyle(Color.rbText3)
-            }
-            Spacer()
+        VStack(alignment: .leading, spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(color)
+            Text(value)
+                .font(.system(size: 20, weight: .semibold, design: .default).monospacedDigit())
+                .foregroundStyle(Color.rbText)
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.rbText3)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Color.rbSurface)
+        .background(Color.rbSurface.opacity(0.55))
         .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
+        .overlay(
+            RoundedRectangle(cornerRadius: RB.Radius.lg)
+                .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
+        )
     }
 }
 
@@ -194,11 +220,7 @@ public struct FailedJobPane: View {
             }
             ForEach(failures) { job in
                 HStack(spacing: 10) {
-                    Text(job.jtype)
-                        .font(.system(size: 10, weight: .medium))
-                        .padding(.horizontal, 5).padding(.vertical, 2)
-                        .background(Color.rbScoreLow.opacity(0.12)).foregroundStyle(Color.rbScoreLow)
-                        .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
+                    RBadge(text: job.jtype, color: .rbScoreLow)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(job.title).font(.callout).foregroundStyle(Color.rbText).lineLimit(1)
                         if let err = job.error {
@@ -253,6 +275,7 @@ public struct TagManagePane: View {
                         reload()
                     }
                 }
+                .buttonStyle(.primaryCapsule)
                 .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding()
@@ -263,7 +286,9 @@ public struct TagManagePane: View {
                         Image(systemName: "tag.fill").foregroundStyle(Color.rbAccent)
                         Text(item.tag.name).foregroundStyle(Color.rbText)
                         Spacer()
-                        Text("\(item.count) 条").foregroundStyle(Color.rbText3).font(.caption)
+                        Text("\(item.count) 条")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(Color.rbText3)
                         Button(role: .destructive) {
                             TagService.shared.removeTag(id: item.tag.id)
                             reload()
@@ -300,10 +325,11 @@ public struct FilterRulePane: View {
                 Button { showAdd.toggle() } label: { Label("新建规则", systemImage: "plus") }
                     .buttonStyle(.quiet)
             }
-            .padding()
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
 
             if showAdd {
-                VStack(spacing: 8) {
+                VStack(spacing: 10) {
                     TextField("规则名", text: $rName).textFieldStyle(.roundedBorder)
                     HStack {
                         Picker("字段", selection: $rField) {
@@ -320,17 +346,26 @@ public struct FilterRulePane: View {
                         .labelsHidden()
                     }
                     .labelsHidden()
+                    .tint(Color.rbAccent)
                     TextField("匹配内容（关键词或正则）", text: $rPattern).textFieldStyle(.roundedBorder)
                     HStack {
                         Spacer()
                         Button("取消") { showAdd = false }
-                        Button("保存") { saveRule() }.disabled(rName.isEmpty || rPattern.isEmpty)
+                            .buttonStyle(.quiet)
+                        Button("保存") { saveRule() }
+                            .buttonStyle(.primaryCapsule)
+                            .disabled(rName.isEmpty || rPattern.isEmpty)
                     }
                 }
-                .padding()
-                .background(Color.rbSurface)
+                .padding(14)
+                .background(Color.rbSurface.opacity(0.55))
                 .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
-                .padding(.horizontal)
+                .overlay(
+                    RoundedRectangle(cornerRadius: RB.Radius.lg)
+                        .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
             }
 
             List {

@@ -43,7 +43,7 @@ public struct SettingsView: View {
                     .tag(page)
             }
             .listStyle(.sidebar)
-            .tint(Color.rbAccent)   // 选中项墨蓝 tint（统一极简留白）
+            .tint(Color.rbAccent)   // 选中项墨蓝 tint（统一纸墨留白）
             .navigationSplitViewColumnWidth(min: 160, ideal: 180)
         } detail: {
             switch selection ?? .general {
@@ -76,6 +76,7 @@ public struct GeneralPane: View {
                     get: { SourceStore.shared.autoSyncEnabled },
                     set: { SourceStore.shared.autoSyncEnabled = $0 }
                 ))
+                .tint(Color.rbAccent)
                 // 抓取周期间隔下拉（15/30/60/120/360 分钟）
                 HStack {
                     Text("抓取间隔")
@@ -90,6 +91,7 @@ public struct GeneralPane: View {
                         Text("360 分钟").tag(360)
                     }
                     .pickerStyle(.menu)
+                    .tint(Color.rbAccent)
                     .frame(width: 110)
                 }
                 Text("关闭后只能手动点「全部刷新」抓 feed")
@@ -100,23 +102,26 @@ public struct GeneralPane: View {
                 HStack {
                     Text(archiveDirInput.isEmpty ? "默认：~/readboard/archive" : archiveDirInput)
                         .font(.callout)
-                        .foregroundStyle(archiveDirInput.isEmpty ? .secondary : .primary)
+                        .foregroundStyle(archiveDirInput.isEmpty ? Color.rbText3 : Color.rbText)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
                     Button("选择目录…") { pickArchiveDir() }
+                        .controlSize(.small)
                     if !archiveDirInput.isEmpty {
                         Button("恢复默认") {
                             archiveDirInput = ""
                             UserDefaults.standard.removeObject(forKey: "archive.dir")
                             refreshArchiveStats()
                         }
+                        .controlSize(.small)
+                        .buttonStyle(.quiet)
                     }
                 }
                 Text("管线全部跑完的内容自动落成双语 md 存到这里，按源名分子目录。数据库记录保留（可检索），只清 HTML 中间产物。")
                     .font(.caption).foregroundStyle(Color.rbText3)
                 Text("已生成 \(archivedCount) 个文件")
-                    .font(.caption).foregroundStyle(Color.rbText3)
+                    .font(.caption.monospacedDigit()).foregroundStyle(Color.rbText3)
             }
             Section("网络代理") {
                 TextField("代理地址（如 http://127.0.0.1:7890，留空直连）", text: $proxyInput)
@@ -130,10 +135,14 @@ public struct GeneralPane: View {
                         let v = proxyInput.trimmingCharacters(in: .whitespaces)
                         FeedFetcher.globalProxy = v.isEmpty ? nil : v
                     }
+                    .controlSize(.small)
+                    .buttonStyle(.primaryCapsule)
                     Button("清除") {
                         proxyInput = ""
                         FeedFetcher.globalProxy = nil
                     }
+                    .controlSize(.small)
+                    .buttonStyle(.quiet)
                 }
                 Text("所有 feed 抓取 / 全文回填 / YouTube 解析统一走此代理")
                     .font(.caption).foregroundStyle(Color.rbText3)
@@ -187,6 +196,7 @@ public struct AILLMPane: View {
                         get: { p.enabled },
                         set: { AIPipeline.setEnabled(p, $0) }
                     ))
+                    .tint(Color.rbAccent)
                 }
                 Text("这些开关与「功能板块」页的 AI 总开关叠加生效；源/文件夹级还有第三层开关。")
                     .font(.caption).foregroundStyle(Color.rbText3)
@@ -220,6 +230,7 @@ public struct LLMSlotView: View {
                     Text(p.name).tag(p.id)
                 }
             }
+            .tint(Color.rbAccent)
             .onChange(of: presetId) { _, v in
                 if let p = LLMSettings.presets.first(where: { $0.id == v }), !p.baseURL.isEmpty {
                     baseURL = p.baseURL
@@ -240,11 +251,15 @@ public struct LLMSlotView: View {
                     savedHint = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { savedHint = false }
                 }
+                .controlSize(.small)
+                .buttonStyle(.primaryCapsule)
                 .disabled(baseURL.isEmpty || apiKey.isEmpty || model.isEmpty)
                 Button("清空此槽") {
                     baseURL = ""; apiKey = ""; model = ""
                     LLMSettings.clear(slot: slotIndex)
                 }
+                .controlSize(.small)
+                .buttonStyle(.quiet)
                 .disabled(!filled)
                 if savedHint {
                     Text("已保存").font(.caption).foregroundStyle(Color.rbScoreHigh)
@@ -261,6 +276,7 @@ public struct LLMSlotView: View {
                         testing = false
                     }
                 }
+                .controlSize(.small)
                 .disabled(testing || baseURL.isEmpty || apiKey.isEmpty || model.isEmpty)
             }
             if let r = testResult {
@@ -296,7 +312,9 @@ public struct DepsPane: View {
                         Image(systemName: dep.installed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                             .foregroundStyle(dep.installed ? Color.rbScoreHigh : Color.rbScoreMid)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(dep.displayName).font(.headline)
+                            Text(dep.displayName)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Color.rbText)
                             Text(dep.installed ? dep.path : dep.installHint)
                                 .font(.caption)
                                 .foregroundStyle(Color.rbText3)
@@ -329,6 +347,7 @@ public struct DepsPane: View {
                     VStack(alignment: .leading, spacing: 4) {
                         if downloader.progress >= 0 {
                             ProgressView(value: downloader.progress)
+                                .tint(Color.rbAccent)
                         } else {
                             ProgressView()
                         }
@@ -358,7 +377,7 @@ public struct DepsPane: View {
                             .frame(width: 150, alignment: .leading)
                         Text(customPaths[kind.rawValue].isNilOrEmpty ? "自动探测" : (customPaths[kind.rawValue] ?? ""))
                             .font(.caption)
-                            .foregroundStyle(customPaths[kind.rawValue].isNilOrEmpty ? .secondary : .primary)
+                            .foregroundStyle(customPaths[kind.rawValue].isNilOrEmpty ? Color.rbText3 : Color.rbText)
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -377,6 +396,7 @@ public struct DepsPane: View {
                                 DependencyPaths.setCustom(kind, "")
                             }
                             .controlSize(.small)
+                            .buttonStyle(.quiet)
                         }
                     }
                 }
@@ -424,14 +444,17 @@ public struct BoardsPane: View {
                 ForEach(FeatureBoard.allCases) { board in
                     HStack(spacing: 12) {
                         Image(systemName: board.icon)
+                            .font(.system(size: 16))
                             .frame(width: 24)
-                            .foregroundStyle(.tint)
+                            .foregroundStyle(Color.rbAccent)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(board.displayName).font(.headline)
+                            Text(board.displayName)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Color.rbText)
                             Text(board.subtitle)
-                                .font(.caption).foregroundStyle(Color.rbText3)
+                                .font(.caption).foregroundStyle(Color.rbText2)
                             Text(board.subFeatures.joined(separator: " · "))
-                                .font(.caption2).foregroundStyle(.tertiary)
+                                .font(.caption2).foregroundStyle(Color.rbText3)
                         }
                         Spacer()
                         Toggle("", isOn: Binding(
@@ -439,6 +462,7 @@ public struct BoardsPane: View {
                             set: { states[board.rawValue] = $0; FeatureBoard.setEnabled(board, $0) }
                         ))
                         .labelsHidden()
+                        .tint(Color.rbAccent)
                     }
                     .padding(.vertical, 4)
                 }
@@ -478,6 +502,7 @@ public struct CleanupPane: View {
                                onDays: @escaping (Int) -> Void) -> some View {
         HStack {
             Toggle(title, isOn: enabled)
+                .tint(Color.rbAccent)
                 .onChange(of: enabled.wrappedValue) { _, v in onEnable(v) }
             Spacer()
             TextField("", value: days, format: .number)
@@ -489,38 +514,48 @@ public struct CleanupPane: View {
                     if v > 0 { onDays(v) }
                 }
             Text(unit)
-                .foregroundStyle(enabled.wrappedValue ? .secondary : Color(nsColor: .tertiaryLabelColor))
+                .font(.callout)
+                .foregroundStyle(enabled.wrappedValue ? Color.rbText2 : Color.rbText3)
         }
     }
 
     public var body: some View {
         Form {
             Section("当前占用") {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5) {
                     HStack {
                         Text("数据库").foregroundStyle(Color.rbText3)
                         Spacer()
-                        Text(CacheCleanupService.humanBytes(cleanup.dbBytes)).monospacedDigit()
+                        Text(CacheCleanupService.humanBytes(cleanup.dbBytes))
+                            .monospacedDigit()
+                            .foregroundStyle(Color.rbText)
                     }
                     HStack {
                         Text("本地备份（\(cleanup.backupCount) 份）").foregroundStyle(Color.rbText3)
                         Spacer()
-                        Text(CacheCleanupService.humanBytes(cleanup.backupBytes)).monospacedDigit()
+                        Text(CacheCleanupService.humanBytes(cleanup.backupBytes))
+                            .monospacedDigit()
+                            .foregroundStyle(Color.rbText)
                     }
                     HStack {
                         Text("临时文件（\(cleanup.tempCount) 项）").foregroundStyle(Color.rbText3)
                         Spacer()
-                        Text(CacheCleanupService.humanBytes(cleanup.tempBytes)).monospacedDigit()
+                        Text(CacheCleanupService.humanBytes(cleanup.tempBytes))
+                            .monospacedDigit()
+                            .foregroundStyle(Color.rbText)
                     }
                     HStack {
                         Text("可清理全文 HTML").foregroundStyle(Color.rbText3)
                         Spacer()
-                        Text("\(cleanup.contentHtmlCount) 条").monospacedDigit()
+                        Text("\(cleanup.contentHtmlCount) 条")
+                            .monospacedDigit()
+                            .foregroundStyle(Color.rbText)
                     }
                 }
                 .font(.callout)
                 Button("刷新占用") { cleanup.refreshStats() }
                     .controlSize(.small)
+                    .buttonStyle(.quiet)
             }
 
             Section("清理策略") {
@@ -556,6 +591,7 @@ public struct CleanupPane: View {
                     Button(cleanup.isRunning ? "清理中…" : "立即清理") {
                         showCleanConfirm = true
                     }
+                    .buttonStyle(.primaryCapsule)
                     .disabled(cleanup.isRunning)
                     if cleanup.isRunning { ProgressView().controlSize(.small) }
                 }
@@ -634,7 +670,7 @@ public struct BackupRestoreView: View {
 
             if backups.isEmpty {
                 Text("暂无本地备份")
-                    .font(.caption).foregroundStyle(.tertiary)
+                    .font(.caption).foregroundStyle(Color.rbText3)
             } else {
                 Picker("选择备份", selection: $selectedBackup) {
                     Text("未选择").tag(nil as BackupInfo?)
@@ -644,6 +680,7 @@ public struct BackupRestoreView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .tint(Color.rbAccent)
                 .font(.caption)
 
                 Button("恢复所选备份…") {
@@ -694,13 +731,14 @@ public struct TrashRestoreView: View {
         VStack(alignment: .leading, spacing: 6) {
             if batches.isEmpty {
                 Text("回收站为空——清理删除的内容会备份到这里。")
-                    .font(.caption).foregroundStyle(.tertiary)
+                    .font(.caption).foregroundStyle(Color.rbText3)
             } else {
                 ForEach(batches) { b in
                     HStack {
                         VStack(alignment: .leading, spacing: 1) {
                             Text("\(b.date) · \(b.itemCount) 条")
                                 .font(.callout)
+                                .foregroundStyle(Color.rbText)
                             Text(CacheCleanupService.humanBytes(b.sizeBytes))
                                 .font(.caption2).foregroundStyle(Color.rbText3)
                         }
@@ -762,12 +800,13 @@ public struct DeadLetterView: View {
         VStack(alignment: .leading, spacing: 6) {
             if items.isEmpty {
                 Text("无死信任务——连续失败 3 次的管线任务会出现在这里。")
-                    .font(.caption).foregroundStyle(.tertiary)
+                    .font(.caption).foregroundStyle(Color.rbText3)
             } else {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, it in
                     HStack {
                         Text("内容 #\(it.contentId) · \(it.jtype)")
                             .font(.callout)
+                            .foregroundStyle(Color.rbText)
                         Text("失败 \(it.fails) 次")
                             .font(.caption2).foregroundStyle(Color.rbScoreLow)
                         Spacer()
@@ -840,11 +879,13 @@ public struct ReaderPane: View {
                         Text(t.displayName).tag(t.rawValue)
                     }
                 }
+                .tint(Color.rbAccent)
                 Picker("亮暗", selection: $themeModeRaw) {
                     ForEach(ReadingTheme.Mode.allCases) { m in
                         Text(m.displayName).tag(m.rawValue)
                     }
                 }
+                .tint(Color.rbAccent)
                 Picker("正文/标题字体", selection: $fontRaw) {
                     ForEach(ReadingFont.presets, id: \.self) { f in
                         Text(f.displayName).tag(fontKey(f))
@@ -854,6 +895,7 @@ public struct ReaderPane: View {
                         Text(family).font(.custom(family, size: 13)).tag("custom:\(family)")
                     }
                 }
+                .tint(Color.rbAccent)
                 Stepper("正文字号 \(Int(fontSize))", value: $fontSize, in: 12...28, step: 1)
                 Stepper("标题字号 \(Int(titleFontSize))", value: $titleFontSize, in: 16...40, step: 1)
                 Stepper("信息字号 \(Int(metaFontSize))", value: $metaFontSize, in: 9...18, step: 1)
@@ -861,44 +903,55 @@ public struct ReaderPane: View {
                 HStack {
                     Text("行距 \(Int(lineSpacing))")
                     Slider(value: $lineSpacing, in: 0...16, step: 1)
+                        .tint(Color.rbAccent)
                 }
                 HStack {
                     Text("内容宽度 \(Int(contentWidth))")
                     Slider(value: $contentWidth, in: 560...1200, step: 20)
+                        .tint(Color.rbAccent)
                 }
                 HStack {
                     Text("界面缩放 \(Int(uiFontScale * 100))%")
                     Slider(value: $uiFontScale, in: 0.8...1.5, step: 0.05)
+                        .tint(Color.rbAccent)
                 }
                 Picker("默认正文视图", selection: $viewMode) {
                     Text("双语对照").tag(0)
                     Text("仅原文").tag(1)
                     Text("仅译文").tag(2)
                 }
+                .tint(Color.rbAccent)
             }
 
             // ── 文章列表外观 ──
             Section("文章列表") {
                 Toggle("显示缩略图（右侧小图）", isOn: $showThumbnails)
+                    .tint(Color.rbAccent)
                 Picker("摘要显示", selection: $excerptLines) {
                     Text("不显示").tag(0)
                     Text("1 行").tag(1)
                     Text("2 行").tag(2)
                     Text("3 行").tag(3)
                 }
+                .tint(Color.rbAccent)
                 Picker("列表密度", selection: $density) {
                     Text("舒适").tag("comfortable")
                     Text("紧凑").tag("compact")
                 }
+                .tint(Color.rbAccent)
                 Toggle("显示来源名", isOn: $showSource)
+                    .tint(Color.rbAccent)
                 Toggle("显示日期", isOn: $showDate)
+                    .tint(Color.rbAccent)
                 if showDate {
                     Picker("日期格式", selection: $dateFormat) {
                         Text("绝对（2026-07-25）").tag("absolute")
                         Text("相对（3 小时前）").tag("relative")
                     }
+                    .tint(Color.rbAccent)
                 }
                 Toggle("未读文章标题加粗", isOn: $unreadBold)
+                    .tint(Color.rbAccent)
             }
         }
         .formStyle(.grouped)

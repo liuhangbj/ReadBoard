@@ -13,9 +13,16 @@ public struct ExportRulePane: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            // 页头：标题 + 计数 + 新建（主行动）
+            HStack(spacing: 8) {
                 Text("导出规则")
-                    .font(.title3.bold())
+                    .font(.system(size: RB.F.pageTitle, weight: .semibold))
+                    .foregroundStyle(Color.rbText)
+                if !rules.isEmpty {
+                    Text("\(rules.count)")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.rbText3)
+                }
                 Spacer()
                 Button {
                     editing = ExportRule(
@@ -25,9 +32,12 @@ public struct ExportRulePane: View {
                         targetConfig: [:], lastRunAt: nil)
                     showEditor = true
                 } label: { Label("新建规则", systemImage: "plus") }
-                .controlSize(.small)
+                .buttonStyle(.primaryCapsule)
             }
-            .padding()
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+
+            Hairline()
 
             if rules.isEmpty {
                 ContentUnavailableView(
@@ -49,14 +59,17 @@ public struct ExportRulePane: View {
                             ))
                             .labelsHidden()
                             .controlSize(.small)
+                            .tint(Color.rbAccent)
 
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading, spacing: 3) {
                                 Text(rule.name.isEmpty ? "未命名" : rule.name)
-                                    .font(.headline)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(Color.rbText)
                                 Text("\(rule.triggerDisplay) → \(rule.targetDisplay)")
-                                    .font(.caption).foregroundStyle(.secondary)
+                                    .font(.caption).foregroundStyle(Color.rbText2)
                                 Text(statsText(for: rule.id))
-                                    .font(.caption2).foregroundStyle(.tertiary)
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(Color.rbText3)
                             }
                             Spacer()
 
@@ -159,6 +172,7 @@ public struct ExportRuleEditor: View {
                         Text("翻译完成后").tag("translate")
                         Text("转录完成后").tag("transcribe")
                     }
+                    .tint(Color.rbAccent)
                 }
 
                 Section("筛选条件（全部满足才导出）") {
@@ -205,11 +219,16 @@ public struct ExportRuleEditor: View {
                                  : "已选 \(selectedSourceIds.count) 个源")
                         }
                         .menuStyle(.borderlessButton)
+                        .tint(Color.rbAccent)
                     }
                     Toggle("只导已翻译的", isOn: $rule.criteria.requireTranslated)
+                        .tint(Color.rbAccent)
                     Toggle("只导已转录的（播客/视频）", isOn: $rule.criteria.requireTranscribed)
+                        .tint(Color.rbAccent)
                     Toggle("只导有摘要的", isOn: $rule.criteria.requireSummary)
+                        .tint(Color.rbAccent)
                     Toggle("只导星标内容", isOn: $rule.criteria.starredOnly)
+                        .tint(Color.rbAccent)
                 }
 
                 Section("导出目标") {
@@ -218,6 +237,7 @@ public struct ExportRuleEditor: View {
                         Text("Obsidian 仓库").tag("obsidian")
                         Text("Webhook").tag("webhook")
                     }
+                    .tint(Color.rbAccent)
                     if rule.target == "obsidian" || rule.target == "mddir" {
                         // 目录用系统文件夹选择器（不手填路径）
                         HStack {
@@ -225,7 +245,7 @@ public struct ExportRuleEditor: View {
                                  ? (rule.target == "obsidian" ? "选择 Obsidian 仓库目录" : "选择输出目录")
                                  : dir)
                                 .font(.callout)
-                                .foregroundStyle(dir.isEmpty ? .secondary : .primary)
+                                .foregroundStyle(dir.isEmpty ? Color.rbText3 : Color.rbText)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
@@ -233,6 +253,7 @@ public struct ExportRuleEditor: View {
                                 .controlSize(.small)
                         }
                         Toggle("按来源建子目录", isOn: $bySource)
+                            .tint(Color.rbAccent)
                             .onChange(of: bySource) { _, v in rule.targetConfig["subdir_by_source"] = v }
                     } else {
                         TextField("Webhook URL（POST JSON）", text: $webhookURL)
@@ -242,19 +263,21 @@ public struct ExportRuleEditor: View {
             }
             .formStyle(.grouped)
 
-            Divider()
+            Hairline()
             HStack {
                 Button("取消") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.quiet)
                 Spacer()
                 Button("保存") {
                     onSave(rule)
                 }
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.primaryCapsule)
                 .disabled(rule.name.isEmpty || !targetValid)
             }
-            .padding()
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
         }
         .frame(minWidth: 520, idealWidth: 560, minHeight: 520, idealHeight: 600)
         .navigationTitle(rule.id == 0 ? "新建导出规则" : "编辑导出规则")

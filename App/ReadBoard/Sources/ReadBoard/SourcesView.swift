@@ -30,7 +30,7 @@ public struct SourcesView: View {
                 .buttonStyle(.quiet)
                 .help("返回阅读")
                 Text("订阅源")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: RB.F.pageTitle, weight: .semibold))
                     .foregroundStyle(Color.rbText)
                 Text("\(store.sources.count)")
                     .font(.system(size: 13))
@@ -49,11 +49,6 @@ public struct SourcesView: View {
                     Label("文件夹", systemImage: "folder.badge.plus")
                 }
                 .buttonStyle(.quiet)
-                Button { showAddSheet = true } label: {
-                    Label("添加", systemImage: "plus")
-                }
-                .buttonStyle(.quiet)
-                .keyboardShortcut("n", modifiers: .command)
                 // OPML 导入/导出（SwiftUI 原生 fileImporter/fileExporter）
                 Button { showImportPanel = true } label: {
                     Label("导入", systemImage: "square.and.arrow.down")
@@ -63,28 +58,51 @@ public struct SourcesView: View {
                     Label("导出", systemImage: "square.and.arrow.up")
                 }
                 .buttonStyle(.quiet)
+                VHairline(height: 14)
+                Button { showAddSheet = true } label: {
+                    Label("添加", systemImage: "plus")
+                }
+                .buttonStyle(.primaryCapsule)
+                .keyboardShortcut("n", modifiers: .command)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.vertical, 12)
 
-            if !store.lastSyncMessage.isEmpty {
-                Text(store.lastSyncMessage)
-                    .font(.caption)
-                    .foregroundStyle(Color.rbText3)
-                    .padding(.horizontal, 16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if !opmlMessage.isEmpty {
-                Text(opmlMessage)
-                    .font(.caption)
-                    .foregroundStyle(Color.rbAccent)
-                    .padding(.horizontal, 16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            // ── 同步/导入导出消息（状态横幅，hairline 描边）──
+            if !store.lastSyncMessage.isEmpty || !opmlMessage.isEmpty {
+                VStack(spacing: 4) {
+                    if !store.lastSyncMessage.isEmpty {
+                        StatusBanner {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.rbText3)
+                            Text(store.lastSyncMessage)
+                                .font(.caption)
+                                .foregroundStyle(Color.rbText3)
+                            Spacer()
+                        }
+                    }
+                    if !opmlMessage.isEmpty {
+                        StatusBanner {
+                            Image(systemName: "doc.badge.arrow.up")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.rbAccent)
+                            Text(opmlMessage)
+                                .font(.caption)
+                                .foregroundStyle(Color.rbAccent)
+                            Spacer()
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            // ── 后台管线 worker 状态条 ──
-            HStack(spacing: 8) {
+            // ── 后台管线 worker 状态条（横幅样式与消息对齐）──
+            StatusBanner {
                 Image(systemName: "gearshape.2")
+                    .font(.system(size: 11))
                     .foregroundStyle(Color.rbText3)
                 if worker.isRunning {
                     ProgressView().scaleEffect(0.6)
@@ -110,7 +128,7 @@ public struct SourcesView: View {
                 .buttonStyle(.quiet)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 6)
+            .padding(.bottom, 8)
 
             Hairline()
 
@@ -244,8 +262,9 @@ public struct FolderHeader: View {
             Image(systemName: "folder.fill")
                 .foregroundStyle(Color.rbText3)
             Text(folder.name)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color.rbText)
+                .tracking(0.3)
             Spacer()
             // 文件夹级总开关(开 = 该组全生效)
             folderToggle("打分", key: "auto_score", on: folder.policy.autoScore)
@@ -307,8 +326,9 @@ public struct SourceRow: View {
     public var body: some View {
         HStack(alignment: .center, spacing: 12) {
             // ── 左：图标 + 名称/地址（固定列宽，各行对齐）──
-            Text(icon)
-                .font(.title3)
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundStyle(Color.rbText2)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 3) {
                 Text(src.name)
@@ -414,9 +434,13 @@ public struct SourceRow: View {
             Text(src.fetchMode.displayName)
                 .font(.caption)
                 .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(fetchModeColor.opacity(0.12))
+                .background(fetchModeColor.opacity(0.10))
                 .foregroundStyle(fetchModeColor)
                 .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
+                .overlay(
+                    RoundedRectangle(cornerRadius: RB.Radius.sm)
+                        .strokeBorder(fetchModeColor.opacity(0.22), lineWidth: RB.Line.hair)
+                )
         }
         .menuStyle(.borderlessButton)
         .help("全文获取方式（点击可修改）")
@@ -435,12 +459,16 @@ public struct SourceRow: View {
                 }
             }
         } label: {
-            Text("⏱ \(intervalLabel(src.fetchIntervalMin))")
-                .font(.caption)
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(Color.rbSurface)
-                .foregroundStyle(Color.rbText3)
-                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
+            HStack(spacing: 3) {
+                Image(systemName: "clock")
+                    .font(.system(size: 9))
+                Text(intervalLabel(src.fetchIntervalMin))
+            }
+            .font(.caption)
+            .foregroundStyle(Color.rbText3)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Color.rbSurface)
+            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
         }
         .menuStyle(.borderlessButton)
         .help("自动抓取间隔（点击可修改）")
@@ -501,12 +529,13 @@ public struct SourceRow: View {
         }
     }
 
+    /// 源类型图标（SF Symbol，替代 emoji——纸墨系不用彩色符号）
     private var icon: String {
         switch src.stype {
-        case "podcast": return "🎙"
-        case "youtube": return "▶️"
-        case "wechat": return "💬"
-        default: return "📰"
+        case "podcast": return "mic"
+        case "youtube": return "play.rectangle"
+        case "wechat": return "bubble.left.and.bubble.right"
+        default: return "newspaper"
         }
     }
 
@@ -540,7 +569,9 @@ public struct AddSourceSheet: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("添加订阅源").font(.title3.bold())
+            Text("添加订阅源")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.rbText)
 
             Picker("类型", selection: $stype) {
                 Text("RSS 文章").tag("rss")
@@ -548,21 +579,36 @@ public struct AddSourceSheet: View {
                 Text("YouTube").tag("youtube")
             }
             .pickerStyle(.segmented)
+            .tint(Color.rbAccent)
+            .labelsHidden()
 
-            TextField("名称（可选，留空自动用 feed 标题）", text: $name)
-            TextField(stype == "youtube" ? "频道 URL / @handle / UC 开头 ID" : "Feed 地址或网站主页 (https://…)", text: $identifier)
-                .textFieldStyle(.roundedBorder)
-                .onChange(of: identifier) { _, _ in
-                    // 输入变了必须重新检测
-                    testedOK = false
-                    resolvedFeedURL = nil
-                    testResult = ""
-                }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("名称")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.rbText3)
+                    .tracking(RB.Track.section)
+                TextField("可选，留空自动用 feed 标题", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                Text(stype == "youtube" ? "频道" : "地址")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.rbText3)
+                    .tracking(RB.Track.section)
+                    .padding(.top, 4)
+                TextField(stype == "youtube" ? "频道 URL / @handle / UC 开头 ID" : "Feed 地址或网站主页 (https://…)", text: $identifier)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: identifier) { _, _ in
+                        // 输入变了必须重新检测
+                        testedOK = false
+                        resolvedFeedURL = nil
+                        testResult = ""
+                    }
+            }
 
             if !testResult.isEmpty {
                 Text(testResult)
                     .font(.caption)
                     .foregroundStyle(testResult.hasPrefix("✓") ? Color.rbScoreHigh : Color.rbScoreLow)
+                    .textSelection(.enabled)
             }
 
             HStack {
@@ -571,15 +617,17 @@ public struct AddSourceSheet: View {
                 Spacer()
                 Button("取消") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.quiet)
                 Button("添加") { add() }
                     .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.primaryCapsule)
                     .disabled(identifier.isEmpty || !testedOK || testing)
             }
             Text("添加前请先「检测」通过——确认源可抓取，避免加了死源。")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.caption2).foregroundStyle(Color.rbText3)
         }
-        .padding(20)
-        .frame(width: 460)
+        .padding(24)
+        .frame(width: 480)
     }
 
     /// 解析用户输入为最终 identifier（YouTube 异步解析 channel_id，其余同步返回）

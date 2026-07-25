@@ -811,14 +811,21 @@ public struct ArticleRow: View {
     /// 紧凑密度下缩略图更小、行距更紧
     private var isCompact: Bool { density == "compact" }
 
-    /// 源类型图标（统一辨识度：RSS 文章/播客/视频/社交媒体）
-    private var ctypeIcon: String {
+    /// 源类型图标（RSS 用经典三半圆图标，其他来源待补齐品牌图标）
+    /// 返回 nil 表示暂不显示图标（等写对应订阅功能时再补）
+    private var ctypeIcon: String? {
         switch item.ctype {
         case "podcast": return "mic"
-        case "video", "youtube": return "play.rectangle"
-        case "wechat", "social": return "bubble.left.and.bubble.right"
-        default: return "doc.text"  // article/rss
+        case "video", "youtube": return nil  // 待 YouTube 订阅功能补齐品牌图标
+        case "wechat", "social": return nil   // 待微信订阅功能补齐品牌图标
+        default: return nil  // RSS 用自定义 RSSIcon 组件，不走 SF Symbol
         }
+    }
+
+    /// 是否 RSS 协议源（用自定义三半圆图标）
+    private var isRSSSource: Bool {
+        item.ctype != "podcast" && item.ctype != "video" && item.ctype != "youtube" &&
+        item.ctype != "wechat" && item.ctype != "social"
     }
 
     public var body: some View {
@@ -849,10 +856,14 @@ public struct ArticleRow: View {
                 HStack(spacing: 6) {
                     if showSource {
                         HStack(spacing: 4) {
-                            // 源类型图标（统一 11pt，辨识度优先）
-                            Image(systemName: ctypeIcon)
-                                .font(.system(size: 11))
-                                .foregroundStyle(Color.rbText3)
+                            // 源类型图标：RSS 用经典三半圆，其他来源待补齐品牌图标
+                            if isRSSSource {
+                                RSSIcon(size: 11, color: .rbText3)
+                            } else if let icon = ctypeIcon {
+                                Image(systemName: icon)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Color.rbText3)
+                            }
                             Text(item.source)
                                 .font(.system(size: RB.F.rowMeta * scale, weight: .medium))
                                 .foregroundStyle(Color.rbText2)

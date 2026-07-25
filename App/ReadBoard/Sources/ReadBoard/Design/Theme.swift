@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - 颜色/视图便捷扩展（极简留白系）
+// MARK: - 颜色/视图便捷扩展（纸墨系）
 //
 // 把 RB.C.* 暴露成 Color 静态属性，调用点写 .rbAccent / .rbText2 即可。
 // 选中态扩展 .rbSelection 是全 App 统一的核心视觉：
@@ -17,6 +17,7 @@ extension Color {
     static let rbText3     = RB.C.text3
     // 点缀 + 分割线
     static let rbAccent    = RB.C.accent
+    static let rbOnAccent  = RB.C.onAccent
     static let rbHairline  = RB.C.hairline
     static let rbSeparator = RB.C.separator
     // 语义色
@@ -48,6 +49,21 @@ extension View {
                         .padding(.vertical, 3)
                 }
             }
+    }
+
+    /// 行 hover 底：鼠标悬停浮现 surface 圆角底（未选中行的交互反馈）。
+    /// 与 rbSelection 正交——选中行 hover 时两层叠出略深的墨蓝，自然和谐。
+    func rbRowHover(_ hovering: Bool, radius: CGFloat = RB.Radius.md) -> some View {
+        background(
+            RoundedRectangle(cornerRadius: radius)
+                .fill(hovering ? Color.rbSurface.opacity(0.85) : Color.clear)
+        )
+    }
+
+    /// 浮层软阴影（toast / 浮起卡片专用；平面内容一律不用阴影，靠 hairline 分界）
+    func rbFloatingShadow() -> some View {
+        shadow(color: RB.Shadow.floatingColor.opacity(RB.Shadow.floatingOpacity),
+               radius: RB.Shadow.floatingRadius, x: 0, y: RB.Shadow.floatingY)
     }
 
     /// 行选中态文字色：选中/未选中都用主文字体系（不再选中反白）
