@@ -246,8 +246,10 @@ public final class CacheCleanupService: ObservableObject {
 
     /// R4 删除回收站：把即将物理删除的内容导出成 JSONL 存 Data/trash/YYYYMMDD/，留作后悔药。
     private func backupBeforeDelete(days: Int) {
+        // 修 P2-14：备份补存译文/星标/语言/fetch_status——恢复时不丢双语产出
         let rows = db.queryRows("""
-            SELECT id, guid, title, url, source, author, published_at, llm_summary, llm_score, content_md
+            SELECT id, guid, title, url, source, author, published_at, llm_summary, llm_score,
+                   content_md, llm_translated_md, starred, language, fetch_status
             FROM content
             WHERE is_archived = 1 AND starred = 0
               AND updated_at < datetime('now', '-\(safeDays(days)) days')
@@ -267,6 +269,10 @@ public final class CacheCleanupService: ObservableObject {
                 "source": r["source"], "author": r["author"], "published_at": r["published_at"],
                 "llm_summary": r["llm_summary"], "llm_score": r["llm_score"].flatMap(Int.init),
                 "content_md": r["content_md"],
+                "llm_translated_md": r["llm_translated_md"],
+                "starred": r["starred"].flatMap(Int.init),
+                "language": r["language"],
+                "fetch_status": r["fetch_status"].flatMap(Int.init),
             ]
             let compact = obj.compactMapValues { $0 }
             if let data = try? JSONSerialization.data(withJSONObject: compact),
@@ -360,10 +366,13 @@ public final class CacheCleanupService: ObservableObject {
             }
             // guid 是 NOT NULL：旧备份没有 guid 字段时用合成值兜底（此前缺失 guid 导致 INSERT 静默全失败）
             let guid = (obj["guid"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "restored-\(id)"
+            // 修 P2-14：恢复补回译文/星标/语言/fetch_status——双语产出不再丢
             let ok = db.execute("""
                 INSERT INTO content (id, guid, ctype, source, title, url, author, published_at,
-                                     excerpt, content_md, llm_summary, llm_score, is_archived, updated_at)
-                VALUES (?, ?, 'article', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'));
+                                     excerpt, content_md, llm_summary, llm_score,
+                                     llm_translated_md, starred, language, fetch_status,
+                                     is_archived, updated_at)
+                VALUES (?, ?, 'article', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'));
                 """, params: [
                     id,
                     guid,
@@ -376,6 +385,10 @@ public final class CacheCleanupService: ObservableObject {
                     obj["content_md"] as? String,
                     obj["llm_summary"] as? String,
                     obj["llm_score"] as? Int,
+                    obj["llm_translated_md"] as? String,
+                    obj["starred"] as? Int ?? 0,
+                    obj["language"] as? String,
+                    obj["fetch_status"] as? Int ?? 0,
                 ])
             if ok { restored += 1 } else { skipped += 1 }
         }

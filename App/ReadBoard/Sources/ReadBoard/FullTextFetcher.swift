@@ -202,11 +202,17 @@ public final class FullTextFetcher: @unchecked Sendable {
             errBox.append(h.availableData)
         }
 
+        // 关键修复：standardInput 必须在 run() 之前设好——进程启动后再设属性会抛
+        // NSException（NOCOPY_SETTER_IMPL，Swift do/catch 抓不住直接 SIGABRT 崩溃）。
+        // 之前把 standardInput 放在 run() 之后导致后台全文抓取崩 App。
+        let inPipe = Pipe()
+        if stdinData != nil {
+            proc.standardInput = inPipe
+        }
+
         do {
             try proc.run()
             if let stdinData {
-                let inPipe = Pipe()
-                proc.standardInput = inPipe
                 inPipe.fileHandleForWriting.write(stdinData)
                 inPipe.fileHandleForWriting.closeFile()
             }

@@ -97,7 +97,11 @@ public struct ExportRulePane: View {
                 id: 0, name: "", enabled: true, criteria: ExportRule.Criteria(),
                 triggerOn: "manual", target: "mddir", targetConfig: [:], lastRunAt: nil)
             ) { saved in
+                let isEdit = saved.id != 0
                 _ = ExportService.shared.saveRule(saved)
+                // 编辑已有规则（改了配置）→ 清除已交付记录，下次「立即执行」全量重导
+                // 修 P1-11：否则改配置后已交付的永不重导，看似没反应
+                if isEdit { ExportService.shared.resetDelivered(ruleId: saved.id) }
                 showEditor = false
                 reload()
             }

@@ -1342,6 +1342,11 @@ public struct ReadingView: View {
 
     private func runScore() {
         let cid = item.id
+        // contentId 互斥：worker 正在处理同一篇则不重复触发（防双倍 LLM 计费，修 P1-10）
+        guard PipelineWorker.shared.tryLockContent(cid) else {
+            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            return
+        }
         busy = true
         busyForId = cid
         statusMsg = "评分中…"
@@ -1349,6 +1354,7 @@ public struct ReadingView: View {
             let ok = await pipeline.score(contentId: cid, title: item.title, body: contentBody)
             if ok { ArchiveService.shared.rearchive(contentId: cid) }   // 手动重处理 → 刷新归档文件
             await MainActor.run {
+                PipelineWorker.shared.unlockContent(cid)
                 guard busyForId == cid else { return }   // 已切走，不覆盖新文章状态
                 busy = false
                 statusMsg = ok ? "✅ 评分完成" : "❌ 评分失败"
@@ -1359,6 +1365,10 @@ public struct ReadingView: View {
 
     private func runTranslate() {
         let cid = item.id
+        guard PipelineWorker.shared.tryLockContent(cid) else {
+            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            return
+        }
         busy = true
         busyForId = cid
         statusMsg = "翻译中…"
@@ -1366,6 +1376,7 @@ public struct ReadingView: View {
             let ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
             if ok { ArchiveService.shared.rearchive(contentId: cid) }
             await MainActor.run {
+                PipelineWorker.shared.unlockContent(cid)
                 guard busyForId == cid else { return }
                 busy = false
                 statusMsg = ok ? "✅ 翻译完成" : "❌ 翻译失败"
@@ -1380,6 +1391,10 @@ public struct ReadingView: View {
 
     private func runSummarize() {
         let cid = item.id
+        guard PipelineWorker.shared.tryLockContent(cid) else {
+            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            return
+        }
         busy = true
         busyForId = cid
         statusMsg = "摘要中…"
@@ -1387,6 +1402,7 @@ public struct ReadingView: View {
             let ok = await pipeline.summarize(contentId: cid, title: item.title, body: contentBody)
             if ok { ArchiveService.shared.rearchive(contentId: cid) }
             await MainActor.run {
+                PipelineWorker.shared.unlockContent(cid)
                 guard busyForId == cid else { return }
                 busy = false
                 statusMsg = ok ? "✅ 摘要完成" : "❌ 摘要失败"
@@ -1397,6 +1413,10 @@ public struct ReadingView: View {
 
     private func runTranscribe() {
         let cid = item.id
+        guard PipelineWorker.shared.tryLockContent(cid) else {
+            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            return
+        }
         busy = true
         busyForId = cid
         statusMsg = "转录中（下载+识别，较长）…"
@@ -1405,6 +1425,7 @@ public struct ReadingView: View {
                 contentId: cid, title: item.title, audioUrl: item.audioUrl, pageUrl: item.url, language: item.language)
             if ok { ArchiveService.shared.rearchive(contentId: cid) }
             await MainActor.run {
+                PipelineWorker.shared.unlockContent(cid)
                 guard busyForId == cid else { return }
                 busy = false
                 statusMsg = ok ? "✅ 转录完成" : "❌ 转录失败"

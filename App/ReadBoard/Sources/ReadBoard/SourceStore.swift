@@ -132,7 +132,12 @@ public final class SourceStore: ObservableObject {
         // 先 reload 填充，再启动调度。
         reload()
         Task { await syncAll(manual: false) }
-        syncTimer = Timer.scheduledTimer(withTimeInterval: syncInterval, repeats: true) { [weak self] _ in
+        // Timer 周期取 min(全局 syncInterval, 源最小 fetchIntervalMin)——修 P2-12：
+        // 用户把某源设 5min 但全局 Timer 15min，该源永远不可能按 5min 抓。
+        // 用最小间隔做 Timer 周期，isDue 内部再按各源间隔判断（快源按时抓，慢源跳过）。
+        let minSourceInterval = sources.map { $0.fetchIntervalMin }.min() ?? Int(syncInterval / 60)
+        let effectiveInterval = min(syncInterval, TimeInterval(max(minSourceInterval, 1) * 60))
+        syncTimer = Timer.scheduledTimer(withTimeInterval: effectiveInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.syncAll(manual: false) }
         }
     }
@@ -219,10 +224,34 @@ public final class SourceStore: ObservableObject {
         return ok
     }
 
-    /// 手动设置某源的全文模式（GUI 覆盖）
+    /// 手动设置某源的全文模式（GUI 覆盖）。打 fetch_mode_manual 标记——
+    /// reprobe 见此标记跳过不覆盖用户手动设置（修 P1-8）。
     func setFetchMode(id: Int64, mode: FetchMode) {
         let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
         var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+        obj["fetch_mode"] = mode.rawValue
+        obj["fetch_mode_manual"] = true   // 用户手动设的，reprobe 别动
+        if let data = try? JSONSerialization.data(withJSONObject: obj),
+           let str = String(data: data, encoding: .utf8) {
+            db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id])
+        }
+        reload()
+    }
+
+    /// 重新探测某源的全文模式并写回。
+    /// 修 P1-8：用户手动设过（fetch_mode_manual）的源跳过不覆盖——
+    /// 否则用户改成 defuddle，某次 reprobe 又被打回 summary，全文抓取静默退化。
+    func reprobeFetchMode(id: Int64) async {
+        let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
+        if let obj = try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any],
+           obj["fetch_mode_manual"] as? Bool == true {
+            return   // 用户手动设过，不覆盖
+        }
+        guard let identifier = db.scalarString("SELECT identifier FROM content_source WHERE id = ?", params: [id]) else { return }
+        let mode = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
+        // reprobe 结果不算手动——直接写 config 不打 manual 标记
+        let cur = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
+        var obj = (try? JSONSerialization.jsonObject(with: Data(cur.utf8)) as? [String: Any]) ?? [:]
         obj["fetch_mode"] = mode.rawValue
         if let data = try? JSONSerialization.data(withJSONObject: obj),
            let str = String(data: data, encoding: .utf8) {
@@ -247,13 +276,6 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
-    /// 重新探测某源的全文模式并写回
-    func reprobeFetchMode(id: Int64) async {
-        guard let identifier = db.scalarString("SELECT identifier FROM content_source WHERE id = ?", params: [id]) else { return }
-        let mode = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
-        setFetchMode(id: id, mode: mode)
-    }
-
     /// 设置某源抓取间隔（分钟）
     func setFetchInterval(id: Int64, minutes: Int) {
         let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
@@ -267,7 +289,11 @@ public final class SourceStore: ObservableObject {
     }
 
     func removeSource(id: Int64) {
-        // 先删该源内容，再删源（content.source 与 stype 对应，guid 关联不可靠，按 source+identifier 不可靠，仅删源记录）
+        // 修 P0-3：删源前先把该源内容归档（保留可查）——ON DELETE SET NULL 会把
+        // source_id 抹成 NULL，孤儿内容 source_id=NULL 后 worker/retention 都
+        // 查不到（guard let sid 跳过），永远躺在未归档区没人管。
+        // 归档后：内容保留在 DB 可检索，但不占活跃列表，不会因 SET NULL 变孤儿失明。
+        db.execute("UPDATE content SET is_archived = 1 WHERE source_id = ? AND is_archived = 0", params: [id])
         db.execute("DELETE FROM content_source WHERE id = ?", params: [id])
         reload()
     }

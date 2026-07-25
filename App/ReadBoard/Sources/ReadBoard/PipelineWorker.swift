@@ -27,6 +27,23 @@ public final class PipelineWorker: ObservableObject {
     /// 每轮最多处理条数（防一次跑太久）
     var batchLimit = 30
 
+    /// contentId 级互斥锁（修 P1-10）：正在处理的内容 id 集合。
+    /// 手动触发（阅读区按钮）和 worker 都先 tryLock——防止手动+worker 对同一篇
+    /// 双重调用 LLM（双倍计费），或两篇并发跑违背串行防限流。
+    private var processingIds: Set<Int64> = []
+    private let processingLock = NSLock()
+    /// 尝试占用某内容的处理权（已占用返回 false）
+    func tryLockContent(_ id: Int64) -> Bool {
+        processingLock.lock(); defer { processingLock.unlock() }
+        if processingIds.contains(id) { return false }
+        processingIds.insert(id)
+        return true
+    }
+    /// 释放某内容的处理权
+    func unlockContent(_ id: Int64) {
+        processingLock.lock(); processingIds.remove(id); processingLock.unlock()
+    }
+
     // MARK: 存量保护
     // worker 只处理"水位线之后"的新内容, 存量一律不碰(避免全量跑历史又贵又慢)。
     // 水位线 = 首次启动时的最大内容 id, 持久化到 UserDefaults, 重启不累加旧的。
@@ -36,7 +53,11 @@ public final class PipelineWorker: ObservableObject {
     /// 存量水位线：小于等于此 id 的内容不处理
     private(set) var watermark: Int64 = 0
 
-    /// 初始化水位线：已存则读，否则取当前最大 id 并持久化
+    /// 初始化水位线：已存则读，否则取当前最大 id 并持久化。
+    /// 修 P1-7：重装/换机时 UserDefaults 没了但 DB 还在——水位线若重置为 MAX(id)，
+    /// 之前所有未处理内容被一次性当新内容涌入打分区（LLM 成本爆炸）。
+    /// 检测：DB 已有内容但无水位线 = 重装 → 保守把水位线设为 MAX（历史不自动跑，
+    /// 用户要补跑用手动回填），避免误触发全量。
     private func initWatermark() {
         let saved = UserDefaults.standard.integer(forKey: watermarkKey)
         if saved > 0 {
@@ -46,6 +67,10 @@ public final class PipelineWorker: ObservableObject {
         let maxId = db.scalarInt("SELECT COALESCE(MAX(id),0) FROM content;") ?? 0
         watermark = Int64(maxId)
         UserDefaults.standard.set(maxId, forKey: watermarkKey)
+        // 重装检测：DB 已有大量内容但无水位线，记日志提示历史需手动回填
+        if maxId > 100 {
+            fputs("[watermark] 检测到重装/换机（DB 有 \(maxId) 条但无水位线），历史不自动跑管线，需要请手动回填\n", stderr)
+        }
     }
 
     private init() {
@@ -100,6 +125,9 @@ public final class PipelineWorker: ObservableObject {
         }
 
         for t in tasks.prefix(batchLimit) {
+            // contentId 互斥：手动触发正在处理同一篇则跳过（防双倍 LLM 计费，修 P1-10）
+            guard tryLockContent(t.id) else { continue }
+            defer { unlockContent(t.id) }
             // 打分（AI 板块总开关 && 打分子开关 && 源级开关，源级已在收集时判过）
             // R2: 每个管线调用包单任务超时——一条挂死不再拖垮整轮 worker
             if t.needScore, AIPipeline.score.effective {
@@ -424,10 +452,12 @@ public final class PipelineWorker: ObservableObject {
         guard db.open() else { return 0 }
         var stmt: OpaquePointer?
         // (id, source_id, url, content_html)
+        // fetch_status IN (0,1,3)：0=未抓 3=失败 1=抓取中卡死（修 P1-9——
+        // 历史 PG 数据或异常中断可能带 1，卡中间态两边都不管，一并捞出来重试）
         let sql = """
         SELECT id, source_id, url, content_html FROM content
         WHERE id > \(watermark)
-          AND fetch_status IN (0, 3)
+          AND fetch_status IN (0, 1, 3)
           AND ctype = 'article'
           AND source_id IS NOT NULL
         ORDER BY id DESC LIMIT 10;

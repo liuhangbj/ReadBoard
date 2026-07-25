@@ -363,7 +363,21 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
     }
 
     private func finishEntry() {
-        let guid = !eGuid.isEmpty ? eGuid : (!eURL.isEmpty ? eURL : eTitle)
+        // guid fallback：guid → url → title+日期。
+        // 修 P0-2：title 单独作 guid 不稳——改标题后同篇变两条（旧 guid 失配重入库）、
+        // 多篇同 title（"早报"）guid 相同真新内容被误杀。title fallback 时拼日期区分，
+        // 减少同 title 碰撞 + 改标题后日期仍能对上旧条目（同篇同日）。
+        let guid: String
+        if !eGuid.isEmpty {
+            guid = eGuid
+        } else if !eURL.isEmpty {
+            guid = eURL
+        } else if !eTitle.isEmpty {
+            let dateStr = ePublished.map { ISO8601DateFormatter().string(from: $0).prefix(10) } ?? ""
+            guid = dateStr.isEmpty ? eTitle : "\(eTitle)|\(dateStr)"
+        } else {
+            return
+        }
         guard !guid.isEmpty else { return }
         entries.append(ParsedEntry(
             guid: guid, title: eTitle, url: eURL, published: ePublished,

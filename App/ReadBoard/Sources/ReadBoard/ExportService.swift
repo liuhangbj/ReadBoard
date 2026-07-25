@@ -118,6 +118,14 @@ public final class ExportService: @unchecked Sendable {
         db.execute("DELETE FROM export_rule WHERE id = ?", params: [id])  // record 级联删
     }
 
+    /// 清除某规则的已交付记录（下次「立即执行」全量重导）。
+    /// 修 P1-11：幂等键 (rule_id, content_id) 不含 criteria/target——改规则配置后
+    /// 「立即执行」把历史全跳过看似没反应。提供清除入口让用户改了配置能重导，
+    /// 不用删规则重建。
+    func resetDelivered(ruleId: Int64) {
+        db.execute("DELETE FROM export_record WHERE rule_id = ?", params: [ruleId])
+    }
+
     // MARK: 触发
 
     /// 管线完成后调用：跑所有 trigger_on 匹配且启用的规则。

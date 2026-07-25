@@ -592,7 +592,15 @@ public final class Database: @unchecked Sendable {
             FROM content
             """
         }
-        var conds: [String] = [useFTS ? "c.is_archived = \(archived ? 1 : 0)" : "is_archived = \(archived ? 1 : 0)"]
+        // 修 P2-15：星标筛选跨归档——星标文章不管归档与否都该能在「星标」段看到，
+        // 此前写死 is_archived=0/1 导致「星标+已归档」的文章任何分段都查不到。
+        let archivedCond: String
+        if starredOnly {
+            archivedCond = "1=1"   // 星标段不看归档状态，活跃+归档星标都显示
+        } else {
+            archivedCond = useFTS ? "c.is_archived = \(archived ? 1 : 0)" : "is_archived = \(archived ? 1 : 0)"
+        }
+        var conds: [String] = [archivedCond]
         let col = useFTS ? "c." : ""
         if source != nil { conds.append("\(col)source = ?") }
         if sourceId != nil { conds.append("\(col)source_id = ?") }
@@ -774,10 +782,12 @@ public final class Database: @unchecked Sendable {
 
     /// 批量标已读（按条件：source/当前筛选）。返回影响条数。
     /// 关键词语义与 fetchContents 对齐：FTS 可用走 MATCH（与列表口径一致），否则 LIKE 回退。
+    /// archived 参数对齐当前视图——归档视图点「全部已读」也生效（修 P0-5：
+    /// 此前写死 is_archived=0，归档视图静默 0 条）。
     @discardableResult
     func markAllRead(source: String? = nil, sourceId: Int64? = nil, folderId: Int64? = nil,
-                     minScore: Int? = nil, keyword: String? = nil) -> Int {
-        var sql = "UPDATE content SET read_at = datetime('now') WHERE read_at IS NULL AND is_archived = 0"
+                     minScore: Int? = nil, keyword: String? = nil, archived: Bool = false) -> Int {
+        var sql = "UPDATE content SET read_at = datetime('now') WHERE read_at IS NULL AND is_archived = \(archived ? 1 : 0)"
         var conds: [String] = []
         if source != nil { conds.append("source = ?") }
         if sourceId != nil { conds.append("source_id = ?") }

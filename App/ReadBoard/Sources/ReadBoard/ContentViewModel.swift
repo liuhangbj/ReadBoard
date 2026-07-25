@@ -125,9 +125,9 @@ public final class ContentViewModel: ObservableObject {
                                     limit: Self.pageSize, offset: 0)
         items = page
         hasMore = page.count >= Self.pageSize
-        if let sel = selectedItem, !items.contains(sel) {
-            selectedItem = nil
-        }
+        // 修 P1-6：筛选变化（哪怕改排序）不再销毁正在读的文章——保留 selectedItem，
+        // 用户继续读完当前篇，不因筛选/排序变化被关掉。只在文章被删除/归档消失时
+        // 才清（open 时校验还在不在 DB，不在才清）。
         // 同步刷左栏未读数——已读/全部已读/归档等操作改变了未读计数，
         // 只刷中栏会导致左栏角标不更新（用户：全部标已读后未读数字不刷新）。
         sidebarTree = db.fetchSidebarTree()
@@ -211,9 +211,12 @@ public final class ContentViewModel: ObservableObject {
         let wasArchived = item.archived
         db.toggleArchive(contentId: item.id)
         reload()
-        // 取消归档且当前不在看归档视图时给提示——否则文章"消失"用户不知去哪了
-        if wasArchived && !showArchived {
-            showToast("已取消归档，回到活跃列表")
+        // 修 P0-4：归档也给反馈——此前只在取消归档时提示，归档动作零提示零撤销，
+        // 误按 a 后文章消失用户不知去哪。
+        if wasArchived {
+            if !showArchived { showToast("已取消归档，回到活跃列表") }
+        } else {
+            showToast("已归档——在「归档」分段可找回")
         }
     }
 
@@ -235,8 +238,10 @@ public final class ContentViewModel: ObservableObject {
     func markAllRead() -> Int {
         let minS: Int? = minScore > 0 ? minScore : nil
         let kw = keyword.trimmingCharacters(in: .whitespaces)
+        // 传 archived 对齐当前视图——归档视图点「全部已读」也生效（修 P0-5）
         let n = db.markAllRead(sourceId: selectedSourceId, folderId: selectedFolderId,
-                               minScore: minS, keyword: kw.isEmpty ? nil : kw)
+                               minScore: minS, keyword: kw.isEmpty ? nil : kw,
+                               archived: showArchived)
         reload()
         return n
     }
