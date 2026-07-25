@@ -1001,9 +1001,69 @@ public struct ReadingView: View {
     @AppStorage("reading.uiFontScale") private var uiFontScale: Double = 1.0
     @State private var showLayoutPopover = false
     @State private var showShareSheet = false
+    /// 元信息 frontmatter 是否展开（默认收起，记住状态）
+    @AppStorage("reading.metaExpanded") private var metaExpanded: Bool = false
     /// 星标/已读状态（本地镜像，操作后即时反馈，不依赖 reload）
     @State private var isStarred = false
     @State private var isRead = false
+
+    /// 元信息字段（作者/日期/评分/来源/语言，有值才收录）
+    private var metaFields: [(icon: String, text: String)] {
+        var fields: [(String, String)] = []
+        if let a = item.author, !a.isEmpty { fields.append(("person", a)) }
+        if let pd = item.publishedAt { fields.append(("calendar", String(pd.prefix(10)))) }
+        if let s = item.llmScore { fields.append(("star.fill", "评分 \(s)")) }
+        if !item.source.isEmpty { fields.append(("dot.radiowaves.left.and.right", item.source)) }
+        if let lang = item.language, !lang.isEmpty { fields.append(("globe", lang)) }
+        return fields
+    }
+
+    /// 元信息 frontmatter 区：默认收起显示一行摘要，展开看全部（字段多自动换行）。
+    /// Obsidian frontmatter 式——性能影响可忽略（单篇文章 3-5 字段，LazyVGrid 轻量）。
+    private var metaFrontmatter: some View {
+        let fields = metaFields
+        return VStack(alignment: .leading, spacing: 0) {
+            Button { withAnimation(.easeInOut(duration: 0.15)) { metaExpanded.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: metaExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.rbText3)
+                        .frame(width: 12)
+                    if metaExpanded {
+                        Text("元信息")
+                            .font(.system(size: metaFontSize))
+                            .foregroundStyle(Color.rbText3)
+                    } else {
+                        // 收起态：一行摘要（作者 · 日期 · 评分 ·…）
+                        Text(fields.map { $0.text }.joined(separator: "  ·  "))
+                            .font(.system(size: metaFontSize))
+                            .foregroundStyle(Color.rbText2)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            // 展开态：LazyVGrid 自适应列，字段多时自动换行（不挤一行）
+            if metaExpanded {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), alignment: .leading)],
+                          alignment: .leading, spacing: 8) {
+                    ForEach(Array(fields.enumerated()), id: \.offset) { _, f in
+                        Label(f.text, systemImage: f.icon)
+                            .font(.system(size: metaFontSize))
+                            .foregroundStyle(Color.rbText2)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.leading, 18)
+                .padding(.top, 6)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
 
     /// theme/themeMode/fontChoice 从 raw 键派生（@AppStorage 存 String rawValue）
     private var theme: ReadingTheme {
@@ -1124,17 +1184,14 @@ public struct ReadingView: View {
             // ── 正文滚动区 ──
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    // 标题 + 元信息（独立字号设置；标题字体跟用户字体选择走，不被主题强制）
+                    // 标题（独立字号设置；标题字体跟用户字体选择走，不被主题强制）
                     Text(item.title)
                         .font(fontChoice.font(size: titleFontSize).bold())
                         .foregroundStyle(p.text)
-                    HStack(spacing: 10) {
-                        if let a = item.author, !a.isEmpty { Label(a, systemImage: "person") }
-                        if let pd = item.publishedAt { Label(String(pd.prefix(10)), systemImage: "calendar") }
-                        if let s = item.llmScore { Label("评分 \(s)", systemImage: "star.fill") }
-                    }
-                    .font(.system(size: metaFontSize))
-                    .foregroundStyle(p.textSecondary)
+
+                    // ── 元信息（Obsidian frontmatter 式：默认收起一行摘要，展开看全部，
+                    //    字段多时自动换行不挤一行）──
+                    metaFrontmatter
 
                     // ── LLM 操作条（胶囊按钮组 + 状态提示，精致排版）──
                     HStack(spacing: 8) {
