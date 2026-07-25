@@ -55,7 +55,11 @@ public struct SourcesView: View {
                 .buttonStyle(.quiet)
                 .keyboardShortcut("n", modifiers: .command)
                 // OPML 导入/导出（SwiftUI 原生 fileImporter/fileExporter）
-                Button { showImportPanel = true } label: {
+                Button {
+                    // 探针：确认按钮 action 触发
+                    try? "import button clicked \(Date())\n".write(toFile: "/tmp/rb_btn_probe.log", atomically: false, encoding: .utf8)
+                    showImportPanel = true
+                } label: {
                     Label("导入", systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.quiet)
@@ -181,6 +185,8 @@ public struct SourcesView: View {
 
     /// 处理 fileImporter 选中的 OPML 文件：读文件 + 后台解析写库 + 回主线程刷新
     private func handleImport(_ result: Result<[URL], Error>) {
+        // 探针：确认 fileImporter 回调触发
+        try? "handleImport called \(Date()) result=\(result)\n".write(toFile: "/tmp/rb_handle_probe.log", atomically: false, encoding: .utf8)
         switch result {
         case .failure(let err):
             opmlMessage = "打开文件失败：\(err.localizedDescription)"
@@ -300,11 +306,11 @@ public struct SourceRow: View {
     @State private var pendingBackfillKey: String? = nil
 
     public var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            // ── 左：图标 + 名称/地址（标识信息，仅这两项上下两行）──
+        HStack(alignment: .center, spacing: 12) {
+            // ── 左：图标 + 名称/地址（固定列宽，各行对齐）──
             Text(icon)
                 .font(.title3)
-                .frame(width: 28)
+                .frame(width: 24)
             VStack(alignment: .leading, spacing: 3) {
                 Text(src.name)
                     .font(.system(size: 14, weight: .medium))
@@ -316,38 +322,57 @@ public struct SourceRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            .frame(minWidth: 180, maxWidth: 280, alignment: .leading)
+            .frame(width: 220, alignment: .leading)
 
-            // ── 中：全部一排往右铺（全文模式/更新频率/上次/打分/翻译/摘要/转录），
-            //    字号统一 caption 级，不再上下两排 ──
-            HStack(spacing: 12) {
-                if src.stype == "rss" {
-                    fetchModeMenu
-                }
-                intervalMenu
+            // ── 中：每个选项固定列宽（条件项用占位保持对齐）──
+            // 全文模式（固定列；非 rss 占位保持对齐）
+            Group {
+                if src.stype == "rss" { fetchModeMenu } else { Color.clear.frame(height: 1) }
+            }
+            .frame(width: 64, alignment: .leading)
+
+            // 更新频率（固定列）
+            intervalMenu
+                .frame(width: 76, alignment: .leading)
+
+            // 上次抓取（固定列；无值占位）
+            Group {
                 if let t = src.lastFetchedAt {
-                    Text("上次 \(String(t.prefix(16)))")
+                    Text("上次 \(String(t.prefix(10)))")
                         .font(.caption)
                         .foregroundStyle(Color.rbText3)
-                }
-                if let err = src.error {
+                        .lineLimit(1)
+                } else if let err = src.error {
                     Text(err)
                         .font(.caption)
                         .foregroundStyle(Color.rbScoreLow)
                         .lineLimit(1)
+                } else {
+                    Text(" ")
+                        .font(.caption)
                 }
-                // 管线开关（生效 = 源 OR 文件夹；文件夹已开的项标墨蓝）
-                pipelineToggle("打分", key: "auto_score", on: src.policy.autoScore, inherited: fp.autoScore)
-                pipelineToggle("翻译", key: "auto_translate", on: src.policy.autoTranslate, inherited: fp.autoTranslate)
-                pipelineToggle("摘要", key: "auto_summarize", on: src.policy.autoSummarize, inherited: fp.autoSummarize)
+            }
+            .frame(width: 96, alignment: .leading)
+
+            // 管线开关（每项固定列宽，对齐）
+            pipelineToggle("打分", key: "auto_score", on: src.policy.autoScore, inherited: fp.autoScore)
+                .frame(width: 52, alignment: .leading)
+            pipelineToggle("翻译", key: "auto_translate", on: src.policy.autoTranslate, inherited: fp.autoTranslate)
+                .frame(width: 52, alignment: .leading)
+            pipelineToggle("摘要", key: "auto_summarize", on: src.policy.autoSummarize, inherited: fp.autoSummarize)
+                .frame(width: 52, alignment: .leading)
+            // 转录（固定列；非媒体占位保持对齐）
+            Group {
                 if src.transcribable {
                     pipelineToggle("转录", key: "auto_transcribe", on: src.policy.autoTranscribe, inherited: fp.autoTranscribe)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(width: 52, alignment: .leading)
 
-            // ── 右：启用开关 + 指派文件夹 + 删除（操作区）──
-            HStack(spacing: 8) {
+            Spacer(minLength: 8)
+
+            // ── 右：启用 + 指派文件夹 + 删除（固定操作区，各行对齐）──
+            HStack(spacing: 10) {
                 Toggle("", isOn: Binding(
                     get: { src.enabled },
                     set: { store.setEnabled(id: src.id, enabled: $0) }
@@ -359,6 +384,7 @@ public struct SourceRow: View {
                     Image(systemName: "trash")
                         .font(.system(size: 12))
                         .foregroundStyle(Color.rbText3)
+                        .frame(width: 20)
                 }
                 .buttonStyle(.quiet)
                 .alert("删除订阅源？", isPresented: $showDeleteConfirm) {
