@@ -21,20 +21,30 @@ public struct ExportRule: Identifiable {
     struct Criteria: Hashable {
         var minScore: Int? = nil
         var sourceIds: [Int64]? = nil
+        var folderIds: [Int64]? = nil          // 文件夹筛选（多选 OR）
         var requireTranslated = false
         var requireTranscribed = false
         var requireSummary = false
         var starredOnly = false
+        var readStatus: String? = nil          // "read" / "unread" / nil（全部）
+        var keywords: [String]? = nil          // 标题/正文关键词（AND）
+        var contentTypes: [String]? = nil      // article/podcast/video（OR）
+        var languages: [String]? = nil         // zh/en（OR）
 
         static func from(json: String) -> Criteria {
             var c = Criteria()
             guard let obj = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] else { return c }
             c.minScore = obj["min_score"] as? Int
             c.sourceIds = (obj["source_ids"] as? [NSNumber])?.map { $0.int64Value }
+            c.folderIds = (obj["folder_ids"] as? [NSNumber])?.map { $0.int64Value }
             c.requireTranslated = obj["require_translated"] as? Bool ?? false
             c.requireTranscribed = obj["require_transcribed"] as? Bool ?? false
             c.requireSummary = obj["require_summary"] as? Bool ?? false
             c.starredOnly = obj["starred_only"] as? Bool ?? false
+            c.readStatus = obj["read_status"] as? String
+            c.keywords = obj["keywords"] as? [String]
+            c.contentTypes = obj["content_types"] as? [String]
+            c.languages = obj["languages"] as? [String]
             return c
         }
 
@@ -42,10 +52,15 @@ public struct ExportRule: Identifiable {
             var obj: [String: Any] = [:]
             if let s = minScore { obj["min_score"] = s }
             if let ids = sourceIds { obj["source_ids"] = ids }
+            if let fids = folderIds { obj["folder_ids"] = fids }
             if requireTranslated { obj["require_translated"] = true }
             if requireTranscribed { obj["require_transcribed"] = true }
             if requireSummary { obj["require_summary"] = true }
             if starredOnly { obj["starred_only"] = true }
+            if let rs = readStatus { obj["read_status"] = rs }
+            if let kw = keywords { obj["keywords"] = kw }
+            if let ct = contentTypes { obj["content_types"] = ct }
+            if let lang = languages { obj["languages"] = lang }
             return (try? JSONSerialization.data(withJSONObject: obj))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         }
@@ -56,6 +71,11 @@ public struct ExportRule: Identifiable {
         case "obsidian": return "Obsidian 仓库"
         case "mddir": return "Markdown 目录"
         case "webhook": return "Webhook"
+        case "cubox": return "Cubox"
+        case "instapaper": return "Instapaper"
+        case "readwise": return "Readwise"
+        case "notebooklm": return "NotebookLM"
+        case "notion": return "Notion"
         default: return target
         }
     }
@@ -187,6 +207,35 @@ public final class ExportService: @unchecked Sendable {
         }
         if rule.criteria.requireSummary { whereClauses.append("llm_summary IS NOT NULL AND llm_summary != ''") }
         if rule.criteria.starredOnly { whereClauses.append("starred = 1") }
+        // 文件夹筛选（多选 OR）
+        if let fids = rule.criteria.folderIds, !fids.isEmpty {
+            whereClauses.append("source_id IN (SELECT id FROM content_source WHERE folder_id IN (\(fids.map { String($0) }.joined(separator: ","))))")
+        }
+        // 已读状态（read/unread）
+        if let rs = rule.criteria.readStatus {
+            if rs == "read" { whereClauses.append("read_at IS NOT NULL") }
+            else if rs == "unread" { whereClauses.append("read_at IS NULL") }
+        }
+        // 关键词（标题/正文 AND——多个关键词都要出现）
+        if let kws = rule.criteria.keywords, !kws.isEmpty {
+            for kw in kws {
+                whereClauses.append("(title LIKE ? OR content_md LIKE ? OR excerpt LIKE ?)")
+                let pattern = "%\(kw)%"
+                params.append(pattern); params.append(pattern); params.append(pattern)
+            }
+        }
+        // 内容类型（article/podcast/video OR）
+        if let cts = rule.criteria.contentTypes, !cts.isEmpty {
+            let placeholders = cts.map { _ in "?" }.joined(separator: ",")
+            whereClauses.append("ctype IN (\(placeholders))")
+            params.append(contentsOf: cts.map { $0 as Any? })
+        }
+        // 语言（zh/en OR）
+        if let langs = rule.criteria.languages, !langs.isEmpty {
+            let placeholders = langs.map { _ in "?" }.joined(separator: ",")
+            whereClauses.append("language IN (\(placeholders))")
+            params.append(contentsOf: langs.map { $0 as Any? })
+        }
         // 幂等：跳过已成功交付的
         whereClauses.append("""
             id NOT IN (SELECT content_id FROM export_record WHERE rule_id = ? AND status = 'delivered')
@@ -267,8 +316,158 @@ public final class ExportService: @unchecked Sendable {
             }
             return await postWebhook(md: md, content: c, url: url,
                                      headers: rule.targetConfig["headers"] as? [String: String] ?? [:])
+        case "cubox":
+            return await postToCubox(md: md, content: c, config: rule.targetConfig)
+        case "instapaper":
+            return await postToInstapaper(content: c, config: rule.targetConfig)
+        case "readwise":
+            return await postToReadwise(md: md, content: c, config: rule.targetConfig)
+        case "notebooklm":
+            return await postToNotebookLM(md: md, content: c, config: rule.targetConfig)
+        case "notion":
+            return await postToNotion(md: md, content: c, config: rule.targetConfig)
         default:
             return (false, nil, "未知目标类型 \(rule.target)")
+        }
+    }
+
+    // MARK: - 各平台导出实现
+
+    /// Cubox 收藏（API：https://cubox.pro/c/api/save）
+    private func postToCubox(md: String, content: ExportContent, config: [String: Any]) async -> (Bool, String?, String?) {
+        guard let token = config["token"] as? String, !token.isEmpty else {
+            return (false, nil, "Cubox token 未配置")
+        }
+        let url = URL(string: "https://cubox.pro/c/api/save")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "type": "url",
+            "content": content.url,
+            "title": content.title,
+            "description": content.summary ?? "",
+            "tags": ["readboard"],
+            "token": token
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                return (true, "cubox://saved", nil)
+            } else {
+                let msg = String(data: data, encoding: .utf8) ?? "HTTP \(code)"
+                return (false, nil, "Cubox 保存失败：\(msg)")
+            }
+        } catch {
+            return (false, nil, "Cubox 请求失败：\(error.localizedDescription)")
+        }
+    }
+
+    /// Instapaper 保存（API：https://www.instapaper.com/api/add）
+    private func postToInstapaper(content: ExportContent, config: [String: Any]) async -> (Bool, String?, String?) {
+        guard let username = config["username"] as? String, !username.isEmpty,
+              let password = config["password"] as? String, !password.isEmpty else {
+            return (false, nil, "Instapaper 用户名/密码未配置")
+        }
+        var comps = URLComponents(string: "https://www.instapaper.com/api/add")!
+        comps.queryItems = [
+            URLQueryItem(name: "username", value: username),
+            URLQueryItem(name: "password", value: password),
+            URLQueryItem(name: "url", value: content.url),
+            URLQueryItem(name: "title", value: content.title)
+        ]
+        guard let url = comps.url else { return (false, nil, "Instapaper URL 构造失败") }
+        do {
+            let (_, resp) = try await URLSession.shared.data(from: url)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 201 {
+                return (true, "instapaper://saved", nil)
+            } else {
+                return (false, nil, "Instapaper 保存失败：HTTP \(code)")
+            }
+        } catch {
+            return (false, nil, "Instapaper 请求失败：\(error.localizedDescription)")
+        }
+    }
+
+    /// Readwise Reader 保存（API：https://readwise.io/api/v3/save/）
+    private func postToReadwise(md: String, content: ExportContent, config: [String: Any]) async -> (Bool, String?, String?) {
+        guard let token = config["token"] as? String, !token.isEmpty else {
+            return (false, nil, "Readwise token 未配置")
+        }
+        let url = URL(string: "https://readwise.io/api/v3/save/")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Token \(token)", forHTTPHeaderField: "Authorization")
+        let body: [String: Any] = [
+            "url": content.url,
+            "title": content.title,
+            "summary": content.summary ?? "",
+            "published_date": content.publishedAt,
+            "tags": ["readboard"]
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 || code == 201 {
+                return (true, "readwise://saved", nil)
+            } else {
+                let msg = String(data: data, encoding: .utf8) ?? "HTTP \(code)"
+                return (false, nil, "Readwise 保存失败：\(msg)")
+            }
+        } catch {
+            return (false, nil, "Readwise 请求失败：\(error.localizedDescription)")
+        }
+    }
+
+    /// NotebookLM 保存（Google NotebookLM API——需 OAuth token）
+    private func postToNotebookLM(md: String, content: ExportContent, config: [String: Any]) async -> (Bool, String?, String?) {
+        guard let token = config["token"] as? String, !token.isEmpty else {
+            return (false, nil, "NotebookLM token 未配置（Google OAuth）")
+        }
+        // NotebookLM API 目前未公开稳定端点，先用占位实现
+        return (false, nil, "NotebookLM API 暂未开放稳定端点，待 Google 官方支持")
+    }
+
+    /// Notion 保存（API：https://api.notion.com/v1/pages）
+    private func postToNotion(md: String, content: ExportContent, config: [String: Any]) async -> (Bool, String?, String?) {
+        guard let token = config["token"] as? String, !token.isEmpty,
+              let databaseId = config["database_id"] as? String, !databaseId.isEmpty else {
+            return (false, nil, "Notion token/database_id 未配置")
+        }
+        let url = URL(string: "https://api.notion.com/v1/pages")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("2022-06-28", forHTTPHeaderField: "Notion-Version")
+        let body: [String: Any] = [
+            "parent": ["database_id": databaseId],
+            "properties": [
+                "Name": ["title": [["text": ["content": content.title]]]],
+                "URL": ["url": content.url],
+                "Score": ["number": content.score ?? 0]
+            ],
+            "children": [
+                ["object": "block", "type": "paragraph", "paragraph": ["rich_text": [["text": ["content": String(md.prefix(2000))]]]]]
+            ]
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                return (true, "notion://saved", nil)
+            } else {
+                let msg = String(data: data, encoding: .utf8) ?? "HTTP \(code)"
+                return (false, nil, "Notion 保存失败：\(msg)")
+            }
+        } catch {
+            return (false, nil, "Notion 请求失败：\(error.localizedDescription)")
         }
     }
 

@@ -160,6 +160,19 @@ public struct ExportRuleEditor: View {
     @State private var bySource = false
     @State private var webhookURL = ""
     @State private var selectedSourceIds: Set<Int64> = []
+    // 各平台 token 配置
+    @State private var cuboxToken = ""
+    @State private var instapaperUser = ""
+    @State private var instapaperPass = ""
+    @State private var readwiseToken = ""
+    @State private var notebooklmToken = ""
+    @State private var notionToken = ""
+    @State private var notionDatabaseId = ""
+    // 规则组合筛选
+    @State private var selectedFolderIds: Set<Int64> = []
+    @State private var keywordsText = ""
+    @State private var selectedContentTypes: Set<String> = []
+    @State private var selectedLanguages: Set<String> = []
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -183,6 +196,43 @@ public struct ExportRuleEditor: View {
                             .onChange(of: minScoreText) { _, v in
                                 rule.criteria.minScore = Int(v)
                             }
+                    }
+                    // 限定文件夹（多选 OR）
+                    HStack {
+                        Text("限定文件夹")
+                        Spacer()
+                        Menu {
+                            ForEach(sourceStore.folders) { folder in
+                                Button {
+                                    if selectedFolderIds.contains(folder.id) {
+                                        selectedFolderIds.remove(folder.id)
+                                    } else {
+                                        selectedFolderIds.insert(folder.id)
+                                    }
+                                    rule.criteria.folderIds = selectedFolderIds.isEmpty ? nil : Array(selectedFolderIds)
+                                } label: {
+                                    HStack {
+                                        Text(folder.name)
+                                        if selectedFolderIds.contains(folder.id) {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                            if !selectedFolderIds.isEmpty {
+                                Divider()
+                                Button("清除全部") {
+                                    selectedFolderIds.removeAll()
+                                    rule.criteria.folderIds = nil
+                                }
+                            }
+                        } label: {
+                            Text(selectedFolderIds.isEmpty
+                                 ? "全部文件夹"
+                                 : "已选 \(selectedFolderIds.count) 个文件夹")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .tint(Color.rbAccent)
                     }
                     // 限定来源（不选 = 全部源）
                     HStack {
@@ -221,6 +271,82 @@ public struct ExportRuleEditor: View {
                         .menuStyle(.borderlessButton)
                         .tint(Color.rbAccent)
                     }
+                    // 已读状态
+                    Picker("已读状态", selection: $rule.criteria.readStatus) {
+                        Text("全部").tag(nil as String?)
+                        Text("仅已读").tag("read" as String?)
+                        Text("仅未读").tag("unread" as String?)
+                    }
+                    .tint(Color.rbAccent)
+                    // 关键词
+                    HStack {
+                        Text("关键词")
+                        TextField("标题/正文包含（逗号分隔多个）", text: $keywordsText)
+                            .onChange(of: keywordsText) { _, v in
+                                let kws = v.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                                rule.criteria.keywords = kws.isEmpty ? nil : kws
+                            }
+                    }
+                    // 内容类型
+                    HStack {
+                        Text("内容类型")
+                        Spacer()
+                        Menu {
+                            ForEach(["article", "podcast", "video"], id: \.self) { ct in
+                                Button {
+                                    if selectedContentTypes.contains(ct) {
+                                        selectedContentTypes.remove(ct)
+                                    } else {
+                                        selectedContentTypes.insert(ct)
+                                    }
+                                    rule.criteria.contentTypes = selectedContentTypes.isEmpty ? nil : Array(selectedContentTypes)
+                                } label: {
+                                    HStack {
+                                        Text(ct == "article" ? "文章" : ct == "podcast" ? "播客" : "视频")
+                                        if selectedContentTypes.contains(ct) {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            Text(selectedContentTypes.isEmpty
+                                 ? "全部类型"
+                                 : "已选 \(selectedContentTypes.count) 类")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .tint(Color.rbAccent)
+                    }
+                    // 语言
+                    HStack {
+                        Text("语言")
+                        Spacer()
+                        Menu {
+                            ForEach(["zh", "en"], id: \.self) { lang in
+                                Button {
+                                    if selectedLanguages.contains(lang) {
+                                        selectedLanguages.remove(lang)
+                                    } else {
+                                        selectedLanguages.insert(lang)
+                                    }
+                                    rule.criteria.languages = selectedLanguages.isEmpty ? nil : Array(selectedLanguages)
+                                } label: {
+                                    HStack {
+                                        Text(lang == "zh" ? "中文" : "英文")
+                                        if selectedLanguages.contains(lang) {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            Text(selectedLanguages.isEmpty
+                                 ? "全部语言"
+                                 : "已选 \(selectedLanguages.count) 种")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .tint(Color.rbAccent)
+                    }
                     Toggle("只导已翻译的", isOn: $rule.criteria.requireTranslated)
                         .tint(Color.rbAccent)
                     Toggle("只导已转录的（播客/视频）", isOn: $rule.criteria.requireTranscribed)
@@ -236,10 +362,16 @@ public struct ExportRuleEditor: View {
                         Text("Markdown 目录").tag("mddir")
                         Text("Obsidian 仓库").tag("obsidian")
                         Text("Webhook").tag("webhook")
+                        Divider()
+                        Text("Cubox").tag("cubox")
+                        Text("Instapaper").tag("instapaper")
+                        Text("Readwise").tag("readwise")
+                        Text("NotebookLM").tag("notebooklm")
+                        Text("Notion").tag("notion")
                     }
                     .tint(Color.rbAccent)
+                    // 本地目录（mddir/obsidian）
                     if rule.target == "obsidian" || rule.target == "mddir" {
-                        // 目录用系统文件夹选择器（不手填路径）
                         HStack {
                             Text(dir.isEmpty
                                  ? (rule.target == "obsidian" ? "选择 Obsidian 仓库目录" : "选择输出目录")
@@ -255,9 +387,43 @@ public struct ExportRuleEditor: View {
                         Toggle("按来源建子目录", isOn: $bySource)
                             .tint(Color.rbAccent)
                             .onChange(of: bySource) { _, v in rule.targetConfig["subdir_by_source"] = v }
-                    } else {
+                    }
+                    // Webhook
+                    else if rule.target == "webhook" {
                         TextField("Webhook URL（POST JSON）", text: $webhookURL)
                             .onChange(of: webhookURL) { _, v in rule.targetConfig["url"] = v }
+                    }
+                    // Cubox
+                    else if rule.target == "cubox" {
+                        TextField("Cubox API Token", text: $cuboxToken)
+                            .onChange(of: cuboxToken) { _, v in rule.targetConfig["token"] = v }
+                    }
+                    // Instapaper
+                    else if rule.target == "instapaper" {
+                        TextField("Instapaper 用户名", text: $instapaperUser)
+                            .onChange(of: instapaperUser) { _, v in rule.targetConfig["username"] = v }
+                        SecureField("Instapaper 密码", text: $instapaperPass)
+                            .onChange(of: instapaperPass) { _, v in rule.targetConfig["password"] = v }
+                    }
+                    // Readwise
+                    else if rule.target == "readwise" {
+                        TextField("Readwise API Token", text: $readwiseToken)
+                            .onChange(of: readwiseToken) { _, v in rule.targetConfig["token"] = v }
+                    }
+                    // NotebookLM
+                    else if rule.target == "notebooklm" {
+                        TextField("Google OAuth Token", text: $notebooklmToken)
+                            .onChange(of: notebooklmToken) { _, v in rule.targetConfig["token"] = v }
+                        Text("NotebookLM API 暂未开放稳定端点，待 Google 官方支持")
+                            .font(.caption)
+                            .foregroundStyle(Color.rbText3)
+                    }
+                    // Notion
+                    else if rule.target == "notion" {
+                        TextField("Notion Integration Token", text: $notionToken)
+                            .onChange(of: notionToken) { _, v in rule.targetConfig["token"] = v }
+                        TextField("Notion Database ID", text: $notionDatabaseId)
+                            .onChange(of: notionDatabaseId) { _, v in rule.targetConfig["database_id"] = v }
                     }
                 }
             }
