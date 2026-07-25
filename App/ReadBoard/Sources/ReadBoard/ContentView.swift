@@ -817,12 +817,14 @@ public struct ArticleRow: View {
         return String(iso.prefix(10))
     }
 
+    /// 评分颜色分段：90+ 绿 / 75-84 蓝 / 60-74 橙 / 1-59 红 / 0 灰
     private func scoreColor(_ s: Int) -> Color {
         switch s {
-        case 80...: return .green
-        case 60..<80: return .orange
-        case 40..<60: return .yellow
-        default: return .gray
+        case 90...: return .green
+        case 75..<90: return .blue
+        case 60..<75: return .orange
+        case 1..<60: return .red
+        default: return .gray   // 0 分
         }
     }
 
