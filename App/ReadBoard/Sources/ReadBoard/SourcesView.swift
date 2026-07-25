@@ -153,26 +153,30 @@ public struct SourcesView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.message = "选择要导入的 OPML 文件"
-        // 用 beginSheetModal 挂到 key window——runModal 在 SwiftUI 同步闭包里可能
-        // 弹不出或弹到窗口后面（用户反馈点导入没反应），sheet 必然可见。
-        guard let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first else {
-            opmlMessage = "无法打开文件选择器（无活动窗口）"
-            return
-        }
-        panel.beginSheetModal(for: window) { response in
-            guard response == .OK, let url = panel.url else { return }
-            guard let xml = try? String(contentsOf: url, encoding: .utf8) else {
-                DispatchQueue.main.async { opmlMessage = "读取文件失败：\(url.lastPathComponent)" }
-                return
-            }
-            let result = OPMLService.shared.importOPML(xml)
-            DispatchQueue.main.async {
-                store.reload()
-                var msg = "导入完成：新增 \(result.sourcesAdded) 源"
-                if result.foldersCreated > 0 { msg += "，\(result.foldersCreated) 文件夹" }
-                if result.sourcesSkipped > 0 { msg += "，跳过已存在 \(result.sourcesSkipped)" }
-                if !result.errors.isEmpty { msg += "，\(result.errors.count) 错误" }
-                opmlMessage = msg
+        // 延迟一瞬让 Menu/Alert 完全关闭，再弹独立面板（panel.begin 不依赖 window，
+        // 比 beginSheetModal 稳——Menu 触发时 keyWindow 可能异常导致 sheet 卡死）。
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.begin { response in
+                guard response == .OK, let url = panel.url else { return }
+                guard let xml = try? String(contentsOf: url, encoding: .utf8) else {
+                    DispatchQueue.main.async { opmlMessage = "读取文件失败：\(url.lastPathComponent)" }
+                    return
+                }
+                // 解析 + 写库放后台线程——importOPML 里 db.execute 走 writeQueue.sync，
+                // 主线程同步跑若 writeQueue 有等主线程的任务就死锁卡死界面。
+                opmlMessage = "导入中…"
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let result = OPMLService.shared.importOPML(xml)
+                    DispatchQueue.main.async {
+                        store.reload()
+                        var msg = "导入完成：新增 \(result.sourcesAdded) 源"
+                        if result.foldersCreated > 0 { msg += "，\(result.foldersCreated) 文件夹" }
+                        if result.sourcesSkipped > 0 { msg += "，跳过已存在 \(result.sourcesSkipped)" }
+                        if !result.errors.isEmpty { msg += "，\(result.errors.count) 错误" }
+                        opmlMessage = msg
+                    }
+                }
             }
         }
     }
@@ -182,19 +186,19 @@ public struct SourcesView: View {
         panel.allowedContentTypes = [.init(filenameExtension: "opml")!]
         panel.nameFieldStringValue = "readboard-subscriptions.opml"
         panel.message = "导出订阅为 OPML"
-        guard let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first else {
-            opmlMessage = "无法打开保存面板（无活动窗口）"
-            return
-        }
-        panel.beginSheetModal(for: window) { response in
-            guard response == .OK, let url = panel.url else { return }
-            let xml = OPMLService.shared.exportOPML()
-            DispatchQueue.main.async {
-                do {
-                    try xml.write(to: url, atomically: true, encoding: .utf8)
-                    opmlMessage = "已导出 \(store.sources.count) 源到 \(url.lastPathComponent)"
-                } catch {
-                    opmlMessage = "导出失败：\(error.localizedDescription)"
+        // 同 importOPML：延迟 + panel.begin 独立面板（不依赖 window，避免 Menu 触发卡死）
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.begin { response in
+                guard response == .OK, let url = panel.url else { return }
+                let xml = OPMLService.shared.exportOPML()
+                DispatchQueue.main.async {
+                    do {
+                        try xml.write(to: url, atomically: true, encoding: .utf8)
+                        opmlMessage = "已导出 \(store.sources.count) 源到 \(url.lastPathComponent)"
+                    } catch {
+                        opmlMessage = "导出失败：\(error.localizedDescription)"
+                    }
                 }
             }
         }
