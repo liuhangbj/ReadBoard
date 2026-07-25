@@ -43,14 +43,14 @@ public struct SourcesView: View {
                     Label("添加", systemImage: "plus")
                 }
                 .keyboardShortcut("n", modifiers: .command)
-                // OPML 导入/导出
-                Menu {
-                    Button("导入 OPML…") { importOPML() }
-                    Button("导出 OPML…") { exportOPML() }
-                } label: {
-                    Label("OPML", systemImage: "square.and.arrow.up.on.square")
+                // OPML 导入/导出（拆成独立按钮——此前 borderlessButton Menu 的 action
+                // 不触发，探针证实 importOPML 根本没被调用）
+                Button { importOPML() } label: {
+                    Label("导入", systemImage: "square.and.arrow.down")
                 }
-                .menuStyle(.borderlessButton)
+                Button { exportOPML() } label: {
+                    Label("导出", systemImage: "square.and.arrow.up")
+                }
             }
             .padding()
 
@@ -148,37 +148,31 @@ public struct SourcesView: View {
     // MARK: OPML 导入/导出
 
     private func importOPML() {
-        // 诊断探针：确认函数是否被调用（用户反馈点导入没反应，先验证 action 触没触发）
-        try? "importOPML called at \(Date())\n".write(toFile: "/tmp/rb_opml_probe.log", atomically: false, encoding: .utf8)
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.init(filenameExtension: "opml")!, .xml]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.message = "选择要导入的 OPML 文件"
-        // 延迟一瞬让 Menu/Alert 完全关闭，再弹独立面板（panel.begin 不依赖 window，
-        // 比 beginSheetModal 稳——Menu 触发时 keyWindow 可能异常导致 sheet 卡死）。
-        DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
-            panel.begin { response in
-                guard response == .OK, let url = panel.url else { return }
-                guard let xml = try? String(contentsOf: url, encoding: .utf8) else {
-                    DispatchQueue.main.async { opmlMessage = "读取文件失败：\(url.lastPathComponent)" }
-                    return
-                }
-                // 解析 + 写库放后台线程——importOPML 里 db.execute 走 writeQueue.sync，
-                // 主线程同步跑若 writeQueue 有等主线程的任务就死锁卡死界面。
-                opmlMessage = "导入中…"
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let result = OPMLService.shared.importOPML(xml)
-                    DispatchQueue.main.async {
-                        store.reload()
-                        var msg = "导入完成：新增 \(result.sourcesAdded) 源"
-                        if result.foldersCreated > 0 { msg += "，\(result.foldersCreated) 文件夹" }
-                        if result.sourcesSkipped > 0 { msg += "，跳过已存在 \(result.sourcesSkipped)" }
-                        if !result.errors.isEmpty { msg += "，\(result.errors.count) 错误" }
-                        opmlMessage = msg
-                    }
-                }
+        // runModal 同步模态——action 已确认能触发（此前是 Menu 的 action 不触发，
+        // 不是弹窗问题），runModal 最简单可靠。
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let xml = try? String(contentsOf: url, encoding: .utf8) else {
+            opmlMessage = "读取文件失败：\(url.lastPathComponent)"
+            return
+        }
+        // 解析 + 写库放后台线程——importOPML 里 db.execute 走 writeQueue.sync，
+        // 主线程同步跑若 writeQueue 有等主线程的任务就死锁卡死界面。
+        opmlMessage = "导入中…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = OPMLService.shared.importOPML(xml)
+            DispatchQueue.main.async {
+                store.reload()
+                var msg = "导入完成：新增 \(result.sourcesAdded) 源"
+                if result.foldersCreated > 0 { msg += "，\(result.foldersCreated) 文件夹" }
+                if result.sourcesSkipped > 0 { msg += "，跳过已存在 \(result.sourcesSkipped)" }
+                if !result.errors.isEmpty { msg += "，\(result.errors.count) 错误" }
+                opmlMessage = msg
             }
         }
     }
@@ -188,21 +182,15 @@ public struct SourcesView: View {
         panel.allowedContentTypes = [.init(filenameExtension: "opml")!]
         panel.nameFieldStringValue = "readboard-subscriptions.opml"
         panel.message = "导出订阅为 OPML"
-        // 同 importOPML：延迟 + panel.begin 独立面板（不依赖 window，避免 Menu 触发卡死）
-        DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
-            panel.begin { response in
-                guard response == .OK, let url = panel.url else { return }
-                let xml = OPMLService.shared.exportOPML()
-                DispatchQueue.main.async {
-                    do {
-                        try xml.write(to: url, atomically: true, encoding: .utf8)
-                        opmlMessage = "已导出 \(store.sources.count) 源到 \(url.lastPathComponent)"
-                    } catch {
-                        opmlMessage = "导出失败：\(error.localizedDescription)"
-                    }
-                }
-            }
+        // runModal 同步模态（action 已确认能触发，最简单可靠）
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let xml = OPMLService.shared.exportOPML()
+        do {
+            try xml.write(to: url, atomically: true, encoding: .utf8)
+            opmlMessage = "已导出 \(store.sources.count) 源到 \(url.lastPathComponent)"
+        } catch {
+            opmlMessage = "导出失败：\(error.localizedDescription)"
         }
     }
 }
