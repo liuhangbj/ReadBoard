@@ -601,6 +601,9 @@ public final class Database: @unchecked Sendable {
             archivedCond = useFTS ? "c.is_archived = \(archived ? 1 : 0)" : "is_archived = \(archived ? 1 : 0)"
         }
         var conds: [String] = [archivedCond]
+        // 排除重复项——is_duplicate=1 的是同内容的副本，不该在列表里重复显示。
+        // 与 totalCount/文件夹计数口径对齐（三处都 非归档+非重复），计数才相符。
+        conds.append(useFTS ? "c.is_duplicate = 0" : "is_duplicate = 0")
         let col = useFTS ? "c." : ""
         if source != nil { conds.append("\(col)source = ?") }
         if sourceId != nil { conds.append("\(col)source_id = ?") }
@@ -820,11 +823,15 @@ public final class Database: @unchecked Sendable {
         return params
     }
 
+    /// 「全部文章」计数——口径与文件夹计数对齐（活跃有效：非归档+非重复）。
+    /// 此前 SELECT COUNT(*) 数全部内容（含归档+重复），比文件夹计数总和大，
+    /// 用户看到「全部文章 12882 ≠ 文件夹总和 12874」（差 8 = 3 归档 + 5 重复）。
+    /// 点「全部文章」看的就是活跃列表，计数应对齐。
     func totalCount() -> Int {
         guard open() else { return 0 }
         var stmt: OpaquePointer?
         var n = 0
-        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM content;", -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM content WHERE is_archived = 0 AND is_duplicate = 0;", -1, &stmt, nil) == SQLITE_OK {
             if sqlite3_step(stmt) == SQLITE_ROW { n = Int(sqlite3_column_int64(stmt, 0)) }
         }
         sqlite3_finalize(stmt)
