@@ -183,20 +183,57 @@ public final class FullTextFetcher: @unchecked Sendable {
         let errPipe = Pipe()
         proc.standardOutput = outPipe
         proc.standardError = errPipe
-        if let stdinData {
-            let inPipe = Pipe()
-            proc.standardInput = inPipe
-            do {
-                try proc.run()
+
+        // 关键修复：stderr 必须 drain——node 脚本 stderr 写满 64KB 管道缓冲即阻塞，
+        // 父进程又在等 stdout EOF，双向死锁。两个管道都用 readabilityHandler 异步读。
+        // 数据用锁保护的盒（readabilityHandler 并发执行，不能直接 mutate 捕获 var）。
+        final class DataBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _data = Data()
+            func append(_ d: Data) { lock.lock(); _data.append(d); lock.unlock() }
+            var value: Data { lock.lock(); defer { lock.unlock() }; return _data }
+        }
+        let outBox = DataBox()
+        let errBox = DataBox()
+        outPipe.fileHandleForReading.readabilityHandler = { h in
+            outBox.append(h.availableData)
+        }
+        errPipe.fileHandleForReading.readabilityHandler = { h in
+            errBox.append(h.availableData)
+        }
+
+        do {
+            try proc.run()
+            if let stdinData {
+                let inPipe = Pipe()
+                proc.standardInput = inPipe
                 inPipe.fileHandleForWriting.write(stdinData)
                 inPipe.fileHandleForWriting.closeFile()
-            } catch { return nil }
-        } else {
-            do { try proc.run() } catch { return nil }
+            }
+        } catch {
+            outPipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            return nil
         }
-        let out = outPipe.fileHandleForReading.readDataToEndOfFile()
+
+        // 超时保护：单次抓取最长 60s——此前无超时，一次挂死 runOnce 永不返回，
+        // isRunning 恒 true，管线永久停摆。
+        let deadline = Date().addingTimeInterval(60)
+        while proc.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if proc.isRunning {
+            proc.terminate()   // 超时强杀
+        }
         proc.waitUntilExit()
-        guard proc.terminationStatus == 0, !out.isEmpty else { return nil }
-        return String(data: out, encoding: .utf8)
+        outPipe.fileHandleForReading.readabilityHandler = nil
+        errPipe.fileHandleForReading.readabilityHandler = nil
+        // 收尾读残留（handler 可能没读完最后的部分）
+        outBox.append(outPipe.fileHandleForReading.readDataToEndOfFile())
+        errBox.append(errPipe.fileHandleForReading.readDataToEndOfFile())
+        let outData = outBox.value
+
+        guard proc.terminationStatus == 0, !outData.isEmpty else { return nil }
+        return String(data: outData, encoding: .utf8)
     }
 }

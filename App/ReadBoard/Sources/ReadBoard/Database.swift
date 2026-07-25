@@ -12,6 +12,12 @@ public struct ContentItem: Identifiable, Hashable {
     let url: String
     let language: String?
     let publishedAt: String?
+
+    /// 相等/哈希只比 id——默认 Hashable 全字段参与，contentMd/llmTranslatedMd/excerpt
+    /// 几十 KB 大字段让 items.contains(sel) 和 List.tag(item) 每次渲染都 hash 整个
+    /// 结构体（300 条/页性能炸弹）。同一篇文章 id 唯一，比 id 即可（修 P0-4）。
+    public static func == (lhs: ContentItem, rhs: ContentItem) -> Bool { lhs.id == rhs.id }
+    public func hash(into hasher: inout Hasher) { hasher.combine(id) }
     let excerpt: String?
     let contentMd: String?
     let llmScore: Int?
@@ -95,13 +101,30 @@ public final class Database: @unchecked Sendable {
     /// 写连接：供写入（execute/upsertContent/markJob 等）。WAL 下读写并发互不阻塞
     private var wdb: OpaquePointer?
 
+    /// 串行队列：所有写操作 + 事务统一排队执行。
+    /// 修 P0-3（跨线程脏写）：@MainActor 服务与非隔离服务并发访问 db/wdb，
+    /// FULLMUTEX 只保单条语句，多语句序列（事务、INSERT+lastInsertId）跨线程交错。
+    /// 写路径全部走这个串行队列后，多语句序列原子化，不再交错。
+    /// 修 P0-2（事务跨连接）：事务内的去重 SELECT 也强制走 wdb（同一连接），
+    /// 不再走读连接 db（WAL 快照隔离下读连接看不到事务内写入）。
+    private let writeQueue = DispatchQueue(label: "readboard.db.write")
+    /// 当前是否在 writeQueue 上（事务内嵌套调用不重复入队，防死锁）
+    private let queueKey = DispatchSpecificKey<Bool>()
+
     // 默认指向迁移好的库；可用环境变量覆盖便于测试
     private let dbPath: String = {
         if let p = ProcessInfo.processInfo.environment["READBOARD_DB"] { return p }
         return NSHomeDirectory() + "/readboard/Data/readboard.db"
     }()
 
-    private init() {}
+    private init() {
+        writeQueue.setSpecific(key: queueKey, value: true)
+    }
+
+    /// 是否在写队列上（事务/写操作内部）
+    private var onWriteQueue: Bool {
+        DispatchQueue.getSpecific(key: queueKey) == true
+    }
 
     /// 配置一条连接的 pragma（WAL/同步级别/忙等/外键）
     private func configure(_ handle: OpaquePointer?) {
@@ -281,12 +304,23 @@ public final class Database: @unchecked Sendable {
         sqlite3_close(wdb); wdb = nil
     }
 
-    // MARK: 事务（写连接）
+    // MARK: 事务（写连接 + 串行队列）
 
-    /// 把多条写操作包进一个事务（BEGIN IMMEDIATE），任一步失败回滚
+    /// 把多条写操作包进一个事务（BEGIN IMMEDIATE），任一步失败回滚。
+    /// 串行队列执行：嵌套事务（已在队列上）直接跑不再入队防死锁。
+    /// BEGIN 失败（busy_timeout 耗尽）返回 false，不静默继续（修 P0-2）。
     func transaction(_ block: () -> Bool) -> Bool {
+        if onWriteQueue {
+            return transactionInner(block)
+        }
+        return writeQueue.sync { transactionInner(block) }
+    }
+
+    private func transactionInner(_ block: () -> Bool) -> Bool {
         guard open() else { return false }
-        execRaw(wdb, "BEGIN IMMEDIATE;")
+        // BEGIN 失败要返回 false——busy_timeout 耗尽时 BEGIN 失败，block 在事务外执行，
+        // COMMIT 也失败，但旧实现却返回 true（静默错）。
+        guard execRaw(wdb, "BEGIN IMMEDIATE;") else { return false }
         if block() {
             execRaw(wdb, "COMMIT;")
             return true
@@ -298,9 +332,15 @@ public final class Database: @unchecked Sendable {
 
     // MARK: 写操作
 
-    /// 执行无返回值的写 SQL（带参数绑定，走写连接）
+    /// 执行无返回值的写 SQL（带参数绑定，走写连接 + 串行队列）。
+    /// 嵌套（事务内/已在队列上）直接跑不入队防死锁。
     @discardableResult
     func execute(_ sql: String, params: [Any?] = []) -> Bool {
+        if onWriteQueue { return executeInner(sql, params: params) }
+        return writeQueue.sync { executeInner(sql, params: params) }
+    }
+
+    private func executeInner(_ sql: String, params: [Any?]) -> Bool {
         guard open() else { return false }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(wdb, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
@@ -332,9 +372,12 @@ public final class Database: @unchecked Sendable {
     /// 查询单个 Int 值
     func scalarInt(_ sql: String, params: [Any?] = []) -> Int? {
         guard open() else { return nil }
+        // 事务内（在写队列上）强制走 wdb——读连接 db 在 WAL 快照隔离下看不到
+        // 事务内写入，去重 SELECT 会失效（修 P0-2）。非事务走读连接（读写并发不阻塞）。
+        let handle = onWriteQueue ? wdb : db
         var stmt: OpaquePointer?
         var result: Int?
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK {
             bindParams(stmt, params)
             if sqlite3_step(stmt) == SQLITE_ROW { result = Int(sqlite3_column_int64(stmt, 0)) }
         }
@@ -345,9 +388,10 @@ public final class Database: @unchecked Sendable {
     /// 查询单个 String 值
     func scalarString(_ sql: String, params: [Any?] = []) -> String? {
         guard open() else { return nil }
+        let handle = onWriteQueue ? wdb : db
         var stmt: OpaquePointer?
         var result: String?
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK {
             bindParams(stmt, params)
             if sqlite3_step(stmt) == SQLITE_ROW, let p = sqlite3_column_text(stmt, 0) {
                 result = String(cString: p)
@@ -360,9 +404,10 @@ public final class Database: @unchecked Sendable {
     /// 通用参数化多行查询：返回 [[列名: 值]]（文本化）
     func queryRows(_ sql: String, params: [Any?] = []) -> [[String: String]] {
         guard open() else { return [] }
+        let handle = onWriteQueue ? wdb : db
         var stmt: OpaquePointer?
         var out: [[String: String]] = []
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         bindParams(stmt, params)
         defer { sqlite3_finalize(stmt) }
         let ncol = sqlite3_column_count(stmt)
