@@ -105,6 +105,9 @@ public struct ContentView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    // ── 全部文章（清空过滤，显示所有内容）──
+                    allArticlesRow
+
                     ForEach(vm.sidebarTree) { node in
                         if node.isFolder {
                             // 文件夹行：左侧箭头控制展开，点击行过滤该组
@@ -207,6 +210,36 @@ public struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help("打开「\(label)」页面")
+    }
+
+    /// 左栏顶部「全部文章」行（清空过滤，显示所有内容）
+    private var allArticlesRow: some View {
+        let scale = uiFontScale
+        let active = vm.selectedFilter == nil
+        return Button {
+            vm.selectFilter(nil)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "tray.full")
+                    .foregroundStyle(active ? .white : .secondary)
+                    .frame(width: 16)
+                Text("全部文章")
+                    .font(.system(size: 13 * scale))
+                    .foregroundStyle(active ? .white : .primary)
+                Spacer()
+                Text("\(vm.totalCount)")
+                    .foregroundStyle(active ? .white.opacity(0.8) : .secondary)
+                    .font(.system(size: 11 * scale))
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, 12)
+            .padding(.vertical, 6 * scale)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(active ? Color.accentColor : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     /// 左栏行（点击过滤 + 未读角标 + 右键设置菜单）。
