@@ -177,7 +177,12 @@ private final class OPMLXMLParser: NSObject, XMLParserDelegate {
     /// 无 rb:stype 时按 URL 猜类型（兼容 FreshRSS/Follo 导出的纯 OPML）
     private static func guessType(url: String) -> String {
         let u = url.lowercased()
+        // YouTube
         if u.contains("youtube.com/feeds/videos.xml") || u.contains("youtube.com/feeds/") { return "youtube" }
+        // 播客托管平台（buzzsprout/megaphone/simplecast/transistor 等）
+        if u.contains("buzzsprout.com") || u.contains("megaphone.fm") || u.contains("simplecast.com")
+            || u.contains("transistor.fm") || u.contains("anchor.fm") || u.contains("podbean.com")
+            || u.contains("libsyn.com") || u.contains("spreaker.com") { return "podcast" }
         return "rss"
     }
 
