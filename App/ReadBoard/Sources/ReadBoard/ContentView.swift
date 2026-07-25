@@ -856,7 +856,7 @@ public struct ArticleRow: View {
                 HStack(spacing: 6) {
                     if showSource {
                         HStack(spacing: 4) {
-                            // 源类型图标：RSS 用经典三半圆，其他来源待补齐品牌图标
+                            // 源类型图标：RSS 用经典三半圆，其他来源待补齐品牌图标（只显示图标不要文字）
                             if isRSSSource {
                                 RSSIcon(size: 11, color: .rbText3)
                             } else if let icon = ctypeIcon {
@@ -864,9 +864,6 @@ public struct ArticleRow: View {
                                     .font(.system(size: 11))
                                     .foregroundStyle(Color.rbText3)
                             }
-                            Text(item.source)
-                                .font(.system(size: RB.F.rowMeta * scale, weight: .medium))
-                                .foregroundStyle(Color.rbText2)
                         }
                     }
                     // 评分 badge（加「评分」前缀）
