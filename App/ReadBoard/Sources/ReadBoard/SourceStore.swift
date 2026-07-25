@@ -231,6 +231,22 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
+    /// 文件夹级批量设全文抓取模式（对文件夹内所有源统一设置）
+    func setFolderFetchMode(folderId: Int64, mode: FetchMode) {
+        let ids = db.queryRows("SELECT id FROM content_source WHERE folder_id = ?",
+                               params: [folderId]).compactMap { Int64($0["id"] ?? "") }
+        for sid in ids {
+            let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [sid]) ?? "{}"
+            var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+            obj["fetch_mode"] = mode.rawValue
+            if let data = try? JSONSerialization.data(withJSONObject: obj),
+               let str = String(data: data, encoding: .utf8) {
+                db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, sid])
+            }
+        }
+        reload()
+    }
+
     /// 重新探测某源的全文模式并写回
     func reprobeFetchMode(id: Int64) async {
         guard let identifier = db.scalarString("SELECT identifier FROM content_source WHERE id = ?", params: [id]) else { return }
