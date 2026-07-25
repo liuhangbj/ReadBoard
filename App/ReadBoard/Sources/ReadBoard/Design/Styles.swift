@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 
 // MARK: - 复用样式组件（纸墨系）
 //
@@ -297,5 +298,104 @@ struct RSSIcon: View {
             context.stroke(outerArc, with: shading, lineWidth: 1.8 * scale)
         }
         .frame(width: size, height: size)
+    }
+}
+
+/// 播客音频播放器（AVPlayer 播放远程音频流）
+/// 播放/暂停 + 进度条 + 时间显示，纸墨系配色
+struct AudioPlayerView: View {
+    let audioUrl: String
+    let title: String
+    @State private var player: AVPlayer?
+    @State private var isPlaying = false
+    @State private var currentTime: Double = 0
+    @State private var duration: Double = 0
+    @State private var timer: Timer?
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // 播放控制行
+            HStack(spacing: 12) {
+                // 播放/暂停按钮
+                Button {
+                    togglePlay()
+                } label: {
+                    Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 32))
+                        .foregroundStyle(Color.rbAccent)
+                }
+                .buttonStyle(.plain)
+
+                // 进度条 + 时间
+                VStack(spacing: 4) {
+                    // 进度条
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(Color.rbSurface)
+                                .frame(height: 4)
+                            Capsule()
+                                .fill(Color.rbAccent)
+                                .frame(width: duration > 0 ? geo.size.width * CGFloat(currentTime / duration) : 0, height: 4)
+                        }
+                    }
+                    .frame(height: 4)
+
+                    // 时间显示
+                    HStack {
+                        Text(formatTime(currentTime))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Color.rbText3)
+                        Spacer()
+                        Text(formatTime(duration))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Color.rbText3)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.rbSurface)
+        .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
+        .onAppear { setupPlayer() }
+        .onDisappear { cleanup() }
+    }
+
+    private func setupPlayer() {
+        guard let url = URL(string: audioUrl) else { return }
+        player = AVPlayer(url: url)
+        // 监听播放进度
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            guard let player = player else { return }
+            currentTime = player.currentTime().seconds
+            if let item = player.currentItem {
+                duration = item.duration.seconds.isFinite ? item.duration.seconds : 0
+            }
+            isPlaying = player.rate > 0
+        }
+    }
+
+    private func togglePlay() {
+        guard let player = player else { return }
+        if isPlaying {
+            player.pause()
+        } else {
+            player.play()
+        }
+        isPlaying.toggle()
+    }
+
+    private func cleanup() {
+        timer?.invalidate()
+        timer = nil
+        player?.pause()
+        player = nil
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return String(format: "%d:%02d", mins, secs)
     }
 }

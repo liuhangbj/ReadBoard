@@ -828,12 +828,25 @@ public struct ArticleRow: View {
         item.ctype != "wechat" && item.ctype != "social"
     }
 
+    /// 显示标题：有译文时取 translatedHead 第一行（中文标题），否则原标题
+    private var displayTitle: String {
+        guard let head = item.translatedHead, !head.isEmpty else {
+            return item.title
+        }
+        // 译文第一行通常是中文标题（去掉 markdown 标题符 #）
+        let firstLine = head.components(separatedBy: "\n").first ?? ""
+        let cleaned = firstLine.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+        return cleaned.isEmpty ? item.title : cleaned
+    }
+
     public var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: isCompact ? 2 : 5) {
                 // 标题行（评分挪到下方来源行了，标题行只留标题 + 星标）
                 HStack(alignment: .top, spacing: 6) {
-                    Text(item.title)
+                    // 有译文时显示中文标题（llm_translated_md 第一行），否则原标题
+                    Text(displayTitle)
                         .font(.system(size: RB.F.rowTitle * scale, weight: (unreadBold && !item.isRead) ? .semibold : .regular))
                         .foregroundStyle(item.isRead ? Color.rbText2 : Color.rbText)
                         .lineLimit(isCompact ? 1 : 2)
@@ -1178,6 +1191,12 @@ public struct ReadingView: View {
                         Text(metaParts.joined(separator: "  ·  "))
                             .font(.system(size: metaFontSize))
                             .foregroundStyle(p.textSecondary)
+                    }
+
+                    // ── 播客音频播放器（podcast 且有 audioUrl 时显示）──
+                    if item.ctype == "podcast", let audioUrl = item.audioUrl, !audioUrl.isEmpty {
+                        AudioPlayerView(audioUrl: audioUrl, title: item.title)
+                            .padding(.vertical, 4)
                     }
 
                     // ── LLM 操作条（胶囊按钮组 + 状态提示，精致排版）──
