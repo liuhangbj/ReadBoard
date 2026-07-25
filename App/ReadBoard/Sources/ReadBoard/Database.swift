@@ -80,12 +80,18 @@ public struct ContentItem: Identifiable, Hashable {
     }
 
     /// 填充正文的副本（点开阅读时 fetchContentBody 补大字段）
+    /// 保留轻量字段（imageUrl/hasTranslation/isMedia/translatedHead）——否则点开文章后中栏/右栏中文标题丢失
     func withBody(contentMd: String?, llmTranslatedMd: String?, audioUrl: String?) -> ContentItem {
-        ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
+        var copy = ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
                     url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
                     contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
                     llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
                     audioUrl: audioUrl, readAt: readAt, starred: starred, archived: archived)
+        copy.imageUrl = imageUrl
+        copy.hasTranslation = hasTranslation
+        copy.isMedia = isMedia
+        copy.translatedHead = translatedHead
+        return copy
     }
 }
 
