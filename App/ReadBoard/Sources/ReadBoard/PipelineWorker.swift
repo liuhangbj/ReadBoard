@@ -511,12 +511,13 @@ public final class PipelineWorker: ObservableObject {
             let folderCfg = colText(stmt, 3) ?? "{}"
             let sp = PipelinePolicy.from(configJson: srcCfg)
             let fpp = PipelinePolicy.from(configJson: folderCfg)
-            // 有效 = 源 OR 文件夹
+            // 有效 = 文件夹强制覆盖源级（文件夹设了就用文件夹的，没设才看源级）
+            // 用户要求：文件夹开关能整组取消/开启，不被源级干扰
             let eff = PipelinePolicy(
-                autoScore: sp.autoScore || fpp.autoScore,
-                autoTranslate: sp.autoTranslate || fpp.autoTranslate,
-                autoTranscribe: sp.autoTranscribe || fpp.autoTranscribe,
-                autoSummarize: sp.autoSummarize || fpp.autoSummarize
+                autoScore: folderCfg.contains("auto_score") ? fpp.autoScore : sp.autoScore,
+                autoTranslate: folderCfg.contains("auto_translate") ? fpp.autoTranslate : sp.autoTranslate,
+                autoTranscribe: folderCfg.contains("auto_transcribe") ? fpp.autoTranscribe : sp.autoTranscribe,
+                autoSummarize: folderCfg.contains("auto_summarize") ? fpp.autoSummarize : sp.autoSummarize
             )
             // 从源 config 解析 fetch_mode
             var mode: FetchMode = .summary
