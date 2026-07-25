@@ -80,9 +80,30 @@ public struct ContentView: View {
     @State private var renameTarget: (kind: String, id: Int64, currentName: String)? = nil
     @State private var renameInput = ""
     /// 展开的文件夹 id 集合（自己控制，DisclosureGroup 的 label 无法响应点击过滤）
+    /// 持久化到 UserDefaults——重启恢复上次的展开/收起状态（首次启动默认全展开）。
     @State private var expandedFolders: Set<String> = []
     /// 开管线后弹「如何处理历史数据」（kind: source/folder，action: pipeline=LLM管线回填 / fulltext=全文重抓）
     @State private var pendingBackfill: (kind: String, id: Int64, name: String, pipelineLabel: String, action: String)? = nil
+
+    // MARK: 左栏展开状态持久化
+
+    private static let expandedKey = "sidebar.expandedFolders"
+
+    /// 读上次的展开状态；nil = 首次（调用方默认全展开）
+    private func loadExpandedFolders() -> Set<String>? {
+        guard let arr = UserDefaults.standard.array(forKey: Self.expandedKey) as? [String] else { return nil }
+        return Set(arr)
+    }
+
+    /// 切换某文件夹展开状态并持久化
+    private func toggleFolderExpanded(_ id: String) {
+        if expandedFolders.contains(id) {
+            expandedFolders.remove(id)
+        } else {
+            expandedFolders.insert(id)
+        }
+        UserDefaults.standard.set(Array(expandedFolders), forKey: Self.expandedKey)
+    }
 
     private var sourceSidebar: some View {
         VStack(spacing: 0) {
@@ -115,11 +136,7 @@ public struct ContentView: View {
                             // 文件夹行：左侧箭头控制展开，点击行过滤该组
                             HStack(spacing: 4) {
                                 Button {
-                                    if expandedFolders.contains(node.id) {
-                                        expandedFolders.remove(node.id)
-                                    } else {
-                                        expandedFolders.insert(node.id)
-                                    }
+                                    toggleFolderExpanded(node.id)
                                 } label: {
                                     Image(systemName: expandedFolders.contains(node.id) ? "chevron.down" : "chevron.right")
                                         .font(.caption2)
@@ -225,8 +242,12 @@ public struct ContentView: View {
             }
         }
         .onAppear {
-            // 默认展开所有文件夹（用户能直接看到源，不用先点一下）
-            expandedFolders = Set(vm.sidebarTree.filter { $0.isFolder }.map { $0.id })
+            // 恢复上次的展开/收起状态；首次启动（无保存）默认全展开
+            if let saved = loadExpandedFolders() {
+                expandedFolders = saved
+            } else {
+                expandedFolders = Set(vm.sidebarTree.filter { $0.isFolder }.map { $0.id })
+            }
         }
     }
 
