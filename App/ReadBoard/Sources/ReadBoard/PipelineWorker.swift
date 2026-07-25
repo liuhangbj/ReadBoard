@@ -353,6 +353,52 @@ public final class PipelineWorker: ObservableObject {
         let fetchMode: FetchMode
     }
 
+    /// 切换全文抓取模式后，强制按当前模式重抓该源所有历史文章的全文。
+    /// 与 backfillFullText（只补抓取失败的）不同——这是用户主动切模式，
+    /// 连已抓过的也要按新模式重抓（比如从 summary 切到 defuddle 要补全文）。
+    /// 异步逐篇抓，返回成功条数。summary 模式不需要抓全文，直接返回 0。
+    @discardableResult
+    func refetchFullTextForSource(onlySourceId: Int64) async -> Int {
+        let policies = fetchEffectivePolicies()
+        guard let pol = policies[onlySourceId], pol.enabled else { return 0 }
+        // summary 模式本来就没全文，不需要抓
+        if pol.fetchMode == .summary { return 0 }
+        guard db.open() else { return 0 }
+        var stmt: OpaquePointer?
+        // 该源所有文章（非媒体），不论 fetch_status——切模式后按新模式全重抓
+        let sql = """
+        SELECT id, url, content_html FROM content
+        WHERE source_id = ? AND ctype = 'article' AND is_duplicate = 0
+        ORDER BY id DESC LIMIT 500;
+        """
+        guard db.prepare(sql, &stmt) else { return 0 }
+        sqlite3_bind_int64(stmt, 1, onlySourceId)
+        var rows: [(Int64, String, String?)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append((sqlite3_column_int64(stmt, 0), colText(stmt, 1) ?? "", colText(stmt, 2)))
+        }
+        sqlite3_finalize(stmt)
+
+        var ok = 0
+        for (id, url, html) in rows {
+            let success = await FullTextFetcher.shared.fetchAndStore(
+                contentId: id, url: url, feedHtml: html, mode: pol.fetchMode)
+            if success { ok += 1 }
+        }
+        return ok
+    }
+
+    /// 切换全文抓取模式后，强制按当前模式重抓文件夹内所有源的历史文章全文。
+    func refetchFullTextForFolder(folderId: Int64) async -> Int {
+        let ids = db.queryRows("SELECT id FROM content_source WHERE folder_id = ? AND enabled = 1",
+                               params: [folderId]).compactMap { Int64($0["id"] ?? "") }
+        var total = 0
+        for sid in ids {
+            total += await refetchFullTextForSource(onlySourceId: sid)
+        }
+        return total
+    }
+
     /// 全文回填：水位线后抓取失败/未抓的文章(fetch_status 0/3, 非媒体)，按源 fetch_mode 重试。
     /// 返回本轮成功补到全文的条数。每轮限 10 条防一轮跑太久。
     private func backfillFullText() async -> Int {

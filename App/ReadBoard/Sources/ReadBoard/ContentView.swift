@@ -81,8 +81,8 @@ public struct ContentView: View {
     @State private var renameInput = ""
     /// 展开的文件夹 id 集合（自己控制，DisclosureGroup 的 label 无法响应点击过滤）
     @State private var expandedFolders: Set<String> = []
-    /// 开管线后弹「如何处理历史数据」（target: source/folder，id + 源/文件夹名 + 管线名）
-    @State private var pendingBackfill: (kind: String, id: Int64, name: String, pipelineLabel: String)? = nil
+    /// 开管线后弹「如何处理历史数据」（kind: source/folder，action: pipeline=LLM管线回填 / fulltext=全文重抓）
+    @State private var pendingBackfill: (kind: String, id: Int64, name: String, pipelineLabel: String, action: String)? = nil
 
     private var sourceSidebar: some View {
         VStack(spacing: 0) {
@@ -188,17 +188,26 @@ public struct ContentView: View {
             }
             Button("取消", role: .cancel) { renameTarget = nil }
         }
-        // 开管线后弹「如何处理历史数据」（左栏右键开开关也触发，和订阅源页一致）
+        // 开管线/切全文模式后弹「如何处理历史数据」（左栏右键触发，和订阅源页一致）
         .alert("处理历史数据？", isPresented: Binding(
             get: { pendingBackfill != nil },
             set: { if !$0 { pendingBackfill = nil } }
         )) {
-            Button("处理所有历史并重新生成 md") {
+            // action=pipeline（LLM 管线回填）：按钮文案带 md；action=fulltext（全文重抓）：文案带全文
+            Button(pendingBackfill?.action == "fulltext" ? "重抓所有历史全文" : "处理所有历史并重新生成 md") {
                 if let p = pendingBackfill {
-                    if p.kind == "folder" {
-                        Task { await PipelineWorker.shared.backfillHistoryForFolder(folderId: p.id) }
+                    if p.action == "fulltext" {
+                        if p.kind == "folder" {
+                            Task { await PipelineWorker.shared.refetchFullTextForFolder(folderId: p.id) }
+                        } else {
+                            Task { await PipelineWorker.shared.refetchFullTextForSource(onlySourceId: p.id) }
+                        }
                     } else {
-                        Task { await PipelineWorker.shared.backfillHistory(onlySourceId: p.id) }
+                        if p.kind == "folder" {
+                            Task { await PipelineWorker.shared.backfillHistoryForFolder(folderId: p.id) }
+                        } else {
+                            Task { await PipelineWorker.shared.backfillHistory(onlySourceId: p.id) }
+                        }
                     }
                 }
                 pendingBackfill = nil
@@ -206,7 +215,11 @@ public struct ContentView: View {
             Button("只处理新增", role: .cancel) { pendingBackfill = nil }
         } message: {
             if let p = pendingBackfill {
-                Text("「\(p.name)」的\(p.pipelineLabel)已开启。\n\n• 处理历史：存量文章补跑管线并刷新已生成的 md 文件（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+                if p.action == "fulltext" {
+                    Text("「\(p.name)」的全文抓取模式已切换为\(p.pipelineLabel)。\n\n• 重抓历史：存量文章按新模式重新抓取全文（耗时较长）\n• 只处理新增：历史不动，新抓的按新模式抓")
+                } else {
+                    Text("「\(p.name)」的\(p.pipelineLabel)已开启。\n\n• 处理历史：存量文章补跑管线并刷新已生成的 md 文件（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+                }
             }
         }
         .onAppear {
@@ -367,7 +380,11 @@ public struct ContentView: View {
             // 全文抓取模式（对文件夹内所有源批量设置）
             Menu("全文抓取模式") {
                 ForEach(FetchMode.allCases, id: \.rawValue) { m in
-                    Button { sourceStore.setFolderFetchMode(folderId: fid, mode: m) } label: {
+                    Button {
+                        sourceStore.setFolderFetchMode(folderId: fid, mode: m)
+                        // 切换后弹「如何处理历史数据」（重抓全文或只新增）
+                        pendingBackfill = ("folder", fid, node.name, m.displayName, "fulltext")
+                    } label: {
                         Text(m.displayName)
                     }
                 }
@@ -395,7 +412,7 @@ public struct ContentView: View {
             sourceStore.setPolicy(id: src.id, key: key, value: turningOn)
             // 开启时弹「如何处理历史数据」（和订阅源页一致）
             if turningOn {
-                pendingBackfill = ("source", src.id, src.name, label)
+                pendingBackfill = ("source", src.id, src.name, label, "pipeline")
             }
         } label: {
             Label(label, systemImage: on ? "checkmark" : "")
@@ -407,7 +424,14 @@ public struct ContentView: View {
     private func fetchSettingsMenu(src: FeedSource) -> some View {
         Menu("全文模式：\(src.fetchMode.displayName)") {
             ForEach(FetchMode.allCases, id: \.rawValue) { m in
-                Button { sourceStore.setFetchMode(id: src.id, mode: m) } label: {
+                Button {
+                    let changed = src.fetchMode != m
+                    sourceStore.setFetchMode(id: src.id, mode: m)
+                    // 切换全文模式后弹「如何处理历史数据」（重抓全文或只新增）
+                    if changed {
+                        pendingBackfill = ("source", src.id, src.name, m.displayName, "fulltext")
+                    }
+                } label: {
                     Label(m.displayName, systemImage: src.fetchMode == m ? "checkmark" : "")
                 }
             }
@@ -439,7 +463,7 @@ public struct ContentView: View {
             sourceStore.setFolderPolicy(id: folder.id, key: key, value: turningOn)
             // 开启时弹「如何处理历史数据」（和订阅源页一致）
             if turningOn {
-                pendingBackfill = ("folder", folder.id, folder.name, label)
+                pendingBackfill = ("folder", folder.id, folder.name, label, "pipeline")
             }
         } label: {
             Label(label, systemImage: on ? "checkmark" : "")
