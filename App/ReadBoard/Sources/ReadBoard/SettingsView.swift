@@ -43,6 +43,7 @@ public struct SettingsView: View {
                     .tag(page)
             }
             .listStyle(.sidebar)
+            .tint(Color.rbAccent)   // 选中项墨蓝 tint（统一极简留白）
             .navigationSplitViewColumnWidth(min: 160, ideal: 180)
         } detail: {
             switch selection ?? .general {
@@ -92,7 +93,7 @@ public struct GeneralPane: View {
                     .frame(width: 110)
                 }
                 Text("关闭后只能手动点「全部刷新」抓 feed")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(Color.rbText3)
             }
             Section("md 文件生成（管线完成后落盘）") {
                 // 目录用系统文件夹选择器（NSOpenPanel），不手填路径
@@ -113,9 +114,9 @@ public struct GeneralPane: View {
                     }
                 }
                 Text("管线全部跑完的内容自动落成双语 md 存到这里，按源名分子目录。数据库记录保留（可检索），只清 HTML 中间产物。")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(Color.rbText3)
                 Text("已生成 \(archivedCount) 个文件")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(Color.rbText3)
             }
             Section("网络代理") {
                 TextField("代理地址（如 http://127.0.0.1:7890，留空直连）", text: $proxyInput)
@@ -135,7 +136,7 @@ public struct GeneralPane: View {
                     }
                 }
                 Text("所有 feed 抓取 / 全文回填 / YouTube 解析统一走此代理")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(Color.rbText3)
             }
         }
         .formStyle(.grouped)
@@ -174,7 +175,7 @@ public struct AILLMPane: View {
         Form {
             Section("LLM 服务（三槽按序 fallback，允许留空）") {
                 Text("槽1 失败自动换槽2，再失败换槽3，最后 .env 兜底。空槽跳过。")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(Color.rbText3)
             }
             ForEach(0..<LLMSettings.slotCount, id: \.self) { i in
                 LLMSlotView(slotIndex: i)
@@ -188,7 +189,7 @@ public struct AILLMPane: View {
                     ))
                 }
                 Text("这些开关与「功能板块」页的 AI 总开关叠加生效；源/文件夹级还有第三层开关。")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(Color.rbText3)
             }
         }
         .formStyle(.grouped)
@@ -246,7 +247,7 @@ public struct LLMSlotView: View {
                 }
                 .disabled(!filled)
                 if savedHint {
-                    Text("已保存").font(.caption).foregroundStyle(.green)
+                    Text("已保存").font(.caption).foregroundStyle(Color.rbScoreHigh)
                 }
                 Spacer()
                 Button(testing ? "测试中…" : "测试连接") {
@@ -265,7 +266,7 @@ public struct LLMSlotView: View {
             if let r = testResult {
                 Text(r)
                     .font(.caption)
-                    .foregroundStyle(testOK ? .green : .red)
+                    .foregroundStyle(testOK ? Color.rbScoreHigh : Color.rbScoreLow)
                     .textSelection(.enabled)
             }
         }
@@ -293,12 +294,12 @@ public struct DepsPane: View {
                 ForEach(deps) { dep in
                     HStack(spacing: 10) {
                         Image(systemName: dep.installed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                            .foregroundStyle(dep.installed ? .green : .orange)
+                            .foregroundStyle(dep.installed ? Color.rbScoreHigh : Color.rbScoreMid)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(dep.displayName).font(.headline)
                             Text(dep.installed ? dep.path : dep.installHint)
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Color.rbText3)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
@@ -332,9 +333,9 @@ public struct DepsPane: View {
                             ProgressView()
                         }
                         Text(downloader.statusText)
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(Color.rbText3)
                         if let err = downloader.errorMessage {
-                            Text(err).font(.caption).foregroundStyle(.red)
+                            Text(err).font(.caption).foregroundStyle(Color.rbScoreLow)
                         }
                     }
                     .padding(.vertical, 3)
@@ -343,10 +344,10 @@ public struct DepsPane: View {
                 HStack {
                     let ready = DependencyChecker.shared.transcribeReady
                     Image(systemName: ready ? "checkmark.seal.fill" : "exclamationmark.octagon.fill")
-                        .foregroundStyle(ready ? .green : .orange)
+                        .foregroundStyle(ready ? Color.rbScoreHigh : Color.rbScoreMid)
                     Text(ready ? "转录功能可用" : "转录功能不可用——请先安装上方缺失依赖")
                         .font(.callout)
-                        .foregroundStyle(ready ? .green : .orange)
+                        .foregroundStyle(ready ? Color.rbScoreHigh : Color.rbScoreMid)
                 }
             }
 
@@ -367,7 +368,7 @@ public struct DepsPane: View {
                         // 路径失效告警：配了但文件不在（brew 升级/卸载后）
                         if DependencyPaths.isCustomStale(kind) {
                             Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(Color.rbScoreMid)
                                 .help("该路径已失效（文件不存在），请修正或清除回自动探测")
                         }
                         if !customPaths[kind.rawValue].isNilOrEmpty {
@@ -380,7 +381,7 @@ public struct DepsPane: View {
                     }
                 }
                 Text("全文抓取的 node 也在此配置。改动即时生效。")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(Color.rbText3)
             }
         }
         .formStyle(.grouped)
@@ -428,7 +429,7 @@ public struct BoardsPane: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(board.displayName).font(.headline)
                             Text(board.subtitle)
-                                .font(.caption).foregroundStyle(.secondary)
+                                .font(.caption).foregroundStyle(Color.rbText3)
                             Text(board.subFeatures.joined(separator: " · "))
                                 .font(.caption2).foregroundStyle(.tertiary)
                         }
@@ -497,22 +498,22 @@ public struct CleanupPane: View {
             Section("当前占用") {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Text("数据库").foregroundStyle(.secondary)
+                        Text("数据库").foregroundStyle(Color.rbText3)
                         Spacer()
                         Text(CacheCleanupService.humanBytes(cleanup.dbBytes)).monospacedDigit()
                     }
                     HStack {
-                        Text("本地备份（\(cleanup.backupCount) 份）").foregroundStyle(.secondary)
+                        Text("本地备份（\(cleanup.backupCount) 份）").foregroundStyle(Color.rbText3)
                         Spacer()
                         Text(CacheCleanupService.humanBytes(cleanup.backupBytes)).monospacedDigit()
                     }
                     HStack {
-                        Text("临时文件（\(cleanup.tempCount) 项）").foregroundStyle(.secondary)
+                        Text("临时文件（\(cleanup.tempCount) 项）").foregroundStyle(Color.rbText3)
                         Spacer()
                         Text(CacheCleanupService.humanBytes(cleanup.tempBytes)).monospacedDigit()
                     }
                     HStack {
-                        Text("可清理全文 HTML").foregroundStyle(.secondary)
+                        Text("可清理全文 HTML").foregroundStyle(Color.rbText3)
                         Spacer()
                         Text("\(cleanup.contentHtmlCount) 条").monospacedDigit()
                     }
@@ -566,10 +567,10 @@ public struct CleanupPane: View {
                 }
                 if !cleanup.lastRunSummary.isEmpty {
                     Text(cleanup.lastRunSummary)
-                        .font(.caption).foregroundStyle(.green)
+                        .font(.caption).foregroundStyle(Color.rbScoreHigh)
                 }
                 Text("星标 / 有标签的内容任何清理都不动。物理删除前会导出 JSONL 到 Data/trash/ 回收站。")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(Color.rbText3)
             }
 
             Section("数据库备份 / 恢复") {
@@ -650,14 +651,14 @@ public struct BackupRestoreView: View {
                 }
                 .controlSize(.small)
                 .disabled(selectedBackup == nil)
-                .foregroundStyle(.red)
+                .foregroundStyle(Color.rbScoreLow)
             }
 
             if !message.isEmpty {
                 Text(message).font(.caption)
             }
             Text("恢复前会自动给当前库做一次安全备份。恢复完成后需重启 App。")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.caption2).foregroundStyle(Color.rbText3)
         }
         .onAppear(perform: reload)
         .alert("确认恢复？", isPresented: $showRestoreConfirm) {
@@ -701,7 +702,7 @@ public struct TrashRestoreView: View {
                             Text("\(b.date) · \(b.itemCount) 条")
                                 .font(.callout)
                             Text(CacheCleanupService.humanBytes(b.sizeBytes))
-                                .font(.caption2).foregroundStyle(.secondary)
+                                .font(.caption2).foregroundStyle(Color.rbText3)
                         }
                         Spacer()
                         Button("恢复") {
@@ -718,13 +719,13 @@ public struct TrashRestoreView: View {
                             CacheCleanupService.shared.deleteTrash(batch: b)
                             reload()
                         } label: { Image(systemName: "trash") }
-                        .buttonStyle(.borderless)
+                        .buttonStyle(.quiet)
                         .controlSize(.small)
                     }
                 }
                 HStack {
                     if !message.isEmpty {
-                        Text(message).font(.caption).foregroundStyle(.green)
+                        Text(message).font(.caption).foregroundStyle(Color.rbScoreHigh)
                     }
                     Spacer()
                     Button("清空回收站…", role: .destructive) { showClearConfirm = true }
@@ -732,7 +733,7 @@ public struct TrashRestoreView: View {
                 }
             }
             Text("恢复后内容放回「归档」，可在阅读区归档筛选里查看/取消归档。")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.caption2).foregroundStyle(Color.rbText3)
         }
         .onAppear(perform: reload)
         .alert("清空回收站？", isPresented: $showClearConfirm) {
@@ -768,7 +769,7 @@ public struct DeadLetterView: View {
                         Text("内容 #\(it.contentId) · \(it.jtype)")
                             .font(.callout)
                         Text("失败 \(it.fails) 次")
-                            .font(.caption2).foregroundStyle(.red)
+                            .font(.caption2).foregroundStyle(Color.rbScoreLow)
                         Spacer()
                         Button("重置重试") {
                             worker.resetDeadLetter(contentId: it.contentId, jtype: it.jtype)
@@ -795,7 +796,7 @@ public struct DeadLetterView: View {
                 }
             }
             Text("死信是连续失败 3 次被永久跳过的任务（防 LLM 费用失控）。重置后下轮 worker 会重新尝试。")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.caption2).foregroundStyle(Color.rbText3)
         }
         .onAppear(perform: reload)
     }

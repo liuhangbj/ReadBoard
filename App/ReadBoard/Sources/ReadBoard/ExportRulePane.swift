@@ -79,12 +79,12 @@ public struct ExportRulePane: View {
                                 editing = rule
                                 showEditor = true
                             } label: { Image(systemName: "pencil") }
-                            .buttonStyle(.borderless)
+                            .buttonStyle(.quiet)
 
                             Button(role: .destructive) {
                                 deletingRule = rule
                             } label: { Image(systemName: "trash") }
-                            .buttonStyle(.borderless)
+                            .buttonStyle(.quiet)
                         }
                         .padding(.vertical, 4)
                     }

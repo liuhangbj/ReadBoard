@@ -15,77 +15,85 @@ public struct SourcesView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // 顶部工具条
-            HStack {
+            // 顶部工具条（统一到 RB token：quiet 按钮、text 三级、墨蓝 tint）
+            HStack(spacing: 10) {
                 // 返回阅读（左栏底部导航切过来的入口）
                 Button { appTab.selection = 0 } label: {
                     Label("阅读", systemImage: "chevron.left")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.quiet)
                 .help("返回阅读")
                 Text("订阅源")
-                    .font(.title2.bold())
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Color.rbText)
                 Text("\(store.sources.count)")
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.rbText3)
                 Spacer()
                 if store.isSyncing {
                     ProgressView().scaleEffect(0.7)
-                    Text("同步中…").font(.caption).foregroundStyle(.secondary)
+                    Text("同步中…").font(.caption).foregroundStyle(Color.rbText3)
                 } else {
                     Button { Task { await store.syncAll() } } label: {
                         Label("全部刷新", systemImage: "arrow.clockwise")
                     }
+                    .buttonStyle(.quiet)
                 }
                 Button { showAddFolder = true } label: {
                     Label("文件夹", systemImage: "folder.badge.plus")
                 }
+                .buttonStyle(.quiet)
                 Button { showAddSheet = true } label: {
                     Label("添加", systemImage: "plus")
                 }
+                .buttonStyle(.quiet)
                 .keyboardShortcut("n", modifiers: .command)
                 // OPML 导入/导出（拆成独立按钮——此前 borderlessButton Menu 的 action
                 // 不触发，探针证实 importOPML 根本没被调用）
                 Button { importOPML() } label: {
                     Label("导入", systemImage: "square.and.arrow.down")
                 }
+                .buttonStyle(.quiet)
                 Button { exportOPML() } label: {
                     Label("导出", systemImage: "square.and.arrow.up")
                 }
+                .buttonStyle(.quiet)
             }
-            .padding()
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
 
             if !store.lastSyncMessage.isEmpty {
                 Text(store.lastSyncMessage)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal)
+                    .foregroundStyle(Color.rbText3)
+                    .padding(.horizontal, 16)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if !opmlMessage.isEmpty {
                 Text(opmlMessage)
                     .font(.caption)
-                    .foregroundStyle(.blue)
-                    .padding(.horizontal)
+                    .foregroundStyle(Color.rbAccent)
+                    .padding(.horizontal, 16)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             // ── 后台管线 worker 状态条 ──
             HStack(spacing: 8) {
                 Image(systemName: "gearshape.2")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.rbText3)
                 if worker.isRunning {
                     ProgressView().scaleEffect(0.6)
-                    Text("管线运行中…").font(.caption).foregroundStyle(.secondary)
+                    Text("管线运行中…").font(.caption).foregroundStyle(Color.rbText2)
                 } else {
-                    Text("管线空闲").font(.caption).foregroundStyle(.secondary)
+                    Text("管线空闲").font(.caption).foregroundStyle(Color.rbText2)
                 }
                 if let t = worker.lastRunAt {
-                    Text("上次 \(t)").font(.caption2).foregroundStyle(.tertiary)
+                    Text("上次 \(t)").font(.caption2).foregroundStyle(Color.rbText3)
                 }
                 if !worker.lastSummary.isEmpty {
-                    Text(worker.lastSummary).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                    Text(worker.lastSummary).font(.caption2).foregroundStyle(Color.rbText3).lineLimit(1)
                 }
-                Text("累计 \(worker.processedTotal)").font(.caption2).foregroundStyle(.tertiary)
+                Text("累计 \(worker.processedTotal)").font(.caption2).foregroundStyle(Color.rbText3)
                 Spacer()
                 Button {
                     Task { await worker.runOnce() }
@@ -94,11 +102,12 @@ public struct SourcesView: View {
                 }
                 .disabled(worker.isRunning)
                 .controlSize(.small)
+                .buttonStyle(.quiet)
             }
-            .padding(.horizontal)
+            .padding(.horizontal, 16)
             .padding(.vertical, 6)
 
-            Divider()
+            Hairline()
 
             // 源列表（文件夹 → 源 两级分组）
             List {
@@ -207,9 +216,10 @@ public struct FolderHeader: View {
     public var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "folder.fill")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.rbText3)
             Text(folder.name)
-                .font(.headline)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.rbText)
             Spacer()
             // 文件夹级总开关(开 = 该组全生效)
             folderToggle("打分", key: "auto_score", on: folder.policy.autoScore)
@@ -218,9 +228,10 @@ public struct FolderHeader: View {
             folderToggle("转录", key: "auto_transcribe", on: folder.policy.autoTranscribe)
             Button(role: .destructive) { showDeleteConfirm = true } label: {
                 Image(systemName: "trash")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.rbText3)
             }
-            .buttonStyle(.borderless)
-            .font(.caption)
+            .buttonStyle(.quiet)
         }
         .textCase(nil)
         .alert("删除文件夹「\(folder.name)」？", isPresented: $showDeleteConfirm) {
@@ -254,6 +265,7 @@ public struct FolderHeader: View {
         .toggleStyle(.checkbox)
         .font(.caption)
         .controlSize(.small)
+        .tint(Color.rbAccent)
     }
 }
 
@@ -271,17 +283,16 @@ public struct SourceRow: View {
             Text(icon)
                 .font(.title3)
             VStack(alignment: .leading, spacing: 2) {
-                Text(src.name).font(.headline)
+                Text(src.name)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Color.rbText)
                 Text(src.identifier)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.rbText3)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                HStack(spacing: 8) {
-                    Text(src.stype)
-                        .font(.caption2)
-                        .padding(.horizontal, 4).padding(.vertical, 1)
-                        .background(.quaternary).clipShape(RoundedRectangle(cornerRadius: 3))
+                HStack(spacing: 6) {
+                    RBadge(text: src.stype, color: .rbText3)
                     // 全文模式徽标（仅文章类源显示）
                     if src.stype == "rss" {
                         Menu {
@@ -297,17 +308,17 @@ public struct SourceRow: View {
                             Button("重新探测") { Task { await store.reprobeFetchMode(id: src.id) } }
                         } label: {
                             Text(src.fetchMode.displayName)
-                                .font(.caption2)
+                                .font(.system(size: 9, weight: .medium))
                                 .padding(.horizontal, 4).padding(.vertical, 1)
-                                .background(fetchModeColor.opacity(0.18))
+                                .background(fetchModeColor.opacity(0.12))
                                 .foregroundStyle(fetchModeColor)
-                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
                         }
                         .menuStyle(.borderlessButton)
                         .help("全文获取方式（点击可修改）")
                     }
                     if let t = src.lastFetchedAt {
-                        Text("上次 \(String(t.prefix(16)))").font(.caption2).foregroundStyle(.tertiary)
+                        Text("上次 \(String(t.prefix(16)))").font(.caption2).foregroundStyle(Color.rbText3)
                     }
                     // 抓取频率徽标
                     Menu {
@@ -322,18 +333,19 @@ public struct SourceRow: View {
                         }
                     } label: {
                         Text("⏱ \(intervalLabel(src.fetchIntervalMin))")
-                            .font(.caption2)
+                            .font(.system(size: 9, weight: .medium))
                             .padding(.horizontal, 4).padding(.vertical, 1)
-                            .background(.quaternary)
-                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                            .background(Color.rbSurface)
+                            .foregroundStyle(Color.rbText3)
+                            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
                     }
                     .menuStyle(.borderlessButton)
                     .help("自动抓取间隔（点击可修改）")
                     if let err = src.error {
-                        Text(err).font(.caption2).foregroundStyle(.red).lineLimit(1)
+                        Text(err).font(.caption2).foregroundStyle(Color.rbScoreLow).lineLimit(1)
                     }
                 }
-                // ── 管线开关（生效 = 源 OR 文件夹；文件夹已开的项标蓝）──
+                // ── 管线开关（生效 = 源 OR 文件夹；文件夹已开的项标墨蓝）──
                 HStack(spacing: 14) {
                     pipelineToggle("打分", key: "auto_score", on: src.policy.autoScore, inherited: fp.autoScore)
                     pipelineToggle("翻译", key: "auto_translate", on: src.policy.autoTranslate, inherited: fp.autoTranslate)
@@ -359,6 +371,7 @@ public struct SourceRow: View {
                 }
             } label: {
                 Image(systemName: "folder")
+                    .foregroundStyle(Color.rbText3)
             }
             .menuStyle(.borderlessButton)
             .frame(width: 24)
@@ -367,10 +380,13 @@ public struct SourceRow: View {
                 set: { store.setEnabled(id: src.id, enabled: $0) }
             ))
             .labelsHidden()
+            .tint(Color.rbAccent)
             Button(role: .destructive) { showDeleteConfirm = true } label: {
                 Image(systemName: "trash")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.rbText3)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.quiet)
             .alert("删除订阅源？", isPresented: $showDeleteConfirm) {
                 Button("取消", role: .cancel) {}
                 Button("删除", role: .destructive) { store.removeSource(id: src.id) }
@@ -398,7 +414,8 @@ public struct SourceRow: View {
         .toggleStyle(.checkbox)
         .font(.caption)
         .controlSize(.small)
-        .foregroundStyle(inherited ? .blue : .primary)
+        .tint(Color.rbAccent)
+        .foregroundStyle(inherited ? Color.rbAccent : Color.rbText)
         .help(inherited ? "文件夹层已开启此项，对本源生效" : "")
         .alert("处理历史数据？", isPresented: Binding(
             get: { pendingBackfillKey != nil },
@@ -425,10 +442,10 @@ public struct SourceRow: View {
 
     private var fetchModeColor: Color {
         switch src.fetchMode {
-        case .feedFull: return .green
-        case .defuddle: return .blue
-        case .cdp: return .orange
-        case .summary: return .gray
+        case .feedFull: return .rbScoreHigh
+        case .defuddle: return .rbAccent
+        case .cdp: return .rbScoreMid
+        case .summary: return .rbScoreNone
         }
     }
 
@@ -475,7 +492,7 @@ public struct AddSourceSheet: View {
             if !testResult.isEmpty {
                 Text(testResult)
                     .font(.caption)
-                    .foregroundStyle(testResult.hasPrefix("✓") ? .green : .red)
+                    .foregroundStyle(testResult.hasPrefix("✓") ? Color.rbScoreHigh : Color.rbScoreLow)
             }
 
             HStack {
