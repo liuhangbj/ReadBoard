@@ -210,6 +210,16 @@ public struct SourcesView: View {
                     if result.foldersCreated > 0 { msg += "，\(result.foldersCreated) 文件夹" }
                     if result.sourcesSkipped > 0 { msg += "，跳过已存在 \(result.sourcesSkipped)" }
                     if !result.errors.isEmpty { msg += "，\(result.errors.count) 错误" }
+                    // 有新导入的 RSS 源：后台批量探测全文模式（不阻塞导入）
+                    if !result.newRssSourceIds.isEmpty {
+                        msg += "\n后台探测 \(result.newRssSourceIds.count) 个源的全文模式…"
+                        Task {
+                            await SourceStore.shared.probeFetchModes(ids: result.newRssSourceIds)
+                            await MainActor.run {
+                                opmlMessage = "导入完成：新增 \(result.sourcesAdded) 源，全文模式探测完成"
+                            }
+                        }
+                    }
                     opmlMessage = msg
                 }
             }

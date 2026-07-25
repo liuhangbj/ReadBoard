@@ -9,6 +9,7 @@ public struct OPMLResult {
     var sourcesAdded = 0
     var sourcesSkipped = 0    // 已存在(identifier 重复)
     var errors: [String] = []
+    var newRssSourceIds: [Int64] = []   // 新导入的 RSS 源 id（导入后后台探测全文模式）
 }
 
 public final class OPMLService: @unchecked Sendable {
@@ -92,8 +93,16 @@ public final class OPMLService: @unchecked Sendable {
                     "INSERT INTO content_source (stype, name, identifier, enabled, folder_id, config) VALUES (?, ?, ?, 1, ?, '{}')",
                     params: [src.stype, src.title, src.url, folderId.map { Int($0) }]
                 )
-                if ok { result.sourcesAdded += 1 }
-                else { result.errors.append("插入失败: \(src.title)") }
+                if ok {
+                    result.sourcesAdded += 1
+                    // 记录新导入的 RSS 源 id（导入后后台探测全文模式）
+                    if src.stype == "rss",
+                       let newId = db.scalarInt("SELECT id FROM content_source WHERE identifier = ?", params: [src.url]) {
+                        result.newRssSourceIds.append(Int64(newId))
+                    }
+                } else {
+                    result.errors.append("插入失败: \(src.title)")
+                }
             }
         }
         return result

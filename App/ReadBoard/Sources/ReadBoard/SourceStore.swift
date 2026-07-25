@@ -260,6 +260,14 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
+    /// 批量探测多个源的全文模式（OPML 导入后后台调用）
+    /// 逐个 probeMode 并写回 config，不覆盖用户手动设置
+    func probeFetchModes(ids: [Int64]) async {
+        for id in ids {
+            await reprobeFetchMode(id: id)
+        }
+    }
+
     /// 文件夹级批量设全文抓取模式（对文件夹内所有源统一设置）
     func setFolderFetchMode(folderId: Int64, mode: FetchMode) {
         let ids = db.queryRows("SELECT id FROM content_source WHERE folder_id = ?",
