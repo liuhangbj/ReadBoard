@@ -39,29 +39,44 @@ public struct ContentItem: Identifiable, Hashable {
 
     /// 返回一个标记为已读的副本（本地状态同步用）
     func markingRead() -> ContentItem {
-        ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
+        var copy = ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
                     url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
                     contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
                     llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
                     audioUrl: audioUrl, readAt: "now", starred: starred, archived: archived)
+        copy.imageUrl = imageUrl
+        copy.hasTranslation = hasTranslation
+        copy.isMedia = isMedia
+        copy.translatedHead = translatedHead
+        return copy
     }
 
     /// 返回切换星标的副本
     func togglingStar() -> ContentItem {
-        ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
+        var copy = ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
                     url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
                     contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
                     llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
                     audioUrl: audioUrl, readAt: readAt, starred: !starred, archived: archived)
+        copy.imageUrl = imageUrl
+        copy.hasTranslation = hasTranslation
+        copy.isMedia = isMedia
+        copy.translatedHead = translatedHead
+        return copy
     }
 
     /// 返回切换归档的副本
     func togglingArchive() -> ContentItem {
-        ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
+        var copy = ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
                     url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
                     contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
                     llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
                     audioUrl: audioUrl, readAt: readAt, starred: starred, archived: !archived)
+        copy.imageUrl = imageUrl
+        copy.hasTranslation = hasTranslation
+        copy.isMedia = isMedia
+        copy.translatedHead = translatedHead
+        return copy
     }
 
     /// 填充正文的副本（点开阅读时 fetchContentBody 补大字段）
