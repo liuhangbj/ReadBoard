@@ -128,13 +128,14 @@ public struct SourcesView: View {
 
             Hairline()
 
-            // 源列表（文件夹 → 源 两级分组）
+            // 源列表（文件夹 → 源 两级分组；源相对文件夹缩进 20pt）
             List {
                 // 各文件夹分组
                 ForEach(store.folders) { folder in
                     Section {
                         ForEach(sources(in: folder.id)) { src in
                             SourceRow(src: src, store: store)
+                                .padding(.leading, 20)   // 源相对文件夹缩进
                         }
                     } header: {
                         FolderHeader(folder: folder, store: store)
@@ -345,14 +346,14 @@ public struct SourceRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            .frame(width: 220, alignment: .leading)
+            .frame(width: 280, alignment: .leading)
 
             // ── 中：每个选项固定列宽（条件项用占位保持对齐）──
-            // 全文模式（固定列；非 rss 占位保持对齐）——加宽到 76 容纳 defuddle
+            // 全文模式（固定列；非 rss 占位保持对齐）——加宽到 88 容纳 defuddle
             Group {
                 if src.stype == "rss" { fetchModeMenu } else { Color.clear.frame(height: 1) }
             }
-            .frame(width: 76, alignment: .leading)
+            .frame(width: 88, alignment: .leading)
 
             // 更新频率（固定列）——加宽到 88 容纳「15 分钟」
             intervalMenu
