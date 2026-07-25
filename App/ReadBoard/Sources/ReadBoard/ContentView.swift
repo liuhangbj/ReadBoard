@@ -107,68 +107,69 @@ public struct ContentView: View {
 
     private var sourceSidebar: some View {
         VStack(spacing: 0) {
-            // 顶部工具条：添加源 / 添加文件夹
-            HStack(spacing: 4) {
-                Text("订阅源")
-                    .font(.caption).foregroundStyle(.secondary)
+            // 顶部工具条：标题 + 添加文件夹 / 添加源
+            HStack(spacing: 6) {
+                SectionLabel(text: "订阅源")
                 Spacer()
                 Button { showAddFolder = true } label: {
-                    Image(systemName: "folder.badge.plus")
+                    Image(systemName: "folder.badge.plus").font(.system(size: 13))
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.quiet)
                 .help("新建文件夹")
                 Button { showAddSource = true } label: {
-                    Image(systemName: "plus")
+                    Image(systemName: "plus").font(.system(size: 13))
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.quiet)
                 .help("添加订阅源")
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+
+            Hairline()
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 1) {
                     // ── 全部文章（清空过滤，显示所有内容）──
                     allArticlesRow
 
                     ForEach(vm.sidebarTree) { node in
                         if node.isFolder {
-                            // 文件夹行：左侧箭头控制展开，点击行过滤该组
-                            HStack(spacing: 4) {
+                            // 文件夹行：chevron 与行内图标对齐；子源缩进与文件夹名对齐
+                            HStack(spacing: 0) {
                                 Button {
                                     toggleFolderExpanded(node.id)
                                 } label: {
                                     Image(systemName: expandedFolders.contains(node.id) ? "chevron.down" : "chevron.right")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 14)
+                                        .font(.system(size: 9, weight: .semibold))
+                                        .foregroundStyle(Color.rbText3)
+                                        .frame(width: 16, alignment: .center)
                                 }
                                 .buttonStyle(.plain)
-
-                                sidebarRow(node, indent: 0)
+                                sidebarRow(node, indent: 0, showChevronSlot: false)
                             }
-                            // 展开的子源
+                            // 展开的子源（缩进对齐：chevron16 + 图标16 + 间距，让源名与文件夹名基线一致）
                             if expandedFolders.contains(node.id) {
                                 ForEach(node.children ?? []) { child in
-                                    sidebarRow(child, indent: 1)
+                                    sidebarRow(child, indent: 1, showChevronSlot: true)
                                 }
                             }
                         } else {
-                            sidebarRow(node, indent: 0)
+                            sidebarRow(node, indent: 0, showChevronSlot: true)
                         }
                     }
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 6)
             }
 
             // ── 底部导航：订阅源管理 / 数据统计（替代底部 Tab 栏）──
             Hairline()
-            HStack(spacing: 0) {
+            HStack(spacing: 8) {
                 sidebarNavButton(icon: "dot.radiowaves.left.and.right", label: "订阅源", tab: 1)
                 sidebarNavButton(icon: "chart.bar.doc.horizontal", label: "管理", tab: 3)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
         }
         .background(Color.rbBgSidebar)   // 左栏略灰分出层次（极简留白）
         .sheet(isPresented: $showAddSource) {
@@ -303,15 +304,22 @@ public struct ContentView: View {
 
     /// 左栏行（点击过滤 + 未读角标 + 右键设置菜单）。
     /// Button 而非 List.tag——List selection 对 DisclosureGroup/自定义行不可靠。
-    private func sidebarRow(_ node: SidebarNode, indent: Int) -> some View {
+    /// 左栏行（点击过滤 + 未读角标 + 右键设置菜单）。
+    /// showChevronSlot：是否预留 chevron 占位宽度（子源/无 chevron 的源行用来对齐有 chevron 的文件夹行）
+    private func sidebarRow(_ node: SidebarNode, indent: Int, showChevronSlot: Bool) -> some View {
         let scale = uiFontScale
         let selected = vm.selectedFilter == node.filterKey
         return Button {
             vm.selectFilter(node.filterKey)
         } label: {
             HStack(spacing: 6) {
+                // chevron 占位（子源/普通源行对齐文件夹行的 chevron 宽度）
+                if showChevronSlot {
+                    Spacer().frame(width: 16)
+                }
                 if node.isFolder {
                     Image(systemName: "folder.fill")
+                        .font(.system(size: 12))
                         .foregroundStyle(Color.rbText3)
                         .frame(width: 16)
                 }
@@ -330,8 +338,8 @@ public struct ContentView: View {
                         .foregroundStyle(Color.rbText3)
                 }
             }
-            .padding(.leading, CGFloat(indent) * 18 + 12)
-            .padding(.trailing, 12)
+            .padding(.leading, node.isFolder ? 0 : (indent > 0 ? 6 : 0))
+            .padding(.trailing, 10)
             .padding(.vertical, 5 * scale)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
@@ -568,10 +576,10 @@ public struct ContentView: View {
             .background(Color.rbSurface)
 
             // 筛选条行1：评分(输入框) + 标签 + 未读/全部/星标(单选) + 归档
-            HStack {
+            HStack(spacing: 8) {
                 Text("评分 ≥")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.rbText3)
                 TextField("0", value: $vm.minScore, format: .number)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 48)
@@ -588,7 +596,7 @@ public struct ContentView: View {
 
                 Spacer()
 
-                // 全部/未读/星标/归档 四选一单选（分段控件）
+                // 全部/未读/星标/归档 四选一单选（分段控件，墨蓝 tint）
                 Picker("", selection: $vm.readFilter) {
                     ForEach(ContentViewModel.ReadFilter.allCases, id: \.self) { f in
                         Text(f.display).tag(f)
@@ -597,6 +605,7 @@ public struct ContentView: View {
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 240)
                 .controlSize(.small)
+                .tint(Color.rbAccent)
                 .onChange(of: vm.readFilter) { _, _ in vm.reload() }
 
                 // 排序选择（最新/最早/评分）
@@ -610,29 +619,31 @@ public struct ContentView: View {
                 .frame(maxWidth: 80)
                 .font(.caption)
                 .controlSize(.small)
+                .tint(Color.rbAccent)
                 .onChange(of: vm.sortOrder) { _, _ in vm.reload() }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
 
             // 筛选条行2：处理状态平铺多选按钮（打分/摘要/翻译/转录，可多选）
             HStack(spacing: 6) {
                 Text("处理")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.rbText3)
                 processedToggle(key: "score", label: "已打分")
                 processedToggle(key: "summary", label: "已摘要")
                 processedToggle(key: "translate", label: "已翻译")
                 processedToggle(key: "transcribe", label: "已转录")
                 Spacer()
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 6)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 7)
 
-            // 操作条：全部标已读 + 计数
+            Hairline()
+
+            // 操作条：计数 + 全部标已读
             HStack {
-                Text("\(vm.items.count) 条")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                SectionLabel(text: "\(vm.items.count) 条")
                 Spacer()
                 Button {
                     let n = vm.markAllRead()
@@ -642,10 +653,10 @@ public struct ContentView: View {
                         .font(.caption)
                 }
                 .controlSize(.small)
-                .buttonStyle(.borderless)
+                .buttonStyle(.quiet)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
 
             List(selection: Binding(
                 get: { vm.selectedItem },
@@ -985,34 +996,38 @@ public struct ReadingView: View {
     public var body: some View {
         VStack(spacing: 0) {
             // ── 顶部操作条：快捷操作（星标/已读/归档/分享）+ 版面设置 ──
-            HStack(spacing: 14) {
-                // 快捷操作
+            HStack(spacing: 10) {
+                // 快捷操作（QuietButtonStyle：hover 浮现 surface 底，激活态柔金/墨蓝）
                 Button { toggleStar() } label: {
                     Image(systemName: isStarred ? "star.fill" : "star")
-                        .foregroundStyle(isStarred ? .yellow : .secondary)
+                        .font(.system(size: 15))
+                        .foregroundStyle(isStarred ? Color.rbStar : Color.rbText2)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.quiet)
                 .help(isStarred ? "取消星标" : "加星标")
 
                 Button { toggleRead() } label: {
                     Image(systemName: isRead ? "envelope.open" : "envelope.badge")
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.rbText2)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.quiet)
                 .help(isRead ? "标为未读" : "标为已读")
 
                 Button { toggleArchive() } label: {
                     Image(systemName: item.archived ? "tray.and.arrow.up" : "archivebox")
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.rbText2)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.quiet)
                 .help(item.archived ? "取消归档" : "归档")
 
                 Button { showShareSheet = true } label: {
                     Image(systemName: "square.and.arrow.up")
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.rbText2)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.quiet)
                 .help("分享 / 后处理")
 
                 Spacer()
@@ -1027,31 +1042,33 @@ public struct ReadingView: View {
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 200)
                     .controlSize(.small)
+                    .tint(Color.rbAccent)
                 }
 
                 // 版面设置
                 Button { showLayoutPopover = true } label: {
                     Image(systemName: "textformat.size")
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.rbText2)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.quiet)
                 .help("版面设置")
                 .popover(isPresented: $showLayoutPopover, arrowEdge: .bottom) {
                     layoutPanel
                 }
 
                 // 上一篇/下一篇（键盘 j/k 的图形化对应）
-                HStack(spacing: 2) {
+                HStack(spacing: 0) {
                     Button { onPrev?() } label: {
-                        Image(systemName: "chevron.up")
+                        Image(systemName: "chevron.up").font(.system(size: 14, weight: .medium))
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.quiet)
                     .help("上一篇（k）")
                     .disabled(onPrev == nil)
                     Button { onNext?() } label: {
-                        Image(systemName: "chevron.down")
+                        Image(systemName: "chevron.down").font(.system(size: 14, weight: .medium))
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.quiet)
                     .help("下一篇（j）")
                     .disabled(onNext == nil)
                 }
@@ -1182,72 +1199,39 @@ public struct ReadingView: View {
         }
     }
 
-    /// 版面设置面板
+    /// 版面设置面板（极简分组：外观 / 字号 / 排版，标签统一 text2 右对齐，数值等宽）
     private var layoutPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("版面设置").font(.headline)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("版面设置")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.rbText)
 
-            // 主题 + 亮/暗（@AppStorage raw 键直绑，改即刷新无需 onChange 静态写）
-            HStack {
-                Text("主题").frame(width: 60, alignment: .leading)
+            // ── 外观 ──
+            SectionLabel(text: "外观")
+            settingRow("主题") {
                 Picker("", selection: $themeRaw) {
                     ForEach(ReadingTheme.allCases) { t in
                         Text(t.displayName).tag(t.rawValue)
                     }
                 }
                 .pickerStyle(.segmented)
+                .tint(Color.rbAccent)
             }
-            HStack {
-                Text("亮暗").frame(width: 60, alignment: .leading)
+            settingRow("亮暗") {
                 Picker("", selection: $themeModeRaw) {
                     ForEach(ReadingTheme.Mode.allCases) { m in
                         Text(m.displayName).tag(m.rawValue)
                     }
                 }
                 .pickerStyle(.segmented)
+                .tint(Color.rbAccent)
             }
-
-            // 字号（正文/标题/信息/摘要 分块独立 + 界面）
-            HStack {
-                Text("正文字号").frame(width: 60, alignment: .leading)
-                Stepper(value: $fontSize, in: 12...28, step: 1) {
-                    Text("\(Int(fontSize))").font(.callout.monospacedDigit())
-                }
-            }
-            HStack {
-                Text("标题字号").frame(width: 60, alignment: .leading)
-                Stepper(value: $titleFontSize, in: 16...40, step: 1) {
-                    Text("\(Int(titleFontSize))").font(.callout.monospacedDigit())
-                }
-            }
-            HStack {
-                Text("信息字号").frame(width: 60, alignment: .leading)
-                Stepper(value: $metaFontSize, in: 9...18, step: 1) {
-                    Text("\(Int(metaFontSize))").font(.callout.monospacedDigit())
-                }
-            }
-            HStack {
-                Text("摘要字号").frame(width: 60, alignment: .leading)
-                Stepper(value: $summaryFontSize, in: 10...22, step: 1) {
-                    Text("\(Int(summaryFontSize))").font(.callout.monospacedDigit())
-                }
-            }
-            HStack {
-                Text("界面缩放").frame(width: 60, alignment: .leading)
-                Slider(value: $uiFontScale, in: 0.8...1.5, step: 0.05)
-                Text(String(format: "%.0f%%", uiFontScale * 100)).frame(width: 40).font(.callout.monospacedDigit())
-            }
-
-            // 字体（预置 黑体/楷体/仿宋 + 系统字体列表任选，不手输）
-            HStack {
-                Text("字体").frame(width: 60, alignment: .leading)
+            settingRow("字体") {
                 Picker("", selection: $fontRaw) {
-                    // 预置组
                     ForEach(ReadingFont.presets, id: \.self) { f in
                         Text(f.displayName).tag(fontKey(f))
                     }
                     Divider()
-                    // 系统字体列表（每个用自身字体渲染预览，所见即所得）
                     ForEach(ReadingFont.availableFontFamilies, id: \.self) { family in
                         Text(family)
                             .font(.custom(family, size: 13))
@@ -1255,28 +1239,76 @@ public struct ReadingView: View {
                     }
                 }
                 .pickerStyle(.menu)
+                .tint(Color.rbAccent)
             }
 
-            // 行距
-            HStack {
-                Text("行距").frame(width: 60, alignment: .leading)
-                Slider(value: $lineSpacing, in: 0...16, step: 1)
-                Text("\(Int(lineSpacing))").frame(width: 24).font(.callout.monospacedDigit())
+            Hairline()
+
+            // ── 字号 ──
+            SectionLabel(text: "字号")
+            stepperRow("正文", value: $fontSize, range: 12...28)
+            stepperRow("标题", value: $titleFontSize, range: 16...40)
+            stepperRow("信息", value: $metaFontSize, range: 9...18)
+            stepperRow("摘要", value: $summaryFontSize, range: 10...22)
+            settingRow("界面缩放") {
+                HStack(spacing: 8) {
+                    Slider(value: $uiFontScale, in: 0.8...1.5, step: 0.05)
+                        .tint(Color.rbAccent)
+                    Text(String(format: "%.0f%%", uiFontScale * 100))
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(Color.rbText2)
+                        .frame(width: 40, alignment: .trailing)
+                }
             }
 
-            // 宽度
-            HStack {
-                Text("宽度").frame(width: 60, alignment: .leading)
+            Hairline()
+
+            // ── 排版 ──
+            SectionLabel(text: "排版")
+            settingRow("行距") {
+                HStack(spacing: 8) {
+                    Slider(value: $lineSpacing, in: 0...16, step: 1)
+                        .tint(Color.rbAccent)
+                    Text("\(Int(lineSpacing))")
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(Color.rbText2)
+                        .frame(width: 24, alignment: .trailing)
+                }
+            }
+            settingRow("宽度") {
                 Picker("", selection: $contentWidth) {
                     Text("窄").tag(560.0)
                     Text("中").tag(720.0)
                     Text("宽").tag(960.0)
                 }
                 .pickerStyle(.segmented)
+                .tint(Color.rbAccent)
             }
         }
-        .padding()
-        .frame(width: 360)
+        .padding(16)
+        .frame(width: 340)
+    }
+
+    /// 设置行：左侧标签（text2 右对齐固定宽）+ 右侧控件
+    private func settingRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 10) {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(Color.rbText2)
+                .frame(width: 56, alignment: .trailing)
+            content()
+        }
+    }
+
+    /// 字号 Stepper 行（标签 + Stepper 数值等宽）
+    private func stepperRow(_ label: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
+        settingRow(label) {
+            Stepper(value: value, in: range, step: 1) {
+                Text("\(Int(value.wrappedValue))")
+                    .font(.system(size: 12).monospacedDigit())
+                    .foregroundStyle(Color.rbText2)
+            }
+        }
     }
 
     /// ReadingFont → 持久化 key（和 ReadingFont.current 存储格式一致）
