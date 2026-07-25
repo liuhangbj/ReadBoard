@@ -197,16 +197,18 @@ public struct ContentView: View {
             Button(pendingBackfill?.action == "fulltext" ? "重抓所有历史全文" : "处理所有历史并重新生成 md") {
                 if let p = pendingBackfill {
                     if p.action == "fulltext" {
+                        // detached 后台跑——fetchAndStore spawn node 进程 + 超时轮询 Thread.sleep，
+                        // 在 MainActor 上会冻结 UI 崩溃/卡死（WeChat 文件夹实测崩过）
                         if p.kind == "folder" {
-                            Task { await PipelineWorker.shared.refetchFullTextForFolder(folderId: p.id) }
+                            Task.detached { await PipelineWorker.shared.refetchFullTextForFolder(folderId: p.id) }
                         } else {
-                            Task { await PipelineWorker.shared.refetchFullTextForSource(onlySourceId: p.id) }
+                            Task.detached { await PipelineWorker.shared.refetchFullTextForSource(onlySourceId: p.id) }
                         }
                     } else {
                         if p.kind == "folder" {
-                            Task { await PipelineWorker.shared.backfillHistoryForFolder(folderId: p.id) }
+                            Task.detached { await PipelineWorker.shared.backfillHistoryForFolder(folderId: p.id) }
                         } else {
-                            Task { await PipelineWorker.shared.backfillHistory(onlySourceId: p.id) }
+                            Task.detached { await PipelineWorker.shared.backfillHistory(onlySourceId: p.id) }
                         }
                     }
                 }

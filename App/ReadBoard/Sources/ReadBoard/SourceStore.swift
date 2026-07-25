@@ -5,7 +5,7 @@ import CryptoKit
 // MARK: - 订阅源模型
 
 /// 管线开关（存于 content_source.config JSON，默认全关）
-public struct PipelinePolicy: Hashable {
+public struct PipelinePolicy: Hashable, Sendable {
     var autoScore = false
     var autoTranslate = false
     var autoTranscribe = false
