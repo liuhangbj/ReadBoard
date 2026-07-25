@@ -75,3 +75,36 @@ struct SectionLabel: View {
             .tracking(0.5)
     }
 }
+
+/// 胶囊操作按钮（LLM 操作条等"可点动作"）：surface 底 + 圆角胶囊，
+/// hover 时 accent 浅底浮现 + 文字 accent，图标+文字一组。比默认 bordered 按钮克制，
+/// 比纯文字按钮有可点感。
+struct CapsuleButton: View {
+    let title: String
+    let icon: String
+    var disabled: Bool = false
+    var action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(disabled ? Color.rbText3 : (hovering ? Color.rbAccent : Color.rbText2))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule()
+                        .fill(disabled ? Color.rbSurface.opacity(0.5)
+                              : (hovering ? Color.rbAccent.opacity(0.10) : Color.rbSurface))
+                )
+                .overlay(
+                    Capsule().strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}

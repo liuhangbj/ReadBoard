@@ -369,19 +369,26 @@ public struct ContentView: View {
             Divider()
             // 管线开关快速切换
             if let src = sourceStore.sources.first(where: { $0.id == sid }) {
-                Menu("内容处理管道") {
+                Menu {
                     pipelineToggleMenu(src: src)
+                } label: {
+                    Label("内容处理管道", systemImage: "gearshape.2")
                 }
-                Menu("抓取设置") {
+                Menu {
                     fetchSettingsMenu(src: src)
+                } label: {
+                    Label("抓取设置", systemImage: "arrow.down.circle")
                 }
                 Divider()
-                Menu("移动到文件夹") {
+                Menu {
                     Button("无文件夹") { sourceStore.assignSource(sourceId: sid, folderId: nil); vm.loadAll() }
                     ForEach(sourceStore.folders) { f in
                         Button(f.name) { sourceStore.assignSource(sourceId: sid, folderId: f.id); vm.loadAll() }
                     }
+                } label: {
+                    Label("移动到文件夹", systemImage: "folder")
                 }
+                Divider()
                 Button(role: .destructive) { sourceStore.removeSource(id: sid); vm.loadAll() } label: {
                     Label("删除此源", systemImage: "trash")
                 }
@@ -402,12 +409,14 @@ public struct ContentView: View {
             }
             Divider()
             if let folder = sourceStore.folders.first(where: { $0.id == fid }) {
-                Menu("组级管线总开关") {
+                Menu {
                     folderPipelineMenu(folder: folder)
+                } label: {
+                    Label("组级管线总开关", systemImage: "gearshape.2")
                 }
             }
             // 全文抓取模式（对文件夹内所有源批量设置）
-            Menu("全文抓取模式") {
+            Menu {
                 ForEach(FetchMode.allCases, id: \.rawValue) { m in
                     Button {
                         sourceStore.setFolderFetchMode(folderId: fid, mode: m)
@@ -417,7 +426,10 @@ public struct ContentView: View {
                         Text(m.displayName)
                     }
                 }
+            } label: {
+                Label("全文抓取模式", systemImage: "doc.text")
             }
+            Divider()
             Button(role: .destructive) { sourceStore.removeFolder(id: fid); vm.loadAll() } label: {
                 Label("删除文件夹", systemImage: "trash")
             }
@@ -668,25 +680,49 @@ public struct ContentView: View {
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
                         .contextMenu {
-                            Button(item.isRead ? "标为未读" : "标为已读") { vm.toggleRead(item) }
-                            Button(item.starred ? "取消星标" : "加星标") { vm.toggleStar(item) }
-                            Button(item.archived ? "取消归档" : "归档") { vm.toggleArchive(item) }
+                            // ── 状态操作 ──
+                            Button { vm.toggleRead(item) } label: {
+                                Label(item.isRead ? "标为未读" : "标为已读",
+                                      systemImage: item.isRead ? "envelope.badge" : "envelope.open")
+                            }
+                            Button { vm.toggleStar(item) } label: {
+                                Label(item.starred ? "取消星标" : "加星标",
+                                      systemImage: item.starred ? "star.slash" : "star")
+                            }
+                            Button { vm.toggleArchive(item) } label: {
+                                Label(item.archived ? "取消归档" : "归档",
+                                      systemImage: item.archived ? "tray.and.arrow.up" : "archivebox")
+                            }
+
                             Divider()
-                            Button("复制链接") {
+
+                            // ── 打开 / 复制 ──
+                            Button {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(item.url, forType: .string)
+                            } label: {
+                                Label("复制链接", systemImage: "link")
                             }
-                            Button("浏览器打开原文") {
+                            Button {
                                 if let url = URL(string: item.url), !item.url.isEmpty {
                                     NSWorkspace.shared.open(url)
                                 }
+                            } label: {
+                                Label("浏览器打开原文", systemImage: "safari")
                             }
+
                             Divider()
-                            Button("重新生成 md 文件") {
+
+                            // ── 后处理 ──
+                            Button {
                                 ArchiveService.shared.rearchive(contentId: item.id)
+                            } label: {
+                                Label("重新生成 md 文件", systemImage: "doc.arrow.clockwise")
                             }
-                            Button("触发导出规则") {
+                            Button {
                                 Task { await ExportService.shared.runPending(trigger: "manual", contentId: item.id) }
+                            } label: {
+                                Label("触发导出规则", systemImage: "square.and.arrow.up.on.square")
                             }
                         }
                         // 最后一行出现时自动加载下一页（滚动到底分页，打破 300 条上限）
@@ -1094,53 +1130,42 @@ public struct ReadingView: View {
                     .font(.system(size: metaFontSize))
                     .foregroundStyle(p.textSecondary)
 
-                    // ── LLM 操作条 ──
-                    HStack(spacing: 10) {
+                    // ── LLM 操作条（胶囊按钮组 + 状态提示，精致排版）──
+                    HStack(spacing: 8) {
                         if isMediaItem, item.llmTranslatedMd == nil, policy.autoTranscribe {
-                            Button { runTranscribe() } label: {
-                                Label("转录", systemImage: "waveform")
-                            }
-                            .disabled(busy)
+                            CapsuleButton(title: "转录", icon: "waveform", disabled: busy) { runTranscribe() }
                         }
                         if !pipeline.isAvailable {
                             if !isMediaItem {
                                 Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
                                     .font(.caption)
-                                    .foregroundStyle(.red)
+                                    .foregroundStyle(Color.rbScoreLow)
                             }
                         } else {
                             if item.llmScore == nil, policy.autoScore {
-                                Button { runScore() } label: {
-                                    Label("AI 评分", systemImage: "star")
-                                }
-                                .disabled(busy)
+                                CapsuleButton(title: "AI 评分", icon: "star", disabled: busy) { runScore() }
                             }
                             if item.llmSummary == nil, policy.autoSummarize {
-                                Button { runSummarize() } label: {
-                                    Label("摘要", systemImage: "text.quote")
-                                }
-                                .disabled(busy)
+                                CapsuleButton(title: "摘要", icon: "text.quote", disabled: busy) { runSummarize() }
                             }
                             if !isMediaItem, item.llmTranslatedMd == nil, policy.autoTranslate {
-                                Button { runTranslate() } label: {
-                                    Label("AI 翻译", systemImage: "character.bubble")
-                                }
-                                .disabled(busy)
+                                CapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
                             }
                             if busy {
-                                ProgressView().scaleEffect(0.7)
+                                ProgressView().scaleEffect(0.6).frame(width: 16, height: 16)
                             }
                             if let msg = statusMsg {
                                 Text(msg)
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.rbText3)
                                     .lineLimit(1)
                             }
                         }
                         Spacer()
                     }
+                    .padding(.vertical, 2)
 
-                    Divider()
+                    Hairline()
 
                     // 摘要（独立字号设置）
                     if let sum = item.llmSummary, !sum.isEmpty {
