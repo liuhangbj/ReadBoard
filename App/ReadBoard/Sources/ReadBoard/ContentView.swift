@@ -1269,37 +1269,20 @@ public struct ReadingView: View {
 
             Hairline()
 
-            // ── 字号 ──
+            // ── 字号（统一滑块）──
             SectionLabel(text: "字号")
-            stepperRow("正文", value: $fontSize, range: 12...28)
-            stepperRow("标题", value: $titleFontSize, range: 16...40)
-            stepperRow("信息", value: $metaFontSize, range: 9...18)
-            stepperRow("摘要", value: $summaryFontSize, range: 10...22)
-            settingRow("界面缩放") {
-                HStack(spacing: 8) {
-                    Slider(value: $uiFontScale, in: 0.8...1.5, step: 0.05)
-                        .tint(Color.rbAccent)
-                    Text(String(format: "%.0f%%", uiFontScale * 100))
-                        .font(.system(size: 12).monospacedDigit())
-                        .foregroundStyle(Color.rbText2)
-                        .frame(width: 40, alignment: .trailing)
-                }
-            }
+            sliderRow("正文", value: $fontSize, range: 12...28)
+            sliderRow("标题", value: $titleFontSize, range: 16...40)
+            sliderRow("信息", value: $metaFontSize, range: 9...18)
+            sliderRow("摘要", value: $summaryFontSize, range: 10...22)
+            sliderRow("界面缩放", value: $uiFontScale, range: 0.8...1.5, step: 0.05,
+                      format: { String(format: "%.0f%%", $0 * 100) })
 
             Hairline()
 
             // ── 排版 ──
             SectionLabel(text: "排版")
-            settingRow("行距") {
-                HStack(spacing: 8) {
-                    Slider(value: $lineSpacing, in: 0...16, step: 1)
-                        .tint(Color.rbAccent)
-                    Text("\(Int(lineSpacing))")
-                        .font(.system(size: 12).monospacedDigit())
-                        .foregroundStyle(Color.rbText2)
-                        .frame(width: 24, alignment: .trailing)
-                }
-            }
+            sliderRow("行距", value: $lineSpacing, range: 0...16)
             settingRow("宽度") {
                 Picker("", selection: $contentWidth) {
                     Text("窄").tag(560.0)
@@ -1325,13 +1308,18 @@ public struct ReadingView: View {
         }
     }
 
-    /// 字号 Stepper 行（标签 + Stepper 数值等宽）
-    private func stepperRow(_ label: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
+    /// 滑块行（字号/行距/界面缩放统一）：标签 + 滑块 + 数值等宽。
+    /// format 自定义数值显示（默认整数，界面缩放传百分比）。
+    private func sliderRow(_ label: String, value: Binding<Double>, range: ClosedRange<Double>,
+                           step: Double = 1, format: ((Double) -> String)? = nil) -> some View {
         settingRow(label) {
-            Stepper(value: value, in: range, step: 1) {
-                Text("\(Int(value.wrappedValue))")
+            HStack(spacing: 8) {
+                Slider(value: value, in: range, step: step)
+                    .tint(Color.rbAccent)
+                Text(format?(value.wrappedValue) ?? "\(Int(value.wrappedValue))")
                     .font(.system(size: 12).monospacedDigit())
                     .foregroundStyle(Color.rbText2)
+                    .frame(width: 34, alignment: .trailing)
             }
         }
     }
