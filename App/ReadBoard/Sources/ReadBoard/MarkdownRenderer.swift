@@ -14,6 +14,9 @@ enum MdBlock: Identifiable {
     case codeBlock(lang: String?, code: String)
     case divider
     case image(alt: String, url: String)
+    /// 正文开头的 YAML frontmatter 块（title/url/published 等抓取元数据），
+    /// 从正文流剥离，UI 单独渲染成折叠面板（Obsidian 式）
+    case frontmatter(text: String)
 
     var id: UUID { UUID() }
 }
@@ -23,7 +26,28 @@ struct MarkdownRenderer {
     /// 把 markdown 文本解析成块序列
     static func parse(_ md: String) -> [MdBlock] {
         var blocks: [MdBlock] = []
-        let lines = md.components(separatedBy: "\n")
+        var lines = md.components(separatedBy: "\n")
+
+        // ── 剥离开头 YAML frontmatter 块（--- 到 --- 之间）──
+        // defuddle 抓取的正文开头带抓取元数据（title/url/published/domain 等），
+        // 不剥离会被当普通段落渲染，正文开头露出一大段原始字段。
+        // 剥成独立 .frontmatter 块，UI 单独渲染成折叠面板（Obsidian 式）。
+        if let first = lines.first, first.trimmingCharacters(in: .whitespaces) == "---" {
+            var fmEnd = -1
+            for j in 1..<lines.count {
+                if lines[j].trimmingCharacters(in: .whitespaces) == "---" { fmEnd = j; break }
+                // 安全上限：frontmatter 不该超过 40 行（防没有闭合 --- 时吞掉整篇正文）
+                if j > 40 { break }
+            }
+            if fmEnd > 0 {
+                let fmText = lines[1..<fmEnd].joined(separator: "\n")
+                if !fmText.trimmingCharacters(in: .whitespaces).isEmpty {
+                    blocks.append(.frontmatter(text: fmText))
+                }
+                lines = Array(lines[(fmEnd + 1)...])
+            }
+        }
+
         var i = 0
         var paraBuf: [String] = []        // 段落累积（连续非空行）
         var inCode = false

@@ -426,6 +426,9 @@ struct MarkdownBodyView: View {
                     Text(alt).font(.caption).foregroundStyle(p.textFaint)
                 }
             }
+
+        case .frontmatter(let text):
+            FrontmatterBlock(text: text, palette: p)
         }
     }
 
@@ -521,5 +524,84 @@ struct BilingualBodyView: View {
         .task(id: "\(original.hashValue)|\(translated.hashValue)") {
             pairs = computePairs()
         }
+    }
+}
+
+// MARK: - Frontmatter 折叠块（正文开头的 YAML 元数据，Obsidian 式）
+
+/// 渲染正文开头的 frontmatter 块（title/url/published/domain 等抓取元数据）。
+/// 默认收起显示「文档信息 · N 项」，点开展开看全部键值对（长值自动换行）。
+/// 折叠状态记 reading.metaExpanded（重启保持）。
+struct FrontmatterBlock: View {
+    let text: String
+    let palette: ThemePalette
+    @AppStorage("reading.metaExpanded") private var expanded: Bool = false
+
+    /// 解析 YAML 行成 (key, value) 对（title: xxx → (title, xxx)）
+    private var fields: [(key: String, value: String)] {
+        text.components(separatedBy: "\n").compactMap { line in
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard !t.isEmpty, let colon = t.firstIndex(of: ":") else { return nil }
+            let key = String(t[..<colon]).trimmingCharacters(in: .whitespaces)
+            var value = String(t[t.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            // 去 YAML 引号（'xxx' / "xxx"）
+            if (value.hasPrefix("'") && value.hasSuffix("'")) ||
+               (value.hasPrefix("\"") && value.hasSuffix("\"")), value.count >= 2 {
+                value = String(value.dropFirst().dropLast())
+            }
+            return (key, value)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(palette.textFaint)
+                        .frame(width: 12)
+                    Text("文档信息")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(palette.textFaint)
+                    Text("· \(fields.count) 项")
+                        .font(.system(size: 11))
+                        .foregroundStyle(palette.textFaint.opacity(0.7))
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(Array(fields.enumerated()), id: \.offset) { _, f in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(f.key)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(palette.textFaint)
+                                .frame(width: 90, alignment: .trailing)
+                            // 长值（url/description）自动换行
+                            Text(f.value)
+                                .font(.system(size: 11))
+                                .foregroundStyle(palette.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .background(palette.backgroundAlt.opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(palette.divider, lineWidth: 0.5)
+        )
     }
 }
