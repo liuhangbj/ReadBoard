@@ -1048,7 +1048,7 @@ public struct ReadingView: View {
     @AppStorage("reading.lineSpacing") private var lineSpacing: Double = 6
     @AppStorage("reading.contentWidth") private var contentWidth: Double = 720
     @AppStorage("reading.theme") private var themeRaw: String = "claude"
-    @AppStorage("reading.themeMode") private var themeModeRaw: String = "light"
+    @AppStorage("reading.themeMode") private var themeModeRaw: String = "system"
     @AppStorage("reading.font") private var fontRaw: String = "system"
     @AppStorage("reading.titleFontSize") private var titleFontSize: Double = 24
     @AppStorage("reading.metaFontSize") private var metaFontSize: Double = 12
@@ -1147,9 +1147,9 @@ public struct ReadingView: View {
 
                 Spacer()
 
-                // 版面设置
+                // 版面设置（Aa 图标）
                 Button { showLayoutPopover = true } label: {
-                    Image(systemName: "textformat.size")
+                    Image(systemName: "textformat")
                         .font(.system(size: 15, weight: .regular))
                         .frame(width: 24, height: 24)
                         .foregroundStyle(Color.rbText2)

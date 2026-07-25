@@ -850,7 +850,7 @@ public struct DeadLetterView: View {
 public struct ReaderPane: View {
     // 版面（阅读区）
     @AppStorage("reading.theme") private var themeRaw: String = "claude"
-    @AppStorage("reading.themeMode") private var themeModeRaw: String = ReadingTheme.Mode.light.rawValue
+    @AppStorage("reading.themeMode") private var themeModeRaw: String = ReadingTheme.Mode.system.rawValue
     @AppStorage("reading.font") private var fontRaw: String = "system"
     @AppStorage("reading.fontSize") private var fontSize: Double = 16
     @AppStorage("reading.titleFontSize") private var titleFontSize: Double = 24
@@ -896,10 +896,26 @@ public struct ReaderPane: View {
                     }
                 }
                 .tint(Color.rbAccent)
-                Stepper("正文字号 \(Int(fontSize))", value: $fontSize, in: 12...28, step: 1)
-                Stepper("标题字号 \(Int(titleFontSize))", value: $titleFontSize, in: 16...40, step: 1)
-                Stepper("信息字号 \(Int(metaFontSize))", value: $metaFontSize, in: 9...18, step: 1)
-                Stepper("摘要字号 \(Int(summaryFontSize))", value: $summaryFontSize, in: 10...22, step: 1)
+                HStack {
+                    Text("正文字号 \(Int(fontSize))")
+                    Slider(value: $fontSize, in: 12...28, step: 1)
+                        .tint(Color.rbAccent)
+                }
+                HStack {
+                    Text("标题字号 \(Int(titleFontSize))")
+                    Slider(value: $titleFontSize, in: 16...40, step: 1)
+                        .tint(Color.rbAccent)
+                }
+                HStack {
+                    Text("信息字号 \(Int(metaFontSize))")
+                    Slider(value: $metaFontSize, in: 9...18, step: 1)
+                        .tint(Color.rbAccent)
+                }
+                HStack {
+                    Text("摘要字号 \(Int(summaryFontSize))")
+                    Slider(value: $summaryFontSize, in: 10...22, step: 1)
+                        .tint(Color.rbAccent)
+                }
                 HStack {
                     Text("行距 \(Int(lineSpacing))")
                     Slider(value: $lineSpacing, in: 0...16, step: 1)

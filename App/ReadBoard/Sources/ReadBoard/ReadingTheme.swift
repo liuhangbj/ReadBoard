@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - 阅读器主题（颜色规范抄自 Obsidian 主题）
 // 每套主题是一个完整的颜色系统，渲染器的每个元素（标题层级/正文/引用/
@@ -59,33 +60,47 @@ enum ReadingTheme: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 亮/暗模式（持久化）
+    /// 亮/暗模式（持久化）：亮色 / 暗色 / 跟随系统
     enum Mode: String, CaseIterable, Identifiable {
-        case light, dark
+        case light, dark, system
         var id: String { rawValue }
-        var displayName: String { self == .light ? "亮色" : "暗色" }
+        var displayName: String {
+            switch self {
+            case .light: return "亮色"
+            case .dark: return "暗色"
+            case .system: return "跟随系统"
+            }
+        }
         static var current: Mode {
             get {
-                let raw = UserDefaults.standard.string(forKey: "reading.themeMode") ?? "light"
-                return Mode(rawValue: raw) ?? .light
+                let raw = UserDefaults.standard.string(forKey: "reading.themeMode") ?? "system"
+                return Mode(rawValue: raw) ?? .system
             }
             set { UserDefaults.standard.set(newValue.rawValue, forKey: "reading.themeMode") }
         }
     }
 
-    /// 当前主题的 palette（按亮暗模式取对应变体）
+    /// 当前主题的 palette（按亮暗模式取对应变体；system 模式读系统外观）
     var palette: ThemePalette {
         palette(for: Mode.current)
     }
 
     func palette(for mode: Mode) -> ThemePalette {
-        switch (self, mode) {
-        case (.claude, .light): return Self.primaryLight
+        // system 模式读系统外观（亮色/暗色）
+        let effectiveMode: Mode = mode == .system ? Self.systemAppearance() : mode
+        switch (self, effectiveMode) {
+        case (.claude, .light), (.claude, .system): return Self.primaryLight
         case (.claude, .dark): return Self.primaryDark
-        case (.things, .light): return Self.thingsLight
+        case (.things, .light), (.things, .system): return Self.thingsLight
         case (.things, .dark): return Self.thingsDark
         case (.systemDefault, _): return Self.systemPalette
         }
+    }
+
+    /// 读系统外观（亮色/暗色）
+    private static func systemAppearance() -> Mode {
+        let appearance = NSApp.effectiveAppearance
+        return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
     }
 
     // MARK: Primary（ceciliamay/obsidian-primary）——Bauhaus 红黄蓝 + 泛黄杂志
