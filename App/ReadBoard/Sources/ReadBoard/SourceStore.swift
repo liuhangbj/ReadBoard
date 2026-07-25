@@ -205,6 +205,13 @@ public final class SourceStore: ObservableObject {
         return f.policy
     }
 
+    /// 该源所属文件夹的原始 config JSON（用于判断文件夹是否显式设了某项——强制覆盖逻辑）
+    func folderConfig(for source: FeedSource) -> String {
+        guard let fid = source.folderId,
+              let f = folders.first(where: { $0.id == fid }) else { return "{}" }
+        return f.config
+    }
+
     // MARK: 增删改
 
     /// 添加订阅源（RSS/播客直接用 url；YouTube 传频道 url 或 UC id）

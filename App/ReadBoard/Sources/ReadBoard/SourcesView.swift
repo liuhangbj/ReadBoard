@@ -377,17 +377,17 @@ public struct SourceRow: View {
             }
             .frame(width: 96, alignment: .leading)
 
-            // 管线开关（每项固定列宽，对齐）
-            pipelineToggle("打分", key: "auto_score", on: src.policy.autoScore, inherited: fp.autoScore)
+            // 管线开关（每项固定列宽，对齐）——on 显示生效状态（文件夹覆盖后的）
+            pipelineToggle("打分", key: "auto_score", on: effectivePolicy.autoScore, inherited: fp.autoScore)
                 .frame(width: 52, alignment: .leading)
-            pipelineToggle("翻译", key: "auto_translate", on: src.policy.autoTranslate, inherited: fp.autoTranslate)
+            pipelineToggle("翻译", key: "auto_translate", on: effectivePolicy.autoTranslate, inherited: fp.autoTranslate)
                 .frame(width: 52, alignment: .leading)
-            pipelineToggle("摘要", key: "auto_summarize", on: src.policy.autoSummarize, inherited: fp.autoSummarize)
+            pipelineToggle("摘要", key: "auto_summarize", on: effectivePolicy.autoSummarize, inherited: fp.autoSummarize)
                 .frame(width: 52, alignment: .leading)
             // 转录（固定列；非媒体占位保持对齐）
             Group {
                 if src.transcribable {
-                    pipelineToggle("转录", key: "auto_transcribe", on: src.policy.autoTranscribe, inherited: fp.autoTranscribe)
+                    pipelineToggle("转录", key: "auto_transcribe", on: effectivePolicy.autoTranscribe, inherited: fp.autoTranscribe)
                 }
             }
             .frame(width: 52, alignment: .leading)
@@ -501,6 +501,25 @@ public struct SourceRow: View {
 
     /// 该源所属文件夹的开关（用于"已继承"高亮）
     private var fp: PipelinePolicy { store.folderPolicy(for: src) }
+
+    /// 生效策略（文件夹强制覆盖后的状态）——文件夹 config 显式设了就用文件夹的，没设看源级
+    /// 用于 UI 显示：文件夹关 = 全组关，源级开也显示关（被覆盖）
+    private var effectivePolicy: PipelinePolicy {
+        let folderCfg = store.folderConfig(for: src)
+        let srcP = src.policy
+        let folderP = fp
+        return PipelinePolicy(
+            autoScore: folderCfg.contains("auto_score") ? folderP.autoScore : srcP.autoScore,
+            autoTranslate: folderCfg.contains("auto_translate") ? folderP.autoTranslate : srcP.autoTranslate,
+            autoTranscribe: folderCfg.contains("auto_transcribe") ? folderP.autoTranscribe : srcP.autoTranscribe,
+            autoSummarize: folderCfg.contains("auto_summarize") ? folderP.autoSummarize : srcP.autoSummarize
+        )
+    }
+
+    /// 文件夹是否强制覆盖了某项（用于禁用源级开关的视觉提示）
+    private func isOverridden(key: String) -> Bool {
+        store.folderConfig(for: src).contains(key)
+    }
 
     /// 单个管线开关（打分/翻译/转录）。inherited=true 表示文件夹层已开，标蓝提示。
     /// 打开时弹选项：处理所有历史数据并重新归档（该源存量入管线刷新归档）/ 只处理新增。
