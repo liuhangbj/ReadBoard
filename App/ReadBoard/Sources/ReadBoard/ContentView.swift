@@ -162,7 +162,7 @@ public struct ContentView: View {
             }
 
             // ── 底部导航：订阅源管理 / 数据统计（替代底部 Tab 栏）──
-            Divider()
+            Hairline()
             HStack(spacing: 0) {
                 sidebarNavButton(icon: "dot.radiowaves.left.and.right", label: "订阅源", tab: 1)
                 sidebarNavButton(icon: "chart.bar.doc.horizontal", label: "管理", tab: 3)
@@ -170,6 +170,7 @@ public struct ContentView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
         }
+        .background(Color.rbBgSidebar)   // 左栏略灰分出层次（极简留白）
         .sheet(isPresented: $showAddSource) {
             AddSourceSheet(store: sourceStore)
                 .onDisappear { vm.loadAll() }
@@ -280,23 +281,22 @@ public struct ContentView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "tray.full")
-                    .foregroundStyle(active ? .white : .secondary)
+                    .foregroundStyle(Color.rbText3)
                     .frame(width: 16)
                 Text("全部文章")
-                    .font(.system(size: 13 * scale))
-                    .foregroundStyle(active ? .white : .primary)
+                    .font(.system(size: RB.F.sidebar * scale))
+                    .foregroundStyle(Color.rbText)
                 Spacer()
                 Text("\(vm.totalCount)")
-                    .foregroundStyle(active ? .white.opacity(0.8) : .secondary)
-                    .font(.system(size: 11 * scale))
+                    .foregroundStyle(Color.rbText3)
+                    .font(.system(size: RB.F.count * scale))
             }
             .padding(.leading, 12)
             .padding(.trailing, 12)
-            .padding(.vertical, 6 * scale)
+            .padding(.vertical, 5 * scale)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(active ? Color.accentColor : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
+            .rbSelection(active)
         }
         .buttonStyle(.plain)
     }
@@ -305,39 +305,37 @@ public struct ContentView: View {
     /// Button 而非 List.tag——List selection 对 DisclosureGroup/自定义行不可靠。
     private func sidebarRow(_ node: SidebarNode, indent: Int) -> some View {
         let scale = uiFontScale
+        let selected = vm.selectedFilter == node.filterKey
         return Button {
             vm.selectFilter(node.filterKey)
         } label: {
             HStack(spacing: 6) {
                 if node.isFolder {
                     Image(systemName: "folder.fill")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.rbText3)
                         .frame(width: 16)
                 }
                 Text(node.name)
                     .lineLimit(1)
-                    .font(.system(size: 13 * scale))
-                    .foregroundStyle(vm.selectedFilter == node.filterKey ? .white : .primary)
+                    .font(.system(size: RB.F.sidebar * scale))
+                    .foregroundStyle(Color.rbText)
                 Spacer()
-                // 始终显示 未读/总数（未读 > 0 时未读部分蓝色高亮，读完则灰色）
+                // 始终显示 未读/总数（未读 > 0 时未读部分墨蓝 medium，读完纯 text3）
                 HStack(spacing: 1) {
                     Text("\(node.unread)")
-                        .font(.system(size: 11 * scale, weight: node.unread > 0 ? .bold : .regular))
-                        .foregroundStyle(node.unread > 0
-                            ? (vm.selectedFilter == node.filterKey ? .white : .accentColor)
-                            : (vm.selectedFilter == node.filterKey ? .white.opacity(0.8) : .secondary))
+                        .font(.system(size: RB.F.count * scale, weight: node.unread > 0 ? .medium : .regular))
+                        .foregroundStyle(node.unread > 0 ? Color.rbAccent : Color.rbText3)
                     Text("/\(node.count)")
-                        .font(.system(size: 11 * scale))
-                        .foregroundStyle(vm.selectedFilter == node.filterKey ? .white.opacity(0.8) : .secondary)
+                        .font(.system(size: RB.F.count * scale))
+                        .foregroundStyle(Color.rbText3)
                 }
             }
             .padding(.leading, CGFloat(indent) * 18 + 12)
             .padding(.trailing, 12)
-            .padding(.vertical, 6 * scale)
+            .padding(.vertical, 5 * scale)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(vm.selectedFilter == node.filterKey ? Color.accentColor : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
+            .rbSelection(selected)
         }
         .buttonStyle(.plain)
         .contextMenu { sidebarContextMenu(node) }
@@ -537,9 +535,10 @@ public struct ContentView: View {
             Text(label)
                 .font(.caption)
                 .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(active ? Color.accentColor : Color.gray.opacity(0.12))
-                .foregroundStyle(active ? .white : .primary)
-                .clipShape(RoundedRectangle(cornerRadius: 5))
+                // 选中：浅墨蓝底+墨蓝字（不再实心反白）；未选：surface 底
+                .background(active ? Color.rbAccent.opacity(0.12) : Color.rbSurface)
+                .foregroundStyle(active ? Color.rbAccent : Color.rbText2)
+                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.md))
         }
         .buttonStyle(.plain)
     }
@@ -566,7 +565,7 @@ public struct ContentView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(.quaternary.opacity(0.5))
+            .background(Color.rbSurface)
 
             // 筛选条行1：评分(输入框) + 标签 + 未读/全部/星标(单选) + 归档
             HStack {
@@ -736,13 +735,13 @@ public struct ArticleRow: View {
                 // 标题行（评分挪到下方来源行了，标题行只留标题 + 星标）
                 HStack(alignment: .top, spacing: 6) {
                     Text(item.title)
-                        .font(.system(size: 15 * scale, weight: (unreadBold && !item.isRead) ? .semibold : .regular))
-                        .foregroundStyle(isSelected ? .white : (item.isRead ? .secondary : .primary))
+                        .font(.system(size: RB.F.rowTitle * scale, weight: (unreadBold && !item.isRead) ? .semibold : .regular))
+                        .foregroundStyle(item.isRead ? Color.rbText2 : Color.rbText)
                         .lineLimit(isCompact ? 1 : 2)
                         .fixedSize(horizontal: false, vertical: true)
                     if item.starred {
                         Image(systemName: "star.fill")
-                            .foregroundStyle(isSelected ? .white : .yellow)
+                            .foregroundStyle(Color.rbStar)
                             .font(.system(size: 11 * scale))
                     }
                     Spacer(minLength: 0)
@@ -750,66 +749,60 @@ public struct ArticleRow: View {
                 // 摘要（行数可配，0 = 不显示）
                 if excerptLines > 0, let ex = item.excerpt, !ex.isEmpty {
                     Text(ex)
-                        .font(.system(size: 12.5 * scale))
-                        .foregroundStyle(isSelected ? .white.opacity(0.85) : .secondary)
+                        .font(.system(size: RB.F.rowExcerpt * scale))
+                        .foregroundStyle(Color.rbText2)
                         .lineLimit(excerptLines)
                 }
                 // 来源 + 评分标签 + 日期（评分挪到标题下面这行，在 RSS 来源旁边）
                 HStack(spacing: 8) {
                     if showSource {
                         Text(item.source)
-                            .font(.system(size: 11 * scale, weight: .medium))
-                            .foregroundStyle(isSelected ? .white.opacity(0.9) : .secondary)
+                            .font(.system(size: RB.F.rowMeta * scale, weight: .medium))
+                            .foregroundStyle(Color.rbText2)
                     }
-                    // 评分背景色标签（按分数段配色，跟在来源后）
+                    // 评分 badge（降饱和语义色，去 bold，底 12%）
                     if let s = item.llmScore {
-                        Text("\(s)")
-                            .font(.system(size: 10 * scale).bold())
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(isSelected ? Color.white.opacity(0.25) : scoreColor(s).opacity(0.18))
-                            .foregroundStyle(isSelected ? .white : scoreColor(s))
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        RBadge(text: "\(s)", color: scoreColor(s), scale: scale)
                     }
-                    // 四项管线已处理标签（有结果才显示，跟在评分后）
+                    // 管线已处理 badge（摘/译/录，降饱和）
                     if let sum = item.llmSummary, !sum.isEmpty {
-                        pipelineBadge("摘", color: .purple, isSelected: isSelected)
+                        RBadge(text: "摘", color: .rbSummary, scale: scale)
                     }
                     if item.hasTranslation {
-                        // 媒体项译文来自转录，标「录」；文章标「译」
-                        pipelineBadge(item.isMedia ? "录" : "译", color: .blue, isSelected: isSelected)
+                        RBadge(text: item.isMedia ? "录" : "译", color: .rbTranslate, scale: scale)
                     }
                     if showDate, let pd = item.publishedAt, pd.count >= 10 {
                         Text(formattedDate(pd))
-                            .font(.system(size: 11 * scale))
-                            .foregroundStyle(isSelected ? .white.opacity(0.7) : Color(nsColor: .tertiaryLabelColor))
+                            .font(.system(size: RB.F.rowMeta * scale))
+                            .foregroundStyle(Color.rbText3)
                     }
                     Spacer()
-                    if !item.isRead && !isSelected {
-                        Circle().fill(Color.accentColor).frame(width: 7, height: 7)
+                    // 未读点：6pt 墨蓝（原 7pt accentColor，选中态不再隐藏——浅底下保持可见）
+                    if !item.isRead {
+                        Circle().fill(Color.rbAccent).frame(width: 6, height: 6)
                     }
                 }
             }
-            // 右侧缩略图（可关；紧凑模式更小）
+            // 右侧缩略图（可关；紧凑模式更小；失败占位 surface 更干净）
             if showThumbnails, let img = item.imageUrl, let url = URL(string: img) {
                 AsyncImage(url: url) { phase in
                     switch phase {
                     case .success(let image):
                         image.resizable().aspectRatio(contentMode: .fill)
                     case .failure, .empty:
-                        Rectangle().fill(Color.gray.opacity(0.15))
+                        Rectangle().fill(Color.rbSurface)
                     @unknown default:
-                        Rectangle().fill(Color.gray.opacity(0.15))
+                        Rectangle().fill(Color.rbSurface)
                     }
                 }
                 .frame(width: (isCompact ? 48 : 72) * scale, height: (isCompact ? 48 : 72) * scale)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.md))
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, isCompact ? 5 : 10)
-        .background(isSelected ? Color.accentColor : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.vertical, isCompact ? 4 : 8)
         .contentShape(Rectangle())
+        .rbSelection(isSelected, radius: RB.Radius.lg)
     }
 
     /// 日期格式：relative=相对（x 分钟/小时/天前）/ absolute=绝对（yyyy-MM-dd）
@@ -838,25 +831,15 @@ public struct ArticleRow: View {
         return String(iso.prefix(10))
     }
 
-    /// 评分颜色分段：90+ 绿 / 75-84 蓝 / 60-74 橙 / 1-59 红 / 0 灰
+    /// 评分颜色分段（降饱和语义色）：90+ 灰绿 / 75-84 墨蓝 / 60-74 赭 / 1-59 砖红 / 0 灰
     private func scoreColor(_ s: Int) -> Color {
         switch s {
-        case 90...: return .green
-        case 75..<90: return .blue
-        case 60..<75: return .orange
-        case 1..<60: return .red
-        default: return .gray   // 0 分
+        case 90...: return .rbScoreHigh
+        case 75..<90: return .rbScoreGood
+        case 60..<75: return .rbScoreMid
+        case 1..<60: return .rbScoreLow
+        default: return .rbScoreNone   // 0 分
         }
-    }
-
-    /// 管线已处理小标签（摘/译/录，单字背景色标签）
-    private func pipelineBadge(_ text: String, color: Color, isSelected: Bool) -> some View {
-        Text(text)
-            .font(.system(size: 9 * scale).bold())
-            .padding(.horizontal, 4).padding(.vertical, 1)
-            .background(isSelected ? Color.white.opacity(0.25) : color.opacity(0.18))
-            .foregroundStyle(isSelected ? .white : color)
-            .clipShape(RoundedRectangle(cornerRadius: 3))
     }
 }
 
@@ -1075,9 +1058,9 @@ public struct ReadingView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
-            .background(.bar)
+            .background(Color.rbBg)   // 弃 .bar 材质（实时模糊有开销）改纯色更干净
 
-            Divider()
+            Hairline()
 
             // ── 正文滚动区 ──
             ScrollView {
