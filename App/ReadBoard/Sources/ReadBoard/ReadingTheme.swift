@@ -478,7 +478,10 @@ struct BilingualBodyView: View {
     @State private var pairs: [(original: String, translated: String)] = []
 
     private func computePairs() -> [(original: String, translated: String)] {
-        let origParas = splitParagraphs(original)
+        // 先剥掉原文开头的 frontmatter（Cleaned URL/YAML/时间戳），不进段落对——
+        // 否则双语模式下 frontmatter 混进第一段露出来（和单语模式一致的剥离逻辑）。
+        let cleanedOriginal = Self.stripFrontmatterText(original)
+        let origParas = splitParagraphs(cleanedOriginal)
         let transParas = splitParagraphs(translated)
         let count = max(origParas.count, transParas.count)
         var result: [(String, String)] = []
@@ -488,6 +491,34 @@ struct BilingualBodyView: View {
             if !o.isEmpty || !t.isEmpty { result.append((o, t)) }
         }
         return result
+    }
+
+    /// 去掉文本开头的 frontmatter 区（调试日志 + --- 包裹的 YAML + 残留时间戳），
+    /// 供双语模式拆段前清理原文。逻辑与 MarkdownRenderer.stripLeadingFrontmatter 对齐。
+    static func stripFrontmatterText(_ md: String) -> String {
+        var lines = md.components(separatedBy: "\n")
+        var yamlStart = -1
+        for j in 0..<min(lines.count, 6) where lines[j].trimmingCharacters(in: .whitespaces) == "---" {
+            yamlStart = j; break
+        }
+        guard yamlStart >= 0 else { return md }
+        var yamlEnd = -1
+        for j in (yamlStart + 1)..<min(lines.count, 46) where lines[j].trimmingCharacters(in: .whitespaces) == "---" {
+            yamlEnd = j; break
+        }
+        guard yamlEnd > yamlStart else { return md }
+        let yamlLines = Array(lines[(yamlStart + 1)..<yamlEnd])
+        guard yamlLines.filter({ $0.contains(":") }).count >= 2 else { return md }
+        var consumedEnd = yamlEnd
+        var k = yamlEnd + 1
+        while k < lines.count, lines[k].trimmingCharacters(in: .whitespaces).isEmpty { k += 1 }
+        if k < lines.count {
+            let t = lines[k].trimmingCharacters(in: .whitespaces)
+            let ts = #"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$"#
+            if t.range(of: ts, options: .regularExpression) != nil { consumedEnd = k }
+        }
+        lines = Array(lines[(consumedEnd + 1)...])
+        return lines.joined(separator: "\n")
     }
 
     private func splitParagraphs(_ text: String) -> [String] {
@@ -537,10 +568,14 @@ struct FrontmatterBlock: View {
     let palette: ThemePalette
     @AppStorage("reading.metaExpanded") private var expanded: Bool = false
 
-    /// 解析 YAML 行成 (key, value) 对（title: xxx → (title, xxx)）
+    /// 解析 YAML 行成 (key, value) 对（title: xxx → (title, xxx)）。
+    /// 过滤 defuddle 调试噪音行（Cleaned URL/Xxx detected/pre-processing/Fetched/
+    /// 时间戳残留）——这些是抓取过程日志不是元数据，不显示给用户。
     private var fields: [(key: String, value: String)] {
         text.components(separatedBy: "\n").compactMap { line in
             let t = line.trimmingCharacters(in: .whitespaces)
+            // 跳过调试噪音行和时间戳残留行
+            if isDebugNoise(t) { return nil }
             guard !t.isEmpty, let colon = t.firstIndex(of: ":") else { return nil }
             let key = String(t[..<colon]).trimmingCharacters(in: .whitespaces)
             var value = String(t[t.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
@@ -551,6 +586,20 @@ struct FrontmatterBlock: View {
             }
             return (key, value)
         }
+    }
+
+    /// 是否 defuddle 调试噪音/残留行（不该显示给用户的抓取过程日志）
+    private func isDebugNoise(_ s: String) -> Bool {
+        if s.isEmpty { return true }
+        // 调试日志前缀
+        let noisePrefixes = ["Cleaned URL:", "Fetching", "Fetched", "Pre-processing", "pre-processing"]
+        for p in noisePrefixes where s.hasPrefix(p) { return true }
+        // 「Xxx detected, ...」检测日志
+        if s.contains("detected,") { return true }
+        // 残留时间戳行（yyyy-MM-dd 或带时间）
+        let ts = #"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$"#
+        if s.range(of: ts, options: .regularExpression) != nil { return true }
+        return false
     }
 
     var body: some View {
@@ -583,10 +632,11 @@ struct FrontmatterBlock: View {
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(palette.textFaint)
                                 .frame(width: 90, alignment: .trailing)
-                            // 长值（url/description）自动换行
+                            // 长值（url）自动换行；description 超长截断 3 行（防撑爆）
                             Text(f.value)
                                 .font(.system(size: 11))
                                 .foregroundStyle(palette.textSecondary)
+                                .lineLimit(f.key == "description" ? 3 : nil)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .textSelection(.enabled)
                         }

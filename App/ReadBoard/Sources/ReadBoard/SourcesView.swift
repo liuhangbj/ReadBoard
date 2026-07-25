@@ -148,6 +148,8 @@ public struct SourcesView: View {
     // MARK: OPML 导入/导出
 
     private func importOPML() {
+        // 诊断探针：确认函数是否被调用（用户反馈点导入没反应，先验证 action 触没触发）
+        try? "importOPML called at \(Date())\n".write(toFile: "/tmp/rb_opml_probe.log", atomically: false, encoding: .utf8)
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.init(filenameExtension: "opml")!, .xml]
         panel.allowsMultipleSelection = false

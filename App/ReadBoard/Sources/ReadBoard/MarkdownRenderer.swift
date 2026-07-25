@@ -28,25 +28,15 @@ struct MarkdownRenderer {
         var blocks: [MdBlock] = []
         var lines = md.components(separatedBy: "\n")
 
-        // ── 剥离开头 YAML frontmatter 块（--- 到 --- 之间）──
-        // defuddle 抓取的正文开头带抓取元数据（title/url/published/domain 等），
-        // 不剥离会被当普通段落渲染，正文开头露出一大段原始字段。
-        // 剥成独立 .frontmatter 块，UI 单独渲染成折叠面板（Obsidian 式）。
-        if let first = lines.first, first.trimmingCharacters(in: .whitespaces) == "---" {
-            var fmEnd = -1
-            for j in 1..<lines.count {
-                if lines[j].trimmingCharacters(in: .whitespaces) == "---" { fmEnd = j; break }
-                // 安全上限：frontmatter 不该超过 40 行（防没有闭合 --- 时吞掉整篇正文）
-                if j > 40 { break }
-            }
-            if fmEnd > 0 {
-                let fmText = lines[1..<fmEnd].joined(separator: "\n")
-                if !fmText.trimmingCharacters(in: .whitespaces).isEmpty {
-                    blocks.append(.frontmatter(text: fmText))
-                }
-                lines = Array(lines[(fmEnd + 1)...])
-            }
-        }
+        // ── 剥离开头抓取元数据区（frontmatter）──
+        // defuddle 抓取的正文开头带元数据，三种混在一起的形式：
+        //   1. 「Cleaned URL: ... / Xxx detected, pre-processing...」调试日志行（可无）
+        //   2. --- 到 --- 包裹的 YAML（title/author/published/domain/url/word_count 等）
+        //   3. 之后残留的一行时间戳（如 2026-07-25 15:07）
+        // 之前只处理「开头即 ---」，但 Cleaned URL 调试行在 --- 前就没匹配上，
+        // 整段元数据全露出来。改为扫描开头，定位 --- 块，连同前面的调试行和后面的
+        // 时间戳一并剥成 .frontmatter，正文从 ## 标题开始。
+        lines = stripLeadingFrontmatter(lines: lines, into: &blocks)
 
         var i = 0
         var paraBuf: [String] = []        // 段落累积（连续非空行）
@@ -117,6 +107,68 @@ struct MarkdownRenderer {
             blocks.append(.codeBlock(lang: codeLang, code: codeBuf.joined(separator: "\n")))
         }
         return blocks
+    }
+
+    /// 剥离开头抓取元数据区（defuddle frontmatter），返回剩余正文行，元数据塞进 blocks。
+    /// 识别三种混在正文开头的元数据：
+    ///   A. 「Cleaned URL: / Xxx detected, pre-processing / Fetched / ---」等调试日志行
+    ///   B. --- 到 --- 包裹的 YAML（title/author/published/domain/url/word_count/source）
+    ///   C. 闭合 --- 之后残留的一行时间戳（yyyy-MM-dd HH:mm）
+    /// 安全上限：只在开头 45 行内找，找不到 --- 块或正文已开始就原样返回不剥。
+    private static func stripLeadingFrontmatter(lines: [String], into blocks: inout [MdBlock]) -> [String] {
+        // 找第一个 --- 行（即 YAML 块起始），只在前 6 行内找（调试日志最多几行）
+        var yamlStart = -1
+        for j in 0..<min(lines.count, 6) {
+            if lines[j].trimmingCharacters(in: .whitespaces) == "---" { yamlStart = j; break }
+        }
+        guard yamlStart >= 0 else { return lines }   // 开头没有 --- 块，不是 defuddle 格式
+
+        // 找闭合 ---（yamlStart 之后第一个 ---），限 45 行内
+        var yamlEnd = -1
+        for j in (yamlStart + 1)..<min(lines.count, 46) {
+            if lines[j].trimmingCharacters(in: .whitespaces) == "---" { yamlEnd = j; break }
+        }
+        guard yamlEnd > yamlStart else { return lines }  // 没闭合，不是完整 YAML 块
+
+        // YAML 块内容必须像 key: value（防把正文中碰巧的 --- 当 frontmatter）
+        let yamlLines = Array(lines[(yamlStart + 1)..<yamlEnd])
+        let kvCount = yamlLines.filter { $0.contains(":") }.count
+        guard kvCount >= 2 else { return lines }  // 至少 2 个 key: value 才算 frontmatter
+
+        // 收集要剥掉的行：调试日志行（0..<yamlStart）+ YAML 块（yamlStart...yamlEnd）
+        var meta: [String] = []
+        // A. 调试日志行（Cleaned URL/detected/pre-processing/Fetched 等）
+        for j in 0..<yamlStart {
+            let t = lines[j].trimmingCharacters(in: .whitespaces)
+            if !t.isEmpty { meta.append(t) }
+        }
+        // B. YAML 内容
+        meta.append(contentsOf: yamlLines.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+
+        var consumedEnd = yamlEnd  // 已消费到闭合 ---
+
+        // C. 闭合 --- 之后紧跟的一行时间戳（yyyy-MM-dd 或带 HH:mm），也剥掉
+        var k = yamlEnd + 1
+        // 跳过空行
+        while k < lines.count, lines[k].trimmingCharacters(in: .whitespaces).isEmpty { k += 1 }
+        if k < lines.count {
+            let t = lines[k].trimmingCharacters(in: .whitespaces)
+            if isTimestampLine(t) {
+                meta.append(t)
+                consumedEnd = k
+            }
+        }
+
+        guard !meta.isEmpty else { return lines }
+        blocks.append(.frontmatter(text: meta.joined(separator: "\n")))
+        return Array(lines[(consumedEnd + 1)...])
+    }
+
+    /// 是否时间戳行（yyyy-MM-dd 或 yyyy-MM-dd HH:mm(:ss)）
+    private static func isTimestampLine(_ s: String) -> Bool {
+        // 形如 2026-07-25 或 2026-07-25 15:07 或 2026-07-25 15:07:06
+        let pattern = #"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$"#
+        return s.range(of: pattern, options: .regularExpression) != nil
     }
 
     private static func parseHeading(_ line: String) -> MdBlock? {
