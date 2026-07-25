@@ -345,6 +345,14 @@ public final class PipelineWorker: ObservableObject {
             // md 还没转出来——你 1119 篇翻译源文章就是这样，正文在 content_html 但 md/excerpt
             // 都空，worker 此前只认 md/excerpt 拿不到正文跳过翻译）→ excerpt（摘要）
             let body = Self.resolveBody(md: r.md, html: r.html, excerpt: r.excerpt)
+            // 修：content_html 有全文但 content_md 空时，剥标签写回 content_md——
+            // 否则翻译用了 content_html 全文，但阅读区 content_md 还是空（显示摘要不是全文）
+            if (r.md == nil || r.md!.isEmpty), let html = r.html, !html.isEmpty {
+                let mdText = Self.resolveBody(md: nil, html: html, excerpt: nil)
+                if !mdText.isEmpty {
+                    db.execute("UPDATE content SET content_md = ? WHERE id = ?", params: [mdText, id])
+                }
+            }
             let audioUrl = r.audioUrl
             let isMedia = r.isMedia
             let skip = skipMap[id] ?? [:]
