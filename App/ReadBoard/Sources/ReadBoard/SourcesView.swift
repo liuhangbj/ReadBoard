@@ -348,15 +348,15 @@ public struct SourceRow: View {
             .frame(width: 220, alignment: .leading)
 
             // ── 中：每个选项固定列宽（条件项用占位保持对齐）──
-            // 全文模式（固定列；非 rss 占位保持对齐）
+            // 全文模式（固定列；非 rss 占位保持对齐）——加宽到 76 容纳 defuddle
             Group {
                 if src.stype == "rss" { fetchModeMenu } else { Color.clear.frame(height: 1) }
             }
-            .frame(width: 64, alignment: .leading)
+            .frame(width: 76, alignment: .leading)
 
-            // 更新频率（固定列）
+            // 更新频率（固定列）——加宽到 88 容纳「15 分钟」
             intervalMenu
-                .frame(width: 76, alignment: .leading)
+                .frame(width: 88, alignment: .leading)
 
             // 上次抓取（固定列；无值占位）
             Group {
