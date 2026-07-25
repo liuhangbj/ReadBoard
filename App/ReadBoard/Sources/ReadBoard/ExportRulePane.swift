@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - 导出规则管理（后处理板块）
 // 规则列表 + 新建/编辑表单。手动"立即执行"对匹配内容全量补跑（幂等，已交付的跳过）。
@@ -145,10 +146,6 @@ public struct ExportRuleEditor: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            Text(rule.id == 0 ? "新建导出规则" : "编辑导出规则")
-                .font(.title3.bold())
-                .padding()
-
             Form {
                 Section("基本信息") {
                     TextField("规则名称", text: $rule.name)
@@ -170,47 +167,40 @@ public struct ExportRuleEditor: View {
                             }
                     }
                     // 限定来源（不选 = 全部源）
-                    VStack(alignment: .leading, spacing: 4) {
+                    HStack {
                         Text("限定来源")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if sourceStore.sources.isEmpty {
-                            Text("（暂无订阅源）")
-                                .font(.caption2).foregroundStyle(.tertiary)
-                        } else {
-                            Menu {
-                                ForEach(sourceStore.sources) { src in
-                                    Button {
+                        Spacer()
+                        Menu {
+                            ForEach(sourceStore.sources) { src in
+                                Button {
+                                    if selectedSourceIds.contains(src.id) {
+                                        selectedSourceIds.remove(src.id)
+                                    } else {
+                                        selectedSourceIds.insert(src.id)
+                                    }
+                                    rule.criteria.sourceIds = selectedSourceIds.isEmpty ? nil : Array(selectedSourceIds)
+                                } label: {
+                                    HStack {
+                                        Text(src.name)
                                         if selectedSourceIds.contains(src.id) {
-                                            selectedSourceIds.remove(src.id)
-                                        } else {
-                                            selectedSourceIds.insert(src.id)
-                                        }
-                                        rule.criteria.sourceIds = selectedSourceIds.isEmpty ? nil : Array(selectedSourceIds)
-                                    } label: {
-                                        HStack {
-                                            Text(src.name)
-                                            if selectedSourceIds.contains(src.id) {
-                                                Image(systemName: "checkmark")
-                                            }
+                                            Image(systemName: "checkmark")
                                         }
                                     }
                                 }
-                                if !selectedSourceIds.isEmpty {
-                                    Divider()
-                                    Button("清除全部") {
-                                        selectedSourceIds.removeAll()
-                                        rule.criteria.sourceIds = nil
-                                    }
-                                }
-                            } label: {
-                                Text(selectedSourceIds.isEmpty
-                                     ? "全部源"
-                                     : "已选 \(selectedSourceIds.count) 个源")
-                                    .font(.caption)
                             }
-                            .menuStyle(.borderlessButton)
+                            if !selectedSourceIds.isEmpty {
+                                Divider()
+                                Button("清除全部") {
+                                    selectedSourceIds.removeAll()
+                                    rule.criteria.sourceIds = nil
+                                }
+                            }
+                        } label: {
+                            Text(selectedSourceIds.isEmpty
+                                 ? "全部源"
+                                 : "已选 \(selectedSourceIds.count) 个源")
                         }
+                        .menuStyle(.borderlessButton)
                     }
                     Toggle("只导已翻译的", isOn: $rule.criteria.requireTranslated)
                     Toggle("只导已转录的（播客/视频）", isOn: $rule.criteria.requireTranscribed)
@@ -225,8 +215,19 @@ public struct ExportRuleEditor: View {
                         Text("Webhook").tag("webhook")
                     }
                     if rule.target == "obsidian" || rule.target == "mddir" {
-                        TextField(rule.target == "obsidian" ? "Obsidian 仓库路径（写到其下子目录）" : "输出目录路径", text: $dir)
-                            .onChange(of: dir) { _, v in rule.targetConfig["dir"] = v }
+                        // 目录用系统文件夹选择器（不手填路径）
+                        HStack {
+                            Text(dir.isEmpty
+                                 ? (rule.target == "obsidian" ? "选择 Obsidian 仓库目录" : "选择输出目录")
+                                 : dir)
+                                .font(.callout)
+                                .foregroundStyle(dir.isEmpty ? .secondary : .primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Button("选择…") { pickTargetDir() }
+                                .controlSize(.small)
+                        }
                         Toggle("按来源建子目录", isOn: $bySource)
                             .onChange(of: bySource) { _, v in rule.targetConfig["subdir_by_source"] = v }
                     } else {
@@ -237,6 +238,7 @@ public struct ExportRuleEditor: View {
             }
             .formStyle(.grouped)
 
+            Divider()
             HStack {
                 Button("取消") { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -245,11 +247,13 @@ public struct ExportRuleEditor: View {
                     onSave(rule)
                 }
                 .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
                 .disabled(rule.name.isEmpty || !targetValid)
             }
             .padding()
         }
-        .frame(width: 480, height: 560)
+        .frame(minWidth: 520, idealWidth: 560, minHeight: 520, idealHeight: 600)
+        .navigationTitle(rule.id == 0 ? "新建导出规则" : "编辑导出规则")
         .onAppear {
             minScoreText = rule.criteria.minScore.map { String($0) } ?? ""
             dir = rule.targetConfig["dir"] as? String ?? ""
@@ -257,6 +261,21 @@ public struct ExportRuleEditor: View {
             webhookURL = rule.targetConfig["url"] as? String ?? ""
             selectedSourceIds = Set(rule.criteria.sourceIds ?? [])
             if sourceStore.sources.isEmpty { sourceStore.reload() }
+        }
+    }
+
+    /// 系统文件夹选择器选导出目录（Markdown 目录 / Obsidian 仓库）
+    private func pickTargetDir() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "选择"
+        panel.message = rule.target == "obsidian" ? "选择 Obsidian 仓库目录" : "选择 Markdown 输出目录"
+        if panel.runModal() == .OK, let url = panel.url {
+            dir = url.path
+            rule.targetConfig["dir"] = url.path
         }
     }
 

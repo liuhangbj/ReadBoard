@@ -2,10 +2,10 @@ import SwiftUI
 import AppKit
 
 // MARK: - 独立设置窗口（⌘, 打开，NavigationSplitView 分页）
-// 六页：通用 / AI 与 LLM / 依赖 / 功能板块 / 导出规则 / 缓存清理
+// 六页：通用 / 功能板块 / AI 与 LLM / 依赖 / 导出规则 / 缓存清理
 
 public enum SettingsPage: String, CaseIterable, Identifiable {
-    case general, ai, deps, boards, export, cleanup
+    case general, boards, ai, deps, export, cleanup
     public var id: String { rawValue }
 
     var title: String {
@@ -45,13 +45,15 @@ public struct SettingsView: View {
         } detail: {
             switch selection ?? .general {
             case .general: GeneralPane()
+            case .boards: BoardsPane()
             case .ai: AILLMPane()
             case .deps: DepsPane()
-            case .boards: BoardsPane()
             case .export: ExportRulePane()
             case .cleanup: CleanupPane()
             }
         }
+        // 去掉左上角「隐藏左栏」切换按钮——设置页 sidebar 固定显示，不需用户收起
+        .toolbar(removing: .sidebarToggle)
         .frame(minWidth: 720, minHeight: 500)
     }
 }
@@ -350,15 +352,15 @@ public struct DepsPane: View {
                     HStack {
                         Text(kind.displayName)
                             .frame(width: 150, alignment: .leading)
-                        TextField("自动探测", text: Binding(
-                            get: { customPaths[kind.rawValue] ?? "" },
-                            set: { v in
-                                customPaths[kind.rawValue] = v
-                                DependencyPaths.setCustom(kind, v.trimmingCharacters(in: .whitespaces))
-                            }
-                        ))
-                        .textFieldStyle(.roundedBorder)
-                        .font(.caption)
+                        Text(customPaths[kind.rawValue].isNilOrEmpty ? "自动探测" : (customPaths[kind.rawValue] ?? ""))
+                            .font(.caption)
+                            .foregroundStyle(customPaths[kind.rawValue].isNilOrEmpty ? .secondary : .primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        // 系统文件选择器选路径（不手填）
+                        Button("选择…") { pickDependencyPath(kind) }
+                            .controlSize(.small)
                         // 路径失效告警：配了但文件不在（brew 升级/卸载后）
                         if DependencyPaths.isCustomStale(kind) {
                             Image(systemName: "exclamationmark.triangle.fill")
@@ -385,6 +387,20 @@ public struct DepsPane: View {
             for kind in DependencyPaths.Kind.allCases {
                 customPaths[kind.rawValue] = UserDefaults.standard.string(forKey: kind.defaultsKey) ?? ""
             }
+        }
+    }
+
+    /// 系统文件选择器选依赖路径（whisper-cli/ffmpeg/yt-dlp/node 可执行、whisper 模型文件）
+    private func pickDependencyPath(_ kind: DependencyPaths.Kind) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "选择"
+        panel.message = "选择 \(kind.displayName) 的路径"
+        if panel.runModal() == .OK, let url = panel.url {
+            customPaths[kind.rawValue] = url.path
+            DependencyPaths.setCustom(kind, url.path)
         }
     }
 }
@@ -523,13 +539,12 @@ public struct CleanupPane: View {
                     onEnable: { cleanup.backupKeepEnabled = $0 },
                     onDays: { cleanup.backupKeepCount = $0 }
                 )
-                Toggle("清理已转 Markdown 的全文 HTML", isOn: $cleanHtml)
-                    .onChange(of: cleanHtml) { _, v in cleanup.cleanContentHtml = v }
-                if cleanHtml {
-                    Stepper("全文 HTML 保留 \(cleanHtmlDays) 天", value: $cleanHtmlDays, in: 1...90)
-                        .onChange(of: cleanHtmlDays) { _, v in cleanup.cleanHtmlAfterDays = v }
-                        .padding(.leading, 16)
-                }
+                cleanupDayRow(
+                    title: "清理已转 Markdown 的全文 HTML", unit: "天后清理",
+                    enabled: $cleanHtml, days: $cleanHtmlDays,
+                    onEnable: { cleanup.cleanContentHtml = $0 },
+                    onDays: { cleanup.cleanHtmlAfterDays = $0 }
+                )
             }
 
             Section {
