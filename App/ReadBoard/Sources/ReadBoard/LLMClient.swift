@@ -43,16 +43,20 @@ public enum LLMConfig {
 
     // NSLock 保护下的缓存，声明 nonisolated(unsafe) 豁免 Swift 6 全局可变状态检查
     nonisolated(unsafe) private static var cachedDotEnv: [String: String]?
+    nonisolated(unsafe) private static var cachedDotEnvMtime: Date?
     private static let dotEnvLock = NSLock()
 
     private static func loadDotEnv() -> [String: String] {
-        // R6: .env 解析结果缓存——chat 每次调用都走 activeProviders，不能每次都读盘解析
+        // R6: .env 解析结果缓存——chat 每次调用都走 activeProviders，不能每次都读盘解析。
+        // 但缓存按文件 mtime 失效（修 P2-14）：用户改 .env 后 mtime 变化即重读，
+        // 不再永久缓存要重启 App 才生效。
         dotEnvLock.lock()
         defer { dotEnvLock.unlock() }
-        if let cached = cachedDotEnv { return cached }
         let path = NSHomeDirectory() + "/agents/projects/rss-curation/.env"
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date) ?? nil
+        if let cached = cachedDotEnv, mtime == cachedDotEnvMtime { return cached }
         guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
-            cachedDotEnv = [:]
+            cachedDotEnv = [:]; cachedDotEnvMtime = mtime
             return [:]
         }
         var dict: [String: String] = [:]
@@ -65,7 +69,7 @@ public enum LLMConfig {
             v = v.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
             dict[k] = v
         }
-        cachedDotEnv = dict
+        cachedDotEnv = dict; cachedDotEnvMtime = mtime
         return dict
     }
 }

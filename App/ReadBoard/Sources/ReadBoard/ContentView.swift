@@ -924,16 +924,17 @@ public struct ReadingView: View {
     @State private var busyForId: Int64? = nil
     /// 当前内容的有效管线开关（源 OR 文件夹）
     @State private var policy = PipelinePolicy()
-    /// 版面设置
-    @State private var fontSize = ReadingLayout.fontSize
-    @State private var lineSpacing = ReadingLayout.lineSpacing
-    @State private var contentWidth = ReadingLayout.contentWidth
-    @State private var theme = ReadingTheme.current
-    @State private var themeMode = ReadingTheme.Mode.current
-    @State private var fontChoice = ReadingFont.current
-    @State private var titleFontSize = ReadingLayout.titleFontSize
-    @State private var metaFontSize = ReadingLayout.metaFontSize
-    @State private var summaryFontSize = ReadingLayout.summaryFontSize
+    /// 版面设置（@AppStorage 直绑——设置面板/阅读器设置页改这里视图自动刷新，
+    /// 不再像 @State 静态读 UserDefaults 只在创建读一次。和 uiFontScale 同模式）
+    @AppStorage("reading.fontSize") private var fontSize: Double = 16
+    @AppStorage("reading.lineSpacing") private var lineSpacing: Double = 6
+    @AppStorage("reading.contentWidth") private var contentWidth: Double = 720
+    @AppStorage("reading.theme") private var themeRaw: String = "claude"
+    @AppStorage("reading.themeMode") private var themeModeRaw: String = "light"
+    @AppStorage("reading.font") private var fontRaw: String = "system"
+    @AppStorage("reading.titleFontSize") private var titleFontSize: Double = 24
+    @AppStorage("reading.metaFontSize") private var metaFontSize: Double = 12
+    @AppStorage("reading.summaryFontSize") private var summaryFontSize: Double = 14
     /// 界面缩放（@AppStorage 直绑——layoutPanel 里改这里视图自动刷新，
     /// 同时 ContentView/ArticleRow 的同名 @AppStorage 也会跟着重建，全局生效）
     @AppStorage("reading.uiFontScale") private var uiFontScale: Double = 1.0
@@ -942,6 +943,36 @@ public struct ReadingView: View {
     /// 星标/已读状态（本地镜像，操作后即时反馈，不依赖 reload）
     @State private var isStarred = false
     @State private var isRead = false
+
+    /// theme/themeMode/fontChoice 从 raw 键派生（@AppStorage 存 String rawValue）
+    private var theme: ReadingTheme {
+        get { ReadingTheme(rawValue: themeRaw) ?? .claude }
+        nonmutating set { themeRaw = newValue.rawValue }
+    }
+    private var themeMode: ReadingTheme.Mode {
+        get { ReadingTheme.Mode(rawValue: themeModeRaw) ?? .light }
+        nonmutating set { themeModeRaw = newValue.rawValue }
+    }
+    private var fontChoice: ReadingFont {
+        get {
+            if fontRaw.hasPrefix("custom:") { return .custom(String(fontRaw.dropFirst(7))) }
+            switch fontRaw {
+            case "heiti": return .heiti
+            case "kaiti": return .kaiti
+            case "fangsong": return .fangsong
+            default: return .system
+            }
+        }
+        nonmutating set {
+            switch newValue {
+            case .system: fontRaw = "system"
+            case .heiti: fontRaw = "heiti"
+            case .kaiti: fontRaw = "kaiti"
+            case .fangsong: fontRaw = "fangsong"
+            case .custom(let n): fontRaw = "custom:\(n)"
+            }
+        }
+    }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -1148,26 +1179,24 @@ public struct ReadingView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("版面设置").font(.headline)
 
-            // 主题 + 亮/暗
+            // 主题 + 亮/暗（@AppStorage raw 键直绑，改即刷新无需 onChange 静态写）
             HStack {
                 Text("主题").frame(width: 60, alignment: .leading)
-                Picker("", selection: $theme) {
+                Picker("", selection: $themeRaw) {
                     ForEach(ReadingTheme.allCases) { t in
-                        Text(t.displayName).tag(t)
+                        Text(t.displayName).tag(t.rawValue)
                     }
                 }
                 .pickerStyle(.segmented)
-                .onChange(of: theme) { _, v in ReadingTheme.current = v }
             }
             HStack {
                 Text("亮暗").frame(width: 60, alignment: .leading)
-                Picker("", selection: $themeMode) {
+                Picker("", selection: $themeModeRaw) {
                     ForEach(ReadingTheme.Mode.allCases) { m in
-                        Text(m.displayName).tag(m)
+                        Text(m.displayName).tag(m.rawValue)
                     }
                 }
                 .pickerStyle(.segmented)
-                .onChange(of: themeMode) { _, v in ReadingTheme.Mode.current = v }
             }
 
             // 字号（正文/标题/信息/摘要 分块独立 + 界面）
@@ -1176,63 +1205,54 @@ public struct ReadingView: View {
                 Stepper(value: $fontSize, in: 12...28, step: 1) {
                     Text("\(Int(fontSize))").font(.callout.monospacedDigit())
                 }
-                .onChange(of: fontSize) { _, v in ReadingLayout.fontSize = v }
             }
             HStack {
                 Text("标题字号").frame(width: 60, alignment: .leading)
                 Stepper(value: $titleFontSize, in: 16...40, step: 1) {
                     Text("\(Int(titleFontSize))").font(.callout.monospacedDigit())
                 }
-                .onChange(of: titleFontSize) { _, v in ReadingLayout.titleFontSize = v }
             }
             HStack {
                 Text("信息字号").frame(width: 60, alignment: .leading)
                 Stepper(value: $metaFontSize, in: 9...18, step: 1) {
                     Text("\(Int(metaFontSize))").font(.callout.monospacedDigit())
                 }
-                .onChange(of: metaFontSize) { _, v in ReadingLayout.metaFontSize = v }
             }
             HStack {
                 Text("摘要字号").frame(width: 60, alignment: .leading)
                 Stepper(value: $summaryFontSize, in: 10...22, step: 1) {
                     Text("\(Int(summaryFontSize))").font(.callout.monospacedDigit())
                 }
-                .onChange(of: summaryFontSize) { _, v in ReadingLayout.summaryFontSize = v }
             }
             HStack {
                 Text("界面缩放").frame(width: 60, alignment: .leading)
-                Slider(value: $uiFontScale, in: 0.8...1.5, step: 0.05) { _ in
-                    ReadingLayout.uiFontScale = uiFontScale
-                }
+                Slider(value: $uiFontScale, in: 0.8...1.5, step: 0.05)
                 Text(String(format: "%.0f%%", uiFontScale * 100)).frame(width: 40).font(.callout.monospacedDigit())
             }
 
             // 字体（预置 黑体/楷体/仿宋 + 系统字体列表任选，不手输）
             HStack {
                 Text("字体").frame(width: 60, alignment: .leading)
-                Picker("", selection: $fontChoice) {
+                Picker("", selection: $fontRaw) {
                     // 预置组
                     ForEach(ReadingFont.presets, id: \.self) { f in
-                        Text(f.displayName).tag(f)
+                        Text(f.displayName).tag(fontKey(f))
                     }
                     Divider()
                     // 系统字体列表（每个用自身字体渲染预览，所见即所得）
                     ForEach(ReadingFont.availableFontFamilies, id: \.self) { family in
                         Text(family)
                             .font(.custom(family, size: 13))
-                            .tag(ReadingFont.custom(family))
+                            .tag("custom:\(family)")
                     }
                 }
                 .pickerStyle(.menu)
-                .onChange(of: fontChoice) { _, v in ReadingFont.current = v }
             }
 
             // 行距
             HStack {
                 Text("行距").frame(width: 60, alignment: .leading)
-                Slider(value: $lineSpacing, in: 0...16, step: 1) { _ in
-                    ReadingLayout.lineSpacing = lineSpacing
-                }
+                Slider(value: $lineSpacing, in: 0...16, step: 1)
                 Text("\(Int(lineSpacing))").frame(width: 24).font(.callout.monospacedDigit())
             }
 
@@ -1245,11 +1265,21 @@ public struct ReadingView: View {
                     Text("宽").tag(960.0)
                 }
                 .pickerStyle(.segmented)
-                .onChange(of: contentWidth) { _, v in ReadingLayout.contentWidth = v }
             }
         }
         .padding()
         .frame(width: 360)
+    }
+
+    /// ReadingFont → 持久化 key（和 ReadingFont.current 存储格式一致）
+    private func fontKey(_ f: ReadingFont) -> String {
+        switch f {
+        case .system: return "system"
+        case .heiti: return "heiti"
+        case .kaiti: return "kaiti"
+        case .fangsong: return "fangsong"
+        case .custom(let name): return "custom:\(name)"
+        }
     }
 
     // MARK: 快捷操作（本地即时反馈 + 通知列表刷新）

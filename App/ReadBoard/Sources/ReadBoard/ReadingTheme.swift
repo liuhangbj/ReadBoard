@@ -349,8 +349,14 @@ struct MarkdownBodyView: View {
                 blockView(block)
             }
         }
-        .onAppear { blocks = MarkdownRenderer.parse(markdown) }
-        .onChange(of: markdown) { _, v in blocks = MarkdownRenderer.parse(v) }
+        // 后台解析——长文（>50KB）主线程同步 parse 掉帧（修 P1-6）。
+        // Task.detached 解析后 MainActor.run 写回，不阻塞首帧。
+        .task(id: markdown) {
+            let parsed = await Task.detached(priority: .userInitiated) {
+                MarkdownRenderer.parse(markdown)
+            }.value
+            blocks = parsed
+        }
     }
 
     @ViewBuilder
@@ -465,8 +471,10 @@ struct BilingualBodyView: View {
 
     private var p: ThemePalette { theme.palette(for: mode) }
 
-    /// 段落对（原文段 + 对应译文段）
-    private var pairs: [(original: String, translated: String)] {
+    /// 段落对（原文段 + 对应译文段）——@State 缓存，不再每次 body 重建重算 splitParagraphs（修 P1-6）
+    @State private var pairs: [(original: String, translated: String)] = []
+
+    private func computePairs() -> [(original: String, translated: String)] {
         let origParas = splitParagraphs(original)
         let transParas = splitParagraphs(translated)
         let count = max(origParas.count, transParas.count)
@@ -508,6 +516,10 @@ struct BilingualBodyView: View {
                     }
                 }
             }
+        }
+        // pairs 只在原文/译文变化时重算一次（此前每次 body 重建都算）
+        .task(id: "\(original.hashValue)|\(translated.hashValue)") {
+            pairs = computePairs()
         }
     }
 }

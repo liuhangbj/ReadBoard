@@ -33,6 +33,9 @@ public final class CacheCleanupService: ObservableObject {
         get { let v = UserDefaults.standard.integer(forKey: "cleanup.archiveAfterDays"); return v > 0 ? v : 30 }
         set { UserDefaults.standard.set(newValue, forKey: "cleanup.archiveAfterDays") }
     }
+    /// 天数安全插值进 SQL datetime 修饰符——datetime('-N days') 不能参数绑定只能插值，
+    /// 钳制到 0...3650 防 UserDefaults 异常值（负数/超大）导致 SQL 静默失效（修 P1-7）
+    private func safeDays(_ d: Int) -> Int { min(max(d, 0), 3650) }
     /// 「已读 N 天后自动归档」是否启用（默认开；关闭则已读老文章不自动归档）
     var archiveEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "cleanup.archiveEnabled") as? Bool ?? true }
@@ -115,7 +118,7 @@ public final class CacheCleanupService: ObservableObject {
               AND content_md IS NOT NULL AND LENGTH(content_md) > 0
               AND read_at IS NULL AND starred = 0 AND is_archived = 0
               AND id NOT IN (SELECT content_id FROM content_tag)
-              AND updated_at < datetime('now', '-\(cleanHtmlAfterDays) days');
+              AND updated_at < datetime('now', '-\(safeDays(cleanHtmlAfterDays)) days');
             """) ?? 0
 
         // DB 文件大小（含 wal）
@@ -205,7 +208,7 @@ public final class CacheCleanupService: ObservableObject {
                 UPDATE content SET is_archived = 1
                 WHERE is_archived = 0 AND starred = 0
                   AND read_at IS NOT NULL
-                  AND read_at < datetime('now', '-\(archiveAfterDays) days')
+                  AND read_at < datetime('now', '-\(safeDays(archiveAfterDays)) days')
                   AND id NOT IN (SELECT content_id FROM content_tag);
                 """)
             archived = db.writeChanges()
@@ -220,7 +223,7 @@ public final class CacheCleanupService: ObservableObject {
                 DELETE FROM content
                 WHERE is_archived = 1 AND starred = 0
                   AND meta NOT LIKE '%archived_at%'
-                  AND updated_at < datetime('now', '-\(deleteAfterDays) days')
+                  AND updated_at < datetime('now', '-\(safeDays(deleteAfterDays)) days')
                   AND id NOT IN (SELECT content_id FROM content_tag);
                 """)
             deleted = db.writeChanges()
@@ -247,7 +250,7 @@ public final class CacheCleanupService: ObservableObject {
             SELECT id, guid, title, url, source, author, published_at, llm_summary, llm_score, content_md
             FROM content
             WHERE is_archived = 1 AND starred = 0
-              AND updated_at < datetime('now', '-\(days) days')
+              AND updated_at < datetime('now', '-\(safeDays(days)) days')
               AND id NOT IN (SELECT content_id FROM content_tag);
             """)
         guard !rows.isEmpty else { return }
@@ -297,7 +300,7 @@ public final class CacheCleanupService: ObservableObject {
               AND content_md IS NOT NULL AND LENGTH(content_md) > 0
               AND read_at IS NULL AND starred = 0 AND is_archived = 0
               AND id NOT IN (SELECT content_id FROM content_tag)
-              AND updated_at < datetime('now', '-\(cleanHtmlAfterDays) days');
+              AND updated_at < datetime('now', '-\(safeDays(cleanHtmlAfterDays)) days');
             """)
         return archivedCleaned + db.writeChanges()
     }

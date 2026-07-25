@@ -3,7 +3,7 @@ import Foundation
 // MARK: - 源健康监控
 // 聚合各源抓取健康状况：报错、长期未更新（停更）、抓取量。帮助发现死源/问题源。
 
-public struct SourceHealth: Identifiable, Hashable {
+public struct SourceHealth: Identifiable, Hashable, Sendable {
     public let id: Int64
     let name: String
     let identifier: String

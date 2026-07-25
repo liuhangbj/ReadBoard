@@ -39,7 +39,9 @@ public final class TranscribePipeline: @unchecked Sendable {
         let target = audioUrl ?? pageUrl
         guard !target.isEmpty else { await markJob(contentId: contentId, ok: false, err: "无地址"); return false }
 
-        let workDir = NSTemporaryDirectory() + "readboard-tr-\(contentId)"
+        // workDir 加唯一后缀——仅按 contentId 命名时，手动重试与 worker 并发跑同一内容
+        // 会互相删/改文件产生半损坏 wav（修 P2-13）
+        let workDir = NSTemporaryDirectory() + "readboard-tr-\(contentId)-\(UUID().uuidString.prefix(8))"
         try? FileManager.default.createDirectory(atPath: workDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: workDir) }
 

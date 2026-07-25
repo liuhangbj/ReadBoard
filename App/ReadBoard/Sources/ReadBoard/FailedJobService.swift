@@ -3,7 +3,7 @@ import Foundation
 // MARK: - 管线失败记录 + 手动重试
 // content_job 记了各管线的失败(status=3)。这里聚合失败项供重看/手动重试。
 
-public struct FailedJob: Identifiable, Hashable {
+public struct FailedJob: Identifiable, Hashable, Sendable {
     public let id: Int64            // content_job.id
     let contentId: Int64
     let jtype: String        // score / translate / summarize / transcribe

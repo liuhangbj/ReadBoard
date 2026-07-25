@@ -107,7 +107,7 @@ public final class PipelineWorker: ObservableObject {
                     await self.llm.score(contentId: t.id, title: t.title, body: t.body)
                 } ?? false
                 if ok { scored += 1; markJob(contentId: t.id, jtype: "score", ok: true) }
-                else { markJob(contentId: t.id, jtype: "score", ok: false) }
+                else { markJob(contentId: t.id, jtype: "score", ok: false, error: llm.lastError) }
                 if ok { await ExportService.shared.runPending(trigger: "score", contentId: t.id) }
             }
             // 翻译（仅文章；媒体走转录）
@@ -116,7 +116,7 @@ public final class PipelineWorker: ObservableObject {
                     await self.llm.translate(contentId: t.id, title: t.title, body: t.body)
                 } ?? false
                 if ok { translated += 1; markJob(contentId: t.id, jtype: "translate", ok: true) }
-                else { markJob(contentId: t.id, jtype: "translate", ok: false) }
+                else { markJob(contentId: t.id, jtype: "translate", ok: false, error: llm.lastError) }
                 if ok { await ExportService.shared.runPending(trigger: "translate", contentId: t.id) }
             }
             // 摘要（独立管线；若打分已带摘要则跳过）
@@ -125,7 +125,7 @@ public final class PipelineWorker: ObservableObject {
                     await self.llm.summarize(contentId: t.id, title: t.title, body: t.body)
                 } ?? false
                 if ok { summarized += 1; markJob(contentId: t.id, jtype: "summarize", ok: true) }
-                else { markJob(contentId: t.id, jtype: "summarize", ok: false) }
+                else { markJob(contentId: t.id, jtype: "summarize", ok: false, error: llm.lastError) }
             }
             // 转录（媒体）——依赖缺失时跳过（上面已统一提示），不逐条记失败
             if t.needTranscribe, AIPipeline.transcribe.effective, transcribeReady {
@@ -498,10 +498,12 @@ public final class PipelineWorker: ObservableObject {
         return excerpt ?? ""
     }
 
-    private func markJob(contentId: Int64, jtype: String, ok: Bool) {
+    private func markJob(contentId: Int64, jtype: String, ok: Bool, error: String? = nil) {
         db.execute(
             "INSERT INTO content_job (content_id, jtype, status, finished_at, error) VALUES (?,?,?,datetime('now'),?)",
-            params: [contentId, jtype, ok ? 2 : 3, ok ? nil : "failed"])
+            // 失败时记具体错误（LLM 鉴权/限流/超时/解析），不再只记"failed"——可区分
+            // "key 失效该停"和"超时该重试"（修 P1-8）
+            params: [contentId, jtype, ok ? 2 : 3, ok ? nil : (error ?? "failed")])
     }
 
     // MARK: R1 失败退避 / 死信（治 LLM 费用失控：失败任务不再每 120s 无限重试）

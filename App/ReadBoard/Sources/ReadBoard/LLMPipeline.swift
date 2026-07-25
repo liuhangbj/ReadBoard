@@ -18,6 +18,14 @@ public final class LLMPipeline: @unchecked Sendable {
 
     var isAvailable: Bool { client.isAvailable }
 
+    /// 最近一次 LLM 调用失败的原因（区分 key 失效/限流/超时/解析失败，供 job 记录。
+    /// 此前所有错误 catch{return false} 吞掉，job 只记"failed"无法诊断——修 P1-8）
+    private(set) var lastError: String? = nil
+    private let errorLock = NSLock()
+    private func setError(_ msg: String?) {
+        errorLock.lock(); lastError = msg; errorLock.unlock()
+    }
+
     /// R5 截断：头尾保留 + 中段裁剪，并在拼接处标注，避免尾部信息无声丢失。
     static func truncateKeepEnds(_ text: String, maxChars: Int) -> String {
         guard text.count > maxChars else { return text }
@@ -92,11 +100,35 @@ public final class LLMPipeline: @unchecked Sendable {
             let (text, model) = try await client.chat(
                 messages: [ChatMessage(role: "user", content: prompt)],
                 temperature: 0.3, maxTokens: 1024)
-            guard let result = Self.parseScoreJSON(text) else { return false }
-            return saveScore(contentId: contentId, result: result, model: model)
+            guard let result = Self.parseScoreJSON(text) else {
+                setError("评分结果解析失败（LLM 输出非预期 JSON）")
+                return false
+            }
+            let ok = saveScore(contentId: contentId, result: result, model: model)
+            if ok { setError(nil) } else { setError("评分写库失败") }
+            return ok
         } catch {
+            setError(Self.describeError(error))
             return false
         }
+    }
+
+    /// 把 LLM 调用错误转成可读诊断（区分 key 失效/限流/超时/网络/解析——决定该不该重试）
+    static func describeError(_ error: Error) -> String {
+        if let e = error as? LLMError {
+            switch e {
+            case .noProvider: return "无可用 LLM 配置（三槽全空且 .env 无 key）"
+            case .httpError(let code, let body):
+                if code == 401 || code == 403 { return "LLM 鉴权失败（\(code)，key 失效或未充值）" }
+                if code == 429 { return "LLM 限流（429，可稍后重试）" }
+                if code == 400 { return "LLM 请求格式错误（400，可能是模型名已下线）：\(body.prefix(80))" }
+                return "LLM HTTP \(code)：\(body.prefix(80))"
+            case .emptyResponse: return "LLM 返回空响应"
+            case .invalidJSON: return "LLM 返回非 JSON"
+            default: return "LLM 错误：\(error.localizedDescription)"
+            }
+        }
+        return "网络/未知错误：\(error.localizedDescription)"
     }
 
     static func parseScoreJSON(_ text: String) -> ScoreResult? {
@@ -185,8 +217,11 @@ public final class LLMPipeline: @unchecked Sendable {
                 messages: [ChatMessage(role: "user", content: prompt)],
                 temperature: 0.3, maxTokens: 512)
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
+            if trimmed.isEmpty { setError("摘要返回空"); return nil }
+            setError(nil)
+            return trimmed
         } catch {
+            setError(Self.describeError(error))
             return nil
         }
     }
@@ -302,13 +337,18 @@ public final class LLMPipeline: @unchecked Sendable {
                 translated = t.isEmpty ? nil : t
                 usedModel = model
             } catch {
+                setError(Self.describeError(error))
                 return false
             }
         }
-        guard let final = translated, !final.isEmpty else { return false }
+        guard let final = translated, !final.isEmpty else {
+            if lastError == nil { setError("翻译结果为空") }
+            return false
+        }
         let ok = db.execute(
             "UPDATE content SET llm_translated_md = ?, llm_model = ?, llm_processed_at = datetime('now') WHERE id = ?",
             params: [final, usedModel, contentId])
+        if ok { setError(nil) } else { setError("译文写库失败") }
         if ok, partial {
             // 部分翻译标记：meta.translation_partial=1（不改变 hasTranslated 判定，
             // 但 UI/导出可提示"此译文不完整"）

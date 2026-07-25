@@ -159,7 +159,13 @@ public struct SourceHealthPane: View {
                 .padding(.vertical, 3)
             }
         }
-        .onAppear { problems = SourceHealthService.shared.problemSources() }
+        // 后台查库——67k 行库主线程同步查询会卡首帧（修 P2-12）
+        .task {
+            let r = await Task.detached(priority: .userInitiated) {
+                SourceHealthService.shared.problemSources()
+            }.value
+            problems = r
+        }
     }
 }
 
@@ -208,7 +214,12 @@ public struct FailedJobPane: View {
                 .padding(.vertical, 3)
             }
         }
-        .onAppear { failures = FailedJobService.shared.recentFailures() }
+        .task {
+            let r = await Task.detached(priority: .userInitiated) {
+                FailedJobService.shared.recentFailures()
+            }.value
+            failures = r
+        }
     }
 }
 

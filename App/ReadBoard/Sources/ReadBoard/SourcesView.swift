@@ -3,8 +3,10 @@ import SwiftUI
 // MARK: - 订阅源管理界面
 
 public struct SourcesView: View {
-    @ObservedObject private var store = SourceStore.shared
-    @ObservedObject private var worker = PipelineWorker.shared
+    // @StateObject 而非 @ObservedObject——SourcesView 在 RootView switch 里反复创建，
+    // @ObservedObject 不持所有权语义错误（虽是单例不泄漏，但 StateObject 才正确）
+    @StateObject private var store = SourceStore.shared
+    @StateObject private var worker = PipelineWorker.shared
     @EnvironmentObject private var appTab: AppTab
     @State private var showAddSheet = false
     @State private var showAddFolder = false
