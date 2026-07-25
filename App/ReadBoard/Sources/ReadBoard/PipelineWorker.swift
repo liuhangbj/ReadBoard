@@ -587,6 +587,13 @@ public final class PipelineWorker: ObservableObject {
         deadLetterCount = 0
     }
 
+    /// 全部重试：重置全部死信标记 + 立即触发 worker 跑一轮
+    /// （「全部重置」只删失败标记等下轮调度，这个立即重跑不等）
+    func retryAllDeadLetters() {
+        resetAllDeadLetters()
+        Task { await runOnce() }
+    }
+
     private func colText(_ stmt: OpaquePointer?, _ i: Int32) -> String? {
         guard let p = sqlite3_column_text(stmt, i) else { return nil }
         return String(cString: p)

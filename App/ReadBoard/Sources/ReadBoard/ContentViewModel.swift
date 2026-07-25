@@ -10,9 +10,10 @@ public final class ContentViewModel: ObservableObject {
     @Published var selectedItem: ContentItem? = nil
     @Published var minScore: Int = 0               // 评分筛选 0=不限
     @Published var includeUnscored: Bool = false   // 评分筛选时是否含未评分
-    /// 阅读状态单选：all=全部 / unread=未读 / starred=星标（三选一）
+    /// 阅读状态单选：all=全部 / unread=未读 / starred=星标 / archived=归档（四选一）
     @Published var readFilter: ReadFilter = .all
-    @Published var showArchived: Bool = false      // 看归档（默认看活跃）
+    /// 看归档 = readFilter 选了归档分支（派生，不再独立 Toggle）
+    var showArchived: Bool { readFilter == .archived }
     /// 处理状态筛选（多选）：score/summary/translate/transcribe。空 = 不限。
     /// 多选为「或」关系（满足任一即纳入），符合"我想看已打分或已翻译的"直觉。
     @Published var processedFilters: Set<String> = []
@@ -33,12 +34,13 @@ public final class ContentViewModel: ObservableObject {
     }
 
     enum ReadFilter: String, CaseIterable {
-        case all, unread, starred
+        case all, unread, starred, archived
         var display: String {
             switch self {
             case .all: return "全部"
             case .unread: return "未读"
             case .starred: return "星标"
+            case .archived: return "归档"
             }
         }
     }

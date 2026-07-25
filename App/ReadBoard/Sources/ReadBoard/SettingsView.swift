@@ -776,11 +776,19 @@ public struct DeadLetterView: View {
                 }
                 HStack {
                     Spacer()
+                    Button("全部重试") {
+                        worker.retryAllDeadLetters()
+                        // 延迟 reload 给 worker 起跑时间（立即查可能还没出结果）
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { reload() }
+                    }
+                    .controlSize(.small)
+                    .help("重置全部死信标记并立即重跑（不等下轮调度）")
                     Button("全部重置", role: .destructive) {
                         worker.resetAllDeadLetters()
                         reload()
                     }
                     .controlSize(.small)
+                    .help("只删失败标记，等下轮调度自动重试")
                 }
             }
             Text("死信是连续失败 3 次被永久跳过的任务（防 LLM 费用失控）。重置后下轮 worker 会重新尝试。")

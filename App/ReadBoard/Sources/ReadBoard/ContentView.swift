@@ -503,14 +503,14 @@ public struct ContentView: View {
 
                 Spacer()
 
-                // 未读/全部/星标 三选一单选（分段控件）
+                // 全部/未读/星标/归档 四选一单选（分段控件）
                 Picker("", selection: $vm.readFilter) {
                     ForEach(ContentViewModel.ReadFilter.allCases, id: \.self) { f in
                         Text(f.display).tag(f)
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 180)
+                .frame(maxWidth: 240)
                 .controlSize(.small)
                 .onChange(of: vm.readFilter) { _, _ in vm.reload() }
 
@@ -526,12 +526,6 @@ public struct ContentView: View {
                 .font(.caption)
                 .controlSize(.small)
                 .onChange(of: vm.sortOrder) { _, _ in vm.reload() }
-
-                Toggle("归档", isOn: $vm.showArchived)
-                    .toggleStyle(.checkbox)
-                    .font(.caption)
-                    .controlSize(.small)
-                    .onChange(of: vm.showArchived) { _, _ in vm.reload() }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
