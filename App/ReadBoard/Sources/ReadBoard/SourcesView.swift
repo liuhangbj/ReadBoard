@@ -206,13 +206,13 @@ public struct FolderHeader: View {
             get: { pendingBackfillKey != nil },
             set: { if !$0 { pendingBackfillKey = nil } }
         )) {
-            Button("处理所有历史并重新归档") {
+            Button("处理所有历史并重新生成 md") {
                 Task { await PipelineWorker.shared.backfillHistoryForFolder(folderId: folder.id) }
                 pendingBackfillKey = nil
             }
             Button("只处理新增", role: .cancel) { pendingBackfillKey = nil }
         } message: {
-            Text("「\(folder.name)」整组的\(pendingBackfillKey ?? "")已开启。\n\n• 处理历史：组内所有源的存量文章补跑管线并刷新已归档 md（耗时很长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+            Text("「\(folder.name)」整组的\(pendingBackfillKey ?? "")已开启。\n\n• 处理历史：组内所有源的存量文章补跑管线并刷新已生成的 md 文件（耗时很长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
         }
     }
 
@@ -377,13 +377,13 @@ public struct SourceRow: View {
             get: { pendingBackfillKey != nil },
             set: { if !$0 { pendingBackfillKey = nil } }
         )) {
-            Button("处理所有历史并重新归档") {
+            Button("处理所有历史并重新生成 md") {
                 Task { await PipelineWorker.shared.backfillHistory(onlySourceId: src.id) }
                 pendingBackfillKey = nil
             }
             Button("只处理新增", role: .cancel) { pendingBackfillKey = nil }
         } message: {
-            Text("「\(src.name)」的\(label)已开启。\n\n• 处理历史：存量文章补跑管线并刷新已归档的 md（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+            Text("「\(src.name)」的\(label)已开启。\n\n• 处理历史：存量文章补跑管线并刷新已生成的 md 文件（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
         }
     }
 

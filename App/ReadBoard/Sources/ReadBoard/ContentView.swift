@@ -43,7 +43,7 @@ public struct ContentView: View {
     }
 
     // MARK: 快捷键（隐藏按钮承载键盘事件）
-    // j/k 上下篇, s 星标, a 归档, 空格已读切换, v 开原文
+    // j/k 上下篇, s 星标, a 归档, 空格已读切换, v 开原文, e 全部已读, f 搜索, ? 帮助
     private var shortcutHandlers: some View {
         Group {
             Button("") { vm.selectNext() }.keyboardShortcut("j", modifiers: [])
@@ -497,7 +497,7 @@ public struct ContentView: View {
                                 }
                             }
                             Divider()
-                            Button("重新生成归档 md") {
+                            Button("重新生成 md 文件") {
                                 ArchiveService.shared.rearchive(contentId: item.id)
                             }
                             Button("触发导出规则") {
@@ -1187,9 +1187,9 @@ public struct ShareSheet: View {
 
                 Button {
                     ArchiveService.shared.rearchive(contentId: item.id)
-                    message = "✅ 已重新生成归档 md"
+                    message = "✅ 已重新生成 md 文件"
                 } label: {
-                    Label("重新生成归档文件", systemImage: "arrow.clockwise.doc")
+                    Label("重新生成 md 文件", systemImage: "arrow.clockwise.doc")
                 }
 
                 Button {

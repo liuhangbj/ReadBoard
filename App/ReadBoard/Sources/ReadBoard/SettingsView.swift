@@ -72,8 +72,8 @@ public struct GeneralPane: View {
                 Text("关闭后只能手动点「全部刷新」抓 feed")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("完成归档（最终 md 落盘）") {
-                TextField("归档目录（默认 ~/readboard/archive）", text: $archiveDirInput)
+            Section("md 文件生成（管线完成后落盘）") {
+                TextField("保存目录（默认 ~/readboard/archive）", text: $archiveDirInput)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit {
                         let v = archiveDirInput.trimmingCharacters(in: .whitespaces)
@@ -94,7 +94,7 @@ public struct GeneralPane: View {
                 }
                 Text("管线全部跑完的内容自动落成双语 md 存到这里，按源名分子目录。数据库记录保留（可检索），只清 HTML 中间产物。")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("已归档 \(archivedCount) 个文件")
+                Text("已生成 \(archivedCount) 个文件")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("网络代理") {
