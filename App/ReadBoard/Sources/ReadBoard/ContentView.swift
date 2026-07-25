@@ -163,11 +163,11 @@ public struct ContentView: View {
                 .padding(.horizontal, 6)
             }
 
-            // ── 底部导航：订阅源管理 / 数据统计（替代底部 Tab 栏）──
+            // ── 底部导航：订阅管理 / 数据看板（替代底部 Tab 栏）──
             Hairline()
             HStack(spacing: 8) {
-                sidebarNavButton(icon: "dot.radiowaves.left.and.right", label: "订阅源", tab: 1)
-                sidebarNavButton(icon: "chart.bar.doc.horizontal", label: "管理", tab: 3)
+                sidebarNavButton(icon: "dot.radiowaves.left.and.right", label: "订阅管理", tab: 1)
+                sidebarNavButton(icon: "chart.bar.doc.horizontal", label: "数据看板", tab: 3)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
