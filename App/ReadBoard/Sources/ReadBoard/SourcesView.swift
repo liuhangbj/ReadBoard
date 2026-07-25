@@ -179,10 +179,11 @@ public struct SourcesView: View {
     /// RootView switch 切换时不弹，探针实锤按钮触发但面板不出）
     private func importOPML() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.xml]
+        // 不过滤文件类型——opml 是未注册动态 UTI，用 .xml 过滤会把它排除（灰掉选不了）。
+        // 让用户自己选，反正知道要选 .opml/.xml。
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        panel.message = "选择要导入的 OPML 文件"
+        panel.message = "选择要导入的 OPML 文件（.opml 或 .xml）"
         // 激活 App + 挂 mainWindow——确保面板弹到前台可见
         NSApp.activate(ignoringOtherApps: true)
         guard let window = NSApp.mainWindow else {
@@ -218,7 +219,7 @@ public struct SourcesView: View {
     /// 导出 OPML：NSSavePanel 挂 mainWindow
     private func exportOPML() {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.xml]
+        // 不过滤——NSSavePanel 的 allowedContentTypes 会限制保存类型，去掉让用户自由命名
         panel.nameFieldStringValue = "readboard-subscriptions.opml"
         panel.message = "导出订阅为 OPML"
         NSApp.activate(ignoringOtherApps: true)
