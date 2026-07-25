@@ -301,7 +301,7 @@ public struct SourceRow: View {
 
     public var body: some View {
         HStack(alignment: .center, spacing: 14) {
-            // ── 左：图标 + 名称 + 地址（标识信息，固定宽度截断）──
+            // ── 左：图标 + 名称/地址（标识信息，仅这两项上下两行）──
             Text(icon)
                 .font(.title3)
                 .frame(width: 28)
@@ -318,40 +318,35 @@ public struct SourceRow: View {
             }
             .frame(minWidth: 180, maxWidth: 280, alignment: .leading)
 
-            // ── 中：徽标 + 管线开关（配置信息，垂直两小组，占中间弹性区）──
-            VStack(alignment: .leading, spacing: 6) {
-                // 徽标行：类型 + 全文模式 + 抓取频率 + 上次抓取 + 错误
-                HStack(spacing: 6) {
-                    RBadge(text: src.stype, color: .rbText3)
-                    if src.stype == "rss" {
-                        fetchModeMenu
-                    }
-                    intervalMenu
-                    if let t = src.lastFetchedAt {
-                        Text("上次 \(String(t.prefix(16)))")
-                            .font(.caption2)
-                            .foregroundStyle(Color.rbText3)
-                    }
-                    if let err = src.error {
-                        Text(err)
-                            .font(.caption2)
-                            .foregroundStyle(Color.rbScoreLow)
-                            .lineLimit(1)
-                    }
+            // ── 中：全部一排往右铺（全文模式/更新频率/上次/打分/翻译/摘要/转录），
+            //    字号统一 caption 级，不再上下两排 ──
+            HStack(spacing: 12) {
+                if src.stype == "rss" {
+                    fetchModeMenu
                 }
-                // 管线开关行（生效 = 源 OR 文件夹；文件夹已开的项标墨蓝）
-                HStack(spacing: 14) {
-                    pipelineToggle("打分", key: "auto_score", on: src.policy.autoScore, inherited: fp.autoScore)
-                    pipelineToggle("翻译", key: "auto_translate", on: src.policy.autoTranslate, inherited: fp.autoTranslate)
-                    pipelineToggle("摘要", key: "auto_summarize", on: src.policy.autoSummarize, inherited: fp.autoSummarize)
-                    if src.transcribable {
-                        pipelineToggle("转录", key: "auto_transcribe", on: src.policy.autoTranscribe, inherited: fp.autoTranscribe)
-                    }
+                intervalMenu
+                if let t = src.lastFetchedAt {
+                    Text("上次 \(String(t.prefix(16)))")
+                        .font(.caption)
+                        .foregroundStyle(Color.rbText3)
+                }
+                if let err = src.error {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(Color.rbScoreLow)
+                        .lineLimit(1)
+                }
+                // 管线开关（生效 = 源 OR 文件夹；文件夹已开的项标墨蓝）
+                pipelineToggle("打分", key: "auto_score", on: src.policy.autoScore, inherited: fp.autoScore)
+                pipelineToggle("翻译", key: "auto_translate", on: src.policy.autoTranslate, inherited: fp.autoTranslate)
+                pipelineToggle("摘要", key: "auto_summarize", on: src.policy.autoSummarize, inherited: fp.autoSummarize)
+                if src.transcribable {
+                    pipelineToggle("转录", key: "auto_transcribe", on: src.policy.autoTranscribe, inherited: fp.autoTranscribe)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            // ── 右：启用开关 + 指派文件夹 + 删除（操作区，垂直紧凑）──
+            // ── 右：启用开关 + 指派文件夹 + 删除（操作区）──
             HStack(spacing: 8) {
                 Toggle("", isOn: Binding(
                     get: { src.enabled },
@@ -392,8 +387,8 @@ public struct SourceRow: View {
             Button("重新探测") { Task { await store.reprobeFetchMode(id: src.id) } }
         } label: {
             Text(src.fetchMode.displayName)
-                .font(.system(size: 9, weight: .medium))
-                .padding(.horizontal, 4).padding(.vertical, 1)
+                .font(.caption)
+                .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(fetchModeColor.opacity(0.12))
                 .foregroundStyle(fetchModeColor)
                 .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
@@ -416,8 +411,8 @@ public struct SourceRow: View {
             }
         } label: {
             Text("⏱ \(intervalLabel(src.fetchIntervalMin))")
-                .font(.system(size: 9, weight: .medium))
-                .padding(.horizontal, 4).padding(.vertical, 1)
+                .font(.caption)
+                .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(Color.rbSurface)
                 .foregroundStyle(Color.rbText3)
                 .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
