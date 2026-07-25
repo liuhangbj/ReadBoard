@@ -55,11 +55,7 @@ public struct SourcesView: View {
                 .buttonStyle(.quiet)
                 .keyboardShortcut("n", modifiers: .command)
                 // OPML 导入/导出（SwiftUI 原生 fileImporter/fileExporter）
-                Button {
-                    // 探针：确认按钮 action 触发
-                    try? "import button clicked \(Date())\n".write(toFile: "/tmp/rb_btn_probe.log", atomically: false, encoding: .utf8)
-                    showImportPanel = true
-                } label: {
+                Button { showImportPanel = true } label: {
                     Label("导入", systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.quiet)
@@ -143,9 +139,12 @@ public struct SourcesView: View {
             .listStyle(.inset)
         }
         .onAppear { store.reload() }
-        // SwiftUI 原生文件导入面板（OPML）
+        // SwiftUI 原生文件导入面板（OPML）。
+        // 关键：allowedContentTypes 只用 .xml——「opml」在系统里是未注册的动态 UTI
+        // （dyn.ah62d4...，conforms(to:.xml)=false），传它会让 fileImporter 静默不弹
+        // （探针实锤：按钮触发但面板不出）。opml 本质是 xml，用 .xml 能正确匹配显示。
         .fileImporter(isPresented: $showImportPanel,
-                      allowedContentTypes: [.init(filenameExtension: "opml") ?? .xml, .xml],
+                      allowedContentTypes: [.xml],
                       allowsMultipleSelection: false) { result in
             handleImport(result)
         }
