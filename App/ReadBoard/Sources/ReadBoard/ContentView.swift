@@ -710,7 +710,7 @@ public struct ArticleRow: View {
     public var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: isCompact ? 2 : 5) {
-                // 标题行
+                // 标题行（评分挪到下方来源行了，标题行只留标题 + 星标）
                 HStack(alignment: .top, spacing: 6) {
                     Text(item.title)
                         .font(.system(size: 15 * scale, weight: (unreadBold && !item.isRead) ? .semibold : .regular))
@@ -723,14 +723,6 @@ public struct ArticleRow: View {
                             .font(.system(size: 11 * scale))
                     }
                     Spacer(minLength: 0)
-                    if let s = item.llmScore {
-                        Text("\(s)")
-                            .font(.system(size: 11 * scale).bold())
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(isSelected ? Color.white.opacity(0.25) : scoreColor(s).opacity(0.18))
-                            .foregroundStyle(isSelected ? .white : scoreColor(s))
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                    }
                 }
                 // 摘要（行数可配，0 = 不显示）
                 if excerptLines > 0, let ex = item.excerpt, !ex.isEmpty {
@@ -739,12 +731,21 @@ public struct ArticleRow: View {
                         .foregroundStyle(isSelected ? .white.opacity(0.85) : .secondary)
                         .lineLimit(excerptLines)
                 }
-                // 来源 + 日期（各自可关）
+                // 来源 + 评分标签 + 日期（评分挪到标题下面这行，在 RSS 来源旁边）
                 HStack(spacing: 8) {
                     if showSource {
                         Text(item.source)
                             .font(.system(size: 11 * scale, weight: .medium))
                             .foregroundStyle(isSelected ? .white.opacity(0.9) : .secondary)
+                    }
+                    // 评分背景色标签（按分数段配色，跟在来源后）
+                    if let s = item.llmScore {
+                        Text("\(s)")
+                            .font(.system(size: 10 * scale).bold())
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(isSelected ? Color.white.opacity(0.25) : scoreColor(s).opacity(0.18))
+                            .foregroundStyle(isSelected ? .white : scoreColor(s))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
                     if showDate, let pd = item.publishedAt, pd.count >= 10 {
                         Text(formattedDate(pd))
