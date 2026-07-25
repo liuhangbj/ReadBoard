@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - 订阅源管理界面
 
@@ -12,6 +13,11 @@ public struct SourcesView: View {
     @State private var showAddFolder = false
     @State private var newFolderName = ""
     @State private var opmlMessage = ""
+    // SwiftUI 原生文件导入/导出面板（.fileImporter/.fileExporter）——
+    // Apple 官方在 SwiftUI App 打开文件的唯一正确姿势，不碰 NSOpenPanel
+    // （NSOpenPanel.runModal/begin 在 SwiftUI 事件循环下会卡死/不弹，踩了几次坑）
+    @State private var showImportPanel = false
+    @State private var showExportPanel = false
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -48,13 +54,12 @@ public struct SourcesView: View {
                 }
                 .buttonStyle(.quiet)
                 .keyboardShortcut("n", modifiers: .command)
-                // OPML 导入/导出（拆成独立按钮——此前 borderlessButton Menu 的 action
-                // 不触发，探针证实 importOPML 根本没被调用）
-                Button { importOPML() } label: {
+                // OPML 导入/导出（SwiftUI 原生 fileImporter/fileExporter）
+                Button { showImportPanel = true } label: {
                     Label("导入", systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.quiet)
-                Button { exportOPML() } label: {
+                Button { showExportPanel = true } label: {
                     Label("导出", systemImage: "square.and.arrow.up")
                 }
                 .buttonStyle(.quiet)
@@ -134,6 +139,24 @@ public struct SourcesView: View {
             .listStyle(.inset)
         }
         .onAppear { store.reload() }
+        // SwiftUI 原生文件导入面板（OPML）
+        .fileImporter(isPresented: $showImportPanel,
+                      allowedContentTypes: [.init(filenameExtension: "opml") ?? .xml, .xml],
+                      allowsMultipleSelection: false) { result in
+            handleImport(result)
+        }
+        // SwiftUI 原生文件导出面板（OPML）
+        .fileExporter(isPresented: $showExportPanel,
+                      document: OPMLDocument(text: OPMLService.shared.exportOPML()),
+                      contentType: .xml,
+                      defaultFilename: "readboard-subscriptions") { result in
+            switch result {
+            case .success(let url):
+                opmlMessage = "已导出 \(store.sources.count) 源到 \(url.lastPathComponent)"
+            case .failure(let err):
+                opmlMessage = "导出失败：\(err.localizedDescription)"
+            }
+        }
         .sheet(isPresented: $showAddSheet) {
             AddSourceSheet(store: store)
         }
@@ -154,53 +177,51 @@ public struct SourcesView: View {
         store.sources.filter { $0.folderId == folderId }
     }
 
-    // MARK: OPML 导入/导出
+    // MARK: OPML 导入/导出（SwiftUI 原生 fileImporter/fileExporter）
 
-    private func importOPML() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "opml")!, .xml]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.message = "选择要导入的 OPML 文件"
-        // runModal 同步模态——action 已确认能触发（此前是 Menu 的 action 不触发，
-        // 不是弹窗问题），runModal 最简单可靠。
-        NSApp.activate(ignoringOtherApps: true)
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let xml = try? String(contentsOf: url, encoding: .utf8) else {
-            opmlMessage = "读取文件失败：\(url.lastPathComponent)"
-            return
-        }
-        // 解析 + 写库放后台线程——importOPML 里 db.execute 走 writeQueue.sync，
-        // 主线程同步跑若 writeQueue 有等主线程的任务就死锁卡死界面。
-        opmlMessage = "导入中…"
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result = OPMLService.shared.importOPML(xml)
-            DispatchQueue.main.async {
-                store.reload()
-                var msg = "导入完成：新增 \(result.sourcesAdded) 源"
-                if result.foldersCreated > 0 { msg += "，\(result.foldersCreated) 文件夹" }
-                if result.sourcesSkipped > 0 { msg += "，跳过已存在 \(result.sourcesSkipped)" }
-                if !result.errors.isEmpty { msg += "，\(result.errors.count) 错误" }
-                opmlMessage = msg
+    /// 处理 fileImporter 选中的 OPML 文件：读文件 + 后台解析写库 + 回主线程刷新
+    private func handleImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .failure(let err):
+            opmlMessage = "打开文件失败：\(err.localizedDescription)"
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            // 沙箱下需 startAccessingSecurityScopedResource 才能读用户选的文件
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            guard let xml = try? String(contentsOf: url, encoding: .utf8) else {
+                opmlMessage = "读取文件失败：\(url.lastPathComponent)"
+                return
+            }
+            // 解析 + 写库放后台线程——importOPML 里 db.execute 走 writeQueue.sync，
+            // 主线程同步跑若 writeQueue 有等主线程的任务就死锁卡死界面。
+            opmlMessage = "导入中…"
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = OPMLService.shared.importOPML(xml)
+                DispatchQueue.main.async {
+                    store.reload()
+                    var msg = "导入完成：新增 \(result.sourcesAdded) 源"
+                    if result.foldersCreated > 0 { msg += "，\(result.foldersCreated) 文件夹" }
+                    if result.sourcesSkipped > 0 { msg += "，跳过已存在 \(result.sourcesSkipped)" }
+                    if !result.errors.isEmpty { msg += "，\(result.errors.count) 错误" }
+                    opmlMessage = msg
+                }
             }
         }
     }
+}
 
-    private func exportOPML() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "opml")!]
-        panel.nameFieldStringValue = "readboard-subscriptions.opml"
-        panel.message = "导出订阅为 OPML"
-        // runModal 同步模态（action 已确认能触发，最简单可靠）
-        NSApp.activate(ignoringOtherApps: true)
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let xml = OPMLService.shared.exportOPML()
-        do {
-            try xml.write(to: url, atomically: true, encoding: .utf8)
-            opmlMessage = "已导出 \(store.sources.count) 源到 \(url.lastPathComponent)"
-        } catch {
-            opmlMessage = "导出失败：\(error.localizedDescription)"
-        }
+/// OPML 导出文档（fileExporter 需要的 FileDocument 包装）
+struct OPMLDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.xml] }
+    var text: String
+
+    init(text: String) { self.text = text }
+    init(configuration: ReadConfiguration) throws {
+        text = String(data: configuration.file.regularFileContents ?? Data(), encoding: .utf8) ?? ""
+    }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: Data(text.utf8))
     }
 }
 
