@@ -97,18 +97,31 @@ public final class FullTextFetcher: @unchecked Sendable {
     // MARK: 执行
 
     /// 按 mode 抓全文并写入 content_md / fetch_status / fetch_engine。
+    /// 失败时自动降级到下一级模式（defuddle→Jina Free→Jina Pro→summary）。
     /// 返回是否成功拿到全文。
     @discardableResult
     func fetchAndStore(contentId: Int64, url: String, feedHtml: String?, mode: FetchMode) async -> Bool {
-        switch mode {
-        case .feedFull:
-            // feed 自带全文：html 转 md。阈值与 probeMode 对齐（800）——
-            // 低于它的"feed 全文"其实是摘要，转出来没价值。
-            guard let html = feedHtml, html.count >= fullTextMinChars else {
-                markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
+        // 从给定模式开始，逐级降级尝试
+        var currentMode = mode
+        while true {
+            let success = tryFetch(contentId: contentId, url: url, feedHtml: feedHtml, mode: currentMode)
+            if success { return true }
+            // 降级到下一级
+            guard let next = nextFallbackMode(after: currentMode) else {
+                // 已到最底层（summary）——summary 的 tryFetch 一定返回 false，但已标记 fetched
                 return false
             }
-            guard let md = runCLI(stdinHTML: html), md.count >= 40 else {
+            print("FullTextFetcher: \(currentMode.displayName) failed, falling back to \(next.displayName)")
+            currentMode = next
+        }
+    }
+
+    /// 按模式实际抓一次——成功写库返回 true，失败标记 fetch_status=3 返回 false
+    private func tryFetch(contentId: Int64, url: String, feedHtml: String?, mode: FetchMode) -> Bool {
+        switch mode {
+        case .feedFull:
+            guard let html = feedHtml, html.count >= fullTextMinChars,
+                  let md = runCLI(stdinHTML: html), md.count >= 40 else {
                 markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
                 return false
             }
@@ -124,7 +137,6 @@ public final class FullTextFetcher: @unchecked Sendable {
             return true
 
         case .jinaFree:
-            // Jina Free——直接调 Jina Reader（不经过 clip_core 的 fallback 链）
             guard !url.isEmpty, let md = runJina(url: url, usePro: false), md.count >= 40 else {
                 markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
                 return false
@@ -133,7 +145,6 @@ public final class FullTextFetcher: @unchecked Sendable {
             return true
 
         case .jinaPro:
-            // Jina Pro——直接调 Jina Reader（付费通道）
             guard !url.isEmpty, let md = runJina(url: url, usePro: true), md.count >= 40 else {
                 markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
                 return false
@@ -142,12 +153,28 @@ public final class FullTextFetcher: @unchecked Sendable {
             return true
 
         case .summary:
-            // 抓不到全文：保留 feed 摘要。fetch_status=4（直入）。
-            // 兜底：excerpt 为空时把 content_html 剥标签填上——阅读器/归档都用 excerpt，
-            // 空 excerpt 显示"（无内容）"（机器之心修解析器前就这状态）。
             markFetched(contentId: contentId, ok: true, engine: mode.rawValue)
             backfillExcerptIfEmpty(contentId: contentId, feedHtml: feedHtml)
             return false
+        }
+    }
+
+    /// 降级链：当前模式失败后的下一级
+    private func nextFallbackMode(after mode: FetchMode) -> FetchMode? {
+        switch mode {
+        case .feedFull: return .defuddle
+        case .defuddle:
+            // defuddle 失败 → Jina Free（开了才走）→ Jina Pro（开了才走）→ summary
+            if UserDefaults.standard.bool(forKey: "jina.free") { return .jinaFree }
+            if UserDefaults.standard.bool(forKey: "jina.pro"),
+               let key = UserDefaults.standard.string(forKey: "jina.apiKey"), !key.isEmpty { return .jinaPro }
+            return .summary
+        case .jinaFree:
+            if UserDefaults.standard.bool(forKey: "jina.pro"),
+               let key = UserDefaults.standard.string(forKey: "jina.apiKey"), !key.isEmpty { return .jinaPro }
+            return .summary
+        case .jinaPro: return .summary
+        case .summary: return nil
         }
     }
 
