@@ -500,7 +500,9 @@ struct BilingualBodyView: View {
         // 双语对照格式：LLM 直接输出「原文段||译文段」交替
         // 先检查有没有 || 分隔符——没有就是纯译文格式（旧数据），用 original 参数分段 + translated 整段配对
         guard translated.contains("||") else {
-            let origParas = splitParagraphs(original)
+            // 无 ||（旧纯译文格式）：original 剥 frontmatter 后分段 + translated 分段按顺序配对
+            let cleanedOriginal = Self.stripFrontmatterText(original)
+            let origParas = splitParagraphs(cleanedOriginal)
             let transParas = splitParagraphs(translated)
             var result: [(String, String)] = []
             for i in 0..<max(origParas.count, transParas.count) {
