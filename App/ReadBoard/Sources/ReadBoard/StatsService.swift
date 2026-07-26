@@ -106,4 +106,30 @@ public final class StatsService: @unchecked Sendable {
                 ($0["name"] ?? "", Int($0["cnt"] ?? "0") ?? 0)
             }
     }
+
+    /// 导出记录（各平台导出历史，按时间倒序取最近 20 条）
+    func exportRecords(limit: Int = 20) -> [(platform: String, title: String, status: String, time: String)] {
+        db.queryRows("""
+            SELECT r.target, c.title, r.status, r.delivered_at
+            FROM export_record er
+            JOIN export_rule r ON er.rule_id = r.id
+            JOIN content c ON er.content_id = c.id
+            ORDER BY er.delivered_at DESC LIMIT ?;
+            """, params: [limit]).map {
+                let target = $0["target"] ?? ""
+                let platform = switch target {
+                    case "obsidian": "Obsidian"
+                    case "mddir": "Markdown"
+                    case "webhook": "Webhook"
+                    case "cubox": "Cubox"
+                    case "instapaper": "Instapaper"
+                    case "readwise": "Readwise"
+                    case "notebooklm": "NotebookLM"
+                    case "notion": "Notion"
+                    default: target
+                }
+                let time = String(($0["delivered_at"] ?? "").prefix(16))
+                return (platform, $0["title"] ?? "", $0["status"] ?? "", time)
+            }
+    }
 }

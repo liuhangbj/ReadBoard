@@ -54,6 +54,7 @@ public struct StatsPane: View {
     @State private var s = StatsOverview()
     @State private var jobTypes: [(jtype: String, ok: Int, failed: Int)] = []
     @State private var topSources: [(name: String, count: Int)] = []
+    @State private var exportRecords: [(platform: String, title: String, status: String, time: String)] = []
 
     public var body: some View {
         ScrollView {
@@ -124,6 +125,45 @@ public struct StatsPane: View {
                         }
                     }
                 }
+
+                // 导出记录（各平台导出历史）
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionLabel(text: "导出记录")
+                    if exportRecords.isEmpty {
+                        Text("暂无导出记录")
+                            .font(.caption)
+                            .foregroundStyle(Color.rbText3)
+                            .padding(.vertical, 8)
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(Array(exportRecords.enumerated()), id: \.offset) { idx, r in
+                                HStack(spacing: 10) {
+                                    Text(r.platform)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(Color.rbText2)
+                                        .frame(width: 80, alignment: .leading)
+                                    Text(r.title)
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(Color.rbText)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text(r.status)
+                                        .font(.caption)
+                                        .foregroundStyle(r.status == "delivered" ? Color.rbScoreHigh : Color.rbScoreLow)
+                                        .frame(width: 60, alignment: .trailing)
+                                    Text(r.time)
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(Color.rbText3)
+                                        .frame(width: 70, alignment: .trailing)
+                                }
+                                .padding(.vertical, 6)
+                                if idx < exportRecords.count - 1 {
+                                    Hairline()
+                                }
+                            }
+                        }
+                    }
+                }
             }
             .padding(20)
         }
@@ -133,8 +173,9 @@ public struct StatsPane: View {
                 let ov = StatsService.shared.overview()
                 let jt = StatsService.shared.jobByType()
                 let ts = StatsService.shared.topSources()
+                let er = StatsService.shared.exportRecords()
                 await MainActor.run {
-                    s = ov; jobTypes = jt; topSources = ts
+                    s = ov; jobTypes = jt; topSources = ts; exportRecords = er
                 }
             }
         }

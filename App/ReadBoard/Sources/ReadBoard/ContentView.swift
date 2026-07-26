@@ -442,6 +442,50 @@ public struct ContentView: View {
         }
     }
 
+    /// 导出单篇文章到指定平台（不必遵循规则，直接用平台预设配置）
+    private func exportToPlatform(item: ContentItem, platform: String) {
+        Task {
+            let config = ExportPlatformConfig.shared
+            var rule = ExportRule(
+                id: 0, name: "单篇导出", enabled: true,
+                criteria: ExportRule.Criteria(),
+                triggerOn: "manual", target: platform, targetConfig: [:], lastRunAt: nil)
+            // 用平台预设配置填充 targetConfig
+            switch platform {
+            case "obsidian":
+                rule.targetConfig["dir"] = config.obsidianDir
+            case "notion":
+                rule.targetConfig["token"] = config.notionToken
+                rule.targetConfig["database_id"] = config.notionDatabaseId
+            case "cubox":
+                rule.targetConfig["token"] = config.cuboxToken
+            case "instapaper":
+                rule.targetConfig["username"] = config.instapaperUser
+                rule.targetConfig["password"] = config.instapaperPass
+            case "readwise":
+                rule.targetConfig["token"] = config.readwiseToken
+            case "webhook":
+                rule.targetConfig["url"] = config.webhookURL
+                rule.targetConfig["headers"] = config.webhookHeaders
+            default: break
+            }
+            // 直接调 deliver（不经过规则匹配）
+            let (ok, dest, err) = await ExportService.shared.deliverSingle(rule: rule, contentId: item.id)
+            await MainActor.run {
+                // 用 App 级通知显示导出结果（不依赖 ViewModel 状态）
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("ExportResult"),
+                    object: nil,
+                    userInfo: [
+                        "ok": ok,
+                        "platform": platform,
+                        "dest": dest ?? "",
+                        "error": err ?? ""
+                    ])
+            }
+        }
+    }
+
     /// 源级管线开关菜单（打勾状态实时反映）
     @ViewBuilder
     private func pipelineToggleMenu(src: FeedSource) -> some View {
@@ -758,6 +802,42 @@ public struct ContentView: View {
                                 Task { await ExportService.shared.runPending(trigger: "manual", contentId: item.id) }
                             } label: {
                                 Label("触发导出规则", systemImage: "square.and.arrow.up.on.square")
+                            }
+
+                            // ── 导出到平台（不必遵循规则，直接导出到各平台预设位置）──
+                            Menu {
+                                Button {
+                                    exportToPlatform(item: item, platform: "obsidian")
+                                } label: {
+                                    Label("Obsidian", systemImage: "note.text")
+                                }
+                                Button {
+                                    exportToPlatform(item: item, platform: "notion")
+                                } label: {
+                                    Label("Notion", systemImage: "square.grid.2x2")
+                                }
+                                Button {
+                                    exportToPlatform(item: item, platform: "cubox")
+                                } label: {
+                                    Label("Cubox", systemImage: "cube")
+                                }
+                                Button {
+                                    exportToPlatform(item: item, platform: "instapaper")
+                                } label: {
+                                    Label("Instapaper", systemImage: "book")
+                                }
+                                Button {
+                                    exportToPlatform(item: item, platform: "readwise")
+                                } label: {
+                                    Label("Readwise", systemImage: "bookmark")
+                                }
+                                Button {
+                                    exportToPlatform(item: item, platform: "webhook")
+                                } label: {
+                                    Label("Webhook", systemImage: "link")
+                                }
+                            } label: {
+                                Label("导出到平台", systemImage: "square.and.arrow.up")
                             }
                         }
                         // 最后一行出现时自动加载下一页（滚动到底分页，打破 300 条上限）

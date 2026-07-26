@@ -5,6 +5,64 @@ import Foundation
 // 管线完成后 PipelineWorker 调 runPending(trigger:)；设置页可手动 runFor(ruleId)。
 // 幂等：export_record UNIQUE(rule_id, content_id)，重跑不产生重复交付。
 
+/// 导出平台配置（各平台的登录凭证/预设位置，存 UserDefaults）
+/// class 引用类型——SwiftUI Binding 需要可变属性
+public final class ExportPlatformConfig: @unchecked Sendable {
+    static let shared = ExportPlatformConfig()
+    private init() {}
+
+    // Cubox
+    var cuboxToken: String {
+        get { UserDefaults.standard.string(forKey: "export.cubox.token") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "export.cubox.token") }
+    }
+    // Instapaper
+    var instapaperUser: String {
+        get { UserDefaults.standard.string(forKey: "export.instapaper.user") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "export.instapaper.user") }
+    }
+    var instapaperPass: String {
+        get { UserDefaults.standard.string(forKey: "export.instapaper.pass") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "export.instapaper.pass") }
+    }
+    // Readwise
+    var readwiseToken: String {
+        get { UserDefaults.standard.string(forKey: "export.readwise.token") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "export.readwise.token") }
+    }
+    // Notion
+    var notionToken: String {
+        get { UserDefaults.standard.string(forKey: "export.notion.token") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "export.notion.token") }
+    }
+    var notionDatabaseId: String {
+        get { UserDefaults.standard.string(forKey: "export.notion.databaseId") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "export.notion.databaseId") }
+    }
+    // Obsidian
+    var obsidianDir: String {
+        get { UserDefaults.standard.string(forKey: "export.obsidian.dir") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "export.obsidian.dir") }
+    }
+    // Webhook
+    var webhookURL: String {
+        get { UserDefaults.standard.string(forKey: "export.webhook.url") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "export.webhook.url") }
+    }
+    var webhookHeaders: [String: String] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: "export.webhook.headers"),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return [:] }
+            return obj
+        }
+        set {
+            if let data = try? JSONSerialization.data(withJSONObject: newValue) {
+                UserDefaults.standard.set(data, forKey: "export.webhook.headers")
+            }
+        }
+    }
+}
+
 public struct ExportRule: Identifiable {
     public let id: Int64
     var name: String
@@ -286,6 +344,29 @@ public final class ExportService: @unchecked Sendable {
             return body.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return text
+    }
+
+    /// 单篇导出（不必遵循规则，直接导出到指定平台）
+    /// 用平台预设配置（ExportPlatformConfig）+ 单篇内容 ID 直接 deliver
+    func deliverSingle(rule: ExportRule, contentId: Int64) async -> (Bool, String?, String?) {
+        // 查单篇内容
+        guard let row = db.queryRows("""
+            SELECT c.id, c.title, c.url, c.source, c.llm_score, c.llm_summary, c.llm_translated_md, c.content_md, c.published_at
+            FROM content c WHERE c.id = ?
+            """, params: [contentId]).first else {
+            return (false, nil, "内容不存在")
+        }
+        let c = ExportContent(
+            id: Int64(row["id"] ?? "") ?? 0,
+            title: row["title"] ?? "",
+            url: row["url"] ?? "",
+            source: row["source"] ?? "",
+            score: Int(row["llm_score"] ?? ""),
+            summary: row["llm_summary"],
+            translated: row["llm_translated_md"],
+            contentMd: row["content_md"],
+            publishedAt: row["published_at"] ?? "")
+        return await deliver(rule: rule, c: c)
     }
 
     /// 交付 = 把归档 md 分发到目标。归档文件是唯一产物（ArchiveService 渲染），

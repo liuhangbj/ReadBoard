@@ -39,6 +39,13 @@ public struct ExportRulePane: View {
 
             Hairline()
 
+            // ── 上区：7 平台登录选项和预设位置 ──
+            platformConfigSection
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+
+            Hairline()
+
             if rules.isEmpty {
                 ContentUnavailableView(
                     "还没有导出规则",
@@ -141,6 +148,154 @@ public struct ExportRulePane: View {
             Text("将删除规则「\(deletingRule?.name ?? "")」。已导出的文件不受影响，但导出记录会一并清除。")
         }
         .onAppear(perform: reload)
+    }
+
+    // MARK: - 平台配置区（7 平台登录/预设位置）
+
+    private var platformConfigSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("导出平台配置")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.rbText)
+
+            // 笔记软件
+            VStack(alignment: .leading, spacing: 8) {
+                Text("笔记软件")
+                    .font(.caption)
+                    .foregroundStyle(Color.rbText3)
+                HStack(spacing: 16) {
+                    // Obsidian
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Obsidian")
+                            .font(.system(size: 12, weight: .medium))
+                        HStack {
+                            Text(ExportPlatformConfig.shared.obsidianDir.isEmpty ? "未设置目录" : ExportPlatformConfig.shared.obsidianDir)
+                                .font(.caption)
+                                .foregroundStyle(Color.rbText3)
+                                .lineLimit(1)
+                            Button("选择…") { pickObsidianDir() }
+                                .controlSize(.small)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    // Notion
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Notion")
+                            .font(.system(size: 12, weight: .medium))
+                        TextField("Integration Token", text: Binding(
+                            get: { ExportPlatformConfig.shared.notionToken },
+                            set: { ExportPlatformConfig.shared.notionToken = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                        TextField("Database ID", text: Binding(
+                            get: { ExportPlatformConfig.shared.notionDatabaseId },
+                            set: { ExportPlatformConfig.shared.notionDatabaseId = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    // NotebookLM
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("NotebookLM")
+                            .font(.system(size: 12, weight: .medium))
+                        Text("API 待 Google 开放")
+                            .font(.caption)
+                            .foregroundStyle(Color.rbText3)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            // 稍后读
+            VStack(alignment: .leading, spacing: 8) {
+                Text("稍后读")
+                    .font(.caption)
+                    .foregroundStyle(Color.rbText3)
+                HStack(spacing: 16) {
+                    // Cubox
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Cubox")
+                            .font(.system(size: 12, weight: .medium))
+                        TextField("API Token", text: Binding(
+                            get: { ExportPlatformConfig.shared.cuboxToken },
+                            set: { ExportPlatformConfig.shared.cuboxToken = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    // Instapaper
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Instapaper")
+                            .font(.system(size: 12, weight: .medium))
+                        TextField("用户名", text: Binding(
+                            get: { ExportPlatformConfig.shared.instapaperUser },
+                            set: { ExportPlatformConfig.shared.instapaperUser = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                        SecureField("密码", text: Binding(
+                            get: { ExportPlatformConfig.shared.instapaperPass },
+                            set: { ExportPlatformConfig.shared.instapaperPass = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    // Readwise
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Readwise")
+                            .font(.system(size: 12, weight: .medium))
+                        TextField("API Token", text: Binding(
+                            get: { ExportPlatformConfig.shared.readwiseToken },
+                            set: { ExportPlatformConfig.shared.readwiseToken = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            // Webhook
+            VStack(alignment: .leading, spacing: 8) {
+                Text("通用")
+                    .font(.caption)
+                    .foregroundStyle(Color.rbText3)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Webhook")
+                        .font(.system(size: 12, weight: .medium))
+                    TextField("Webhook URL（POST JSON）", text: Binding(
+                        get: { ExportPlatformConfig.shared.webhookURL },
+                        set: { ExportPlatformConfig.shared.webhookURL = $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.rbSurface)
+        .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
+    }
+
+    private func pickObsidianDir() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "选择"
+        panel.message = "选择 Obsidian 仓库目录"
+        if panel.runModal() == .OK, let url = panel.url {
+            ExportPlatformConfig.shared.obsidianDir = url.path
+        }
     }
 
     private func reload() {
