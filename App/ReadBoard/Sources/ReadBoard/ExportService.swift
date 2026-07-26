@@ -68,9 +68,10 @@ public struct ExportRule: Identifiable {
     var name: String
     var enabled: Bool
     var criteria: Criteria
-    var triggerOn: String          // score / translate / transcribe / manual
-    var target: String             // obsidian / mddir / webhook
+    var triggerOn: String          // score / translate / transcribe / manual / archive（入库触发）
+    var target: String             // obsidian / mddir / webhook / cubox / instapaper / readwise / notion
     var targetConfig: [String: Any]
+    var overwrite: Bool = true     // 覆盖原文件（true）vs 生成新文件（false，加时间戳）
     var lastRunAt: String?
 
     static func == (lhs: ExportRule, rhs: ExportRule) -> Bool { lhs.id == rhs.id }
@@ -390,7 +391,8 @@ public final class ExportService: @unchecked Sendable {
                 return (false, nil, "目标目录未配置")
             }
             return writeMarkdown(md: md, title: c.title, source: c.source, contentId: c.id,
-                                 dir: dir, bySource: rule.targetConfig["subdir_by_source"] as? Bool ?? false)
+                                 dir: dir, bySource: rule.targetConfig["subdir_by_source"] as? Bool ?? false,
+                                 overwrite: rule.overwrite)
         case "webhook":
             guard let urlStr = rule.targetConfig["url"] as? String, let url = URL(string: urlStr) else {
                 return (false, nil, "Webhook URL 未配置")
@@ -552,7 +554,7 @@ public final class ExportService: @unchecked Sendable {
         }
     }
 
-    private func writeMarkdown(md: String, title: String, source: String, contentId: Int64, dir: String, bySource: Bool) -> (Bool, String?, String?) {
+    private func writeMarkdown(md: String, title: String, source: String, contentId: Int64, dir: String, bySource: Bool, overwrite: Bool = true) -> (Bool, String?, String?) {
         let fm = FileManager.default
         var targetDir = dir
         if bySource && !source.isEmpty {
@@ -560,14 +562,22 @@ public final class ExportService: @unchecked Sendable {
         }
         do {
             try fm.createDirectory(atPath: targetDir, withIntermediateDirectories: true)
-            // 同名不同内容防互相覆盖：先按纯标题写，若已存在且内容不同则追加 contentId
             let base = String(Self.sanitizeFilename(title).prefix(80))
             var filename = base + ".md"
             var path = targetDir + "/" + filename
-            if fm.fileExists(atPath: path),
-               let existing = try? String(contentsOfFile: path, encoding: .utf8), existing != md {
-                filename = "\(base)-\(contentId).md"
-                path = targetDir + "/" + filename
+            if fm.fileExists(atPath: path) {
+                if overwrite {
+                    // 覆盖原文件：直接写（重入库更新内容）
+                    try md.write(toFile: path, atomically: true, encoding: .utf8)
+                    return (true, path, nil)
+                } else {
+                    // 生成新文件：加时间戳后缀（保留历史版本）
+                    let timestamp = ISO8601DateFormatter().string(from: Date())
+                        .replacingOccurrences(of: ":", with: "-")
+                        .prefix(19)
+                    filename = "\(base)-\(timestamp).md"
+                    path = targetDir + "/" + filename
+                }
             }
             try md.write(toFile: path, atomically: true, encoding: .utf8)
             return (true, path, nil)

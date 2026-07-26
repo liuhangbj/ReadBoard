@@ -378,7 +378,7 @@ public struct ContentView: View {
                 Menu {
                     pipelineToggleMenu(src: src)
                 } label: {
-                    Label("内容处理管道", systemImage: "gearshape.2")
+                    Label("内容处理", systemImage: "gearshape.2")
                 }
                 Menu {
                     fetchSettingsMenu(src: src)
@@ -408,7 +408,7 @@ public struct ContentView: View {
                 Label("重命名", systemImage: "pencil")
             }
             Button { Task { await refreshFolder(fid) } } label: {
-                Label("刷新此文件夹全部源", systemImage: "arrow.clockwise")
+                Label("立即刷新全部", systemImage: "arrow.clockwise")
             }
             Button { markFolderRead(fid) } label: {
                 Label("全部标为已读", systemImage: "checkmark.circle")
@@ -418,7 +418,7 @@ public struct ContentView: View {
                 Menu {
                     folderPipelineMenu(folder: folder)
                 } label: {
-                    Label("组级管线总开关", systemImage: "gearshape.2")
+                    Label("内容处理", systemImage: "gearshape.2")
                 }
             }
             // 全文抓取模式（对文件夹内所有源批量设置）
@@ -433,7 +433,7 @@ public struct ContentView: View {
                     }
                 }
             } label: {
-                Label("全文抓取模式", systemImage: "doc.text")
+                Label("抓取设置", systemImage: "arrow.down.circle")
             }
             Divider()
             Button(role: .destructive) { sourceStore.removeFolder(id: fid); vm.loadAll() } label: {
@@ -482,6 +482,36 @@ public struct ContentView: View {
                         "dest": dest ?? "",
                         "error": err ?? ""
                     ])
+            }
+        }
+    }
+
+    /// 单篇文章跑管线（评分/摘要/翻译/转录）——右键菜单调用
+    private func runPipelineForItem(item: ContentItem, type: String) {
+        let pipeline = LLMPipeline()
+        let transcriber = TranscribePipeline()
+        let body = item.contentMd ?? item.excerpt ?? ""
+        Task {
+            let ok: Bool
+            switch type {
+            case "score":
+                ok = await pipeline.score(contentId: item.id, title: item.title, body: body)
+            case "summarize":
+                ok = await pipeline.summarize(contentId: item.id, title: item.title, body: body)
+            case "translate":
+                ok = await pipeline.translate(contentId: item.id, title: item.title, body: body)
+            case "transcribe":
+                ok = await transcriber.transcribe(contentId: item.id, title: item.title,
+                                                  audioUrl: item.audioUrl, pageUrl: item.url,
+                                                  language: item.language)
+            default:
+                ok = false
+            }
+            if ok {
+                ArchiveService.shared.rearchive(contentId: item.id)   // 刷新入库文件
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
+                }
             }
         }
     }
@@ -791,6 +821,36 @@ public struct ContentView: View {
                             }
 
                             Divider()
+
+                            // ── 内容处理（AI 评分/摘要/翻译/转录）──
+                            Menu {
+                                Button {
+                                    runPipelineForItem(item: item, type: "score")
+                                } label: {
+                                    Label("AI 评分", systemImage: "star")
+                                }
+                                Button {
+                                    runPipelineForItem(item: item, type: "summarize")
+                                } label: {
+                                    Label("AI 摘要", systemImage: "text.quote")
+                                }
+                                if item.ctype != "podcast" && item.ctype != "video" {
+                                    Button {
+                                        runPipelineForItem(item: item, type: "translate")
+                                    } label: {
+                                        Label("AI 翻译", systemImage: "character.bubble")
+                                    }
+                                }
+                                if item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil {
+                                    Button {
+                                        runPipelineForItem(item: item, type: "transcribe")
+                                    } label: {
+                                        Label("AI 转录", systemImage: "waveform")
+                                    }
+                                }
+                            } label: {
+                                Label("内容处理", systemImage: "gearshape.2")
+                            }
 
                             // ── 后处理 ──
                             Button {

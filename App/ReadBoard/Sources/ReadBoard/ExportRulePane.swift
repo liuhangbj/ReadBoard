@@ -548,6 +548,12 @@ public struct ExportRuleEditor: View {
                         Toggle("按来源建子目录", isOn: $bySource)
                             .tint(Color.rbAccent)
                             .onChange(of: bySource) { _, v in rule.targetConfig["subdir_by_source"] = v }
+                        // 覆盖选项：覆盖原文件（重入库更新）vs 生成新文件（保留历史版本）
+                        Picker("重入库时", selection: $rule.overwrite) {
+                            Text("覆盖原文件").tag(true)
+                            Text("生成新文件（保留历史）").tag(false)
+                        }
+                        .tint(Color.rbAccent)
                     }
                     // Webhook
                     else if rule.target == "webhook" {

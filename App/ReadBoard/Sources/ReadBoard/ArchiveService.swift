@@ -1,19 +1,20 @@
 import Foundation
 
-// MARK: - 完成归档（最终 md 落盘）
+// MARK: - 入库（最终 md 落盘）
 // 核心定位：所有管线（打分/翻译/摘要/转录）是"中间环节"，
-// 全部跑完后才把这篇落成最终 md 文件长期保存。
+// 全部跑完后才把这篇落成最终 md 文件长期保存——这个过程叫"入库"，
+// 完成生成 md 文件 = 入库成功。
 //
-// 数据策略（用户拍板）：落盘后数据库记录保留（标题/md/LLM 产出/元数据都在，
+// 数据策略（用户拍板）：入库后数据库记录保留（标题/md/LLM 产出/元数据都在，
 // 仍是可检索统一视图），只清 content_html 这类抓取中间产物（retention cleanHtml A 路径
-// 对已落盘的立即清 html，不等天数）。retention 物理 DELETE 跳过已落盘记录。
+// 对已入库的立即清 html，不等天数）。retention 物理 DELETE 跳过已入库记录。
 //
 // 完成判定（按该源开启的管线）：
 //   文章：开了打分要 llm_score、开了摘要要 llm_summary、开了翻译要 llm_translated_md
 //   媒体：开了转录要 llm_translated_md（转录稿写这里）+ 开了摘要要 llm_summary
 //   开关没开的不算缺——源没开翻译，文章打完分+摘要就算完成。
 //
-// 幂等：meta.archived_at 标记，已落盘的不重复写。
+// 幂等：meta.archived_at 标记，已入库的不重复写。
 
 public final class ArchiveService: @unchecked Sendable {
     public static let shared = ArchiveService()
@@ -163,6 +164,8 @@ public final class ArchiveService: @unchecked Sendable {
                 UPDATE content SET meta = json_set(COALESCE(meta,'{}'), '$.archived_at', datetime('now'))
                 WHERE id = ?;
                 """, params: [contentId])
+            // 入库成功（含重入库）触发自动导出规则——用户要求每次 md 文件生成都重新执行导出
+            Task { await ExportService.shared.runPending(trigger: "archive", contentId: contentId) }
         }
         return ok
     }
