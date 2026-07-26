@@ -1445,14 +1445,23 @@ public struct ReadingView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     // 标题（独立字号设置；标题字体跟用户字体选择走，不被主题强制）
+                    // 点击直接在浏览器打开原文 + 文本可选择
                     Text(item.title)
                         .font(fontChoice.font(size: titleFontSize).bold())
                         .foregroundStyle(p.text)
+                        .textSelection(.enabled)
+                        .onTapGesture {
+                            if let url = URL(string: item.url), !item.url.isEmpty {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .help("点击在浏览器打开原文")
                     // 中文标题（有译文时显示在英文标题下方——从 translatedHead 第一行取）
                     if let chineseTitle = chineseTitle, chineseTitle != item.title {
                         Text(chineseTitle)
                             .font(fontChoice.font(size: titleFontSize * 0.75).weight(.medium))
                             .foregroundStyle(p.textSecondary)
+                            .textSelection(.enabled)
                     }
                     // 元信息（作者 · 日期 · 评分，编辑部点分隔；frontmatter 块在正文里单独折叠）
                     if !metaParts.isEmpty {
