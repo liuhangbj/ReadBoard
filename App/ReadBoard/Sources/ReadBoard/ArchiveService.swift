@@ -244,15 +244,26 @@ public final class ArchiveService: @unchecked Sendable {
         md += "published: \"\(yaml(published))\"\n"
         md += "---\n\n"
 
-        md += "# \(title)\n\n"
-        if !summary.isEmpty { md += "> \(summary)\n\n" }
-
         let bodyClean = ExportService.stripLeadingFrontmatter(body)
         let transClean = ExportService.stripLeadingFrontmatter(translated)
 
+        md += "# \(title)\n\n"
+        // 译文标题直接在原文标题下（双语对照——译文标题紧跟原文标题，加粗不渲染 ##）
         if !transClean.isEmpty && transClean != bodyClean {
-            // 有译文：译文为主，原文附录（双语对照）
-            md += transClean + "\n\n---\n\n## 原文\n\n" + bodyClean
+            // 从译文提取标题（第一行非空行，剥「标题：」前缀）
+            let transLines = transClean.components(separatedBy: "\n")
+            var transTitle = transLines.first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
+            // 剥「标题：」「正文：」前缀（LLM 输出格式标记）
+            transTitle = transTitle.replacingOccurrences(of: "^标题：\\s*", with: "", options: .regularExpression)
+            transTitle = transTitle.replacingOccurrences(of: "^正文：\\s*", with: "", options: .regularExpression)
+            transTitle = transTitle.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+            if !transTitle.isEmpty {
+                md += "**\(transTitle)**\n\n"
+            }
+        }
+        if !transClean.isEmpty && transClean != bodyClean {
+            // 有译文：直接显示 LLM 返回的译文（保留原格式 markdown），不显示摘要
+            md += transClean
         } else {
             // 无译文（中文文章 / 未开翻译）：直接原文
             md += bodyClean

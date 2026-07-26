@@ -1354,7 +1354,7 @@ public struct ReadingView: View {
                 // 双语/原文/翻译切换（有翻译时）：双语对照 / 仅原文 / 仅译文
                 if item.llmTranslatedMd != nil {
                     RBSegmented(
-                        items: [(0, "双语"), (1, "原文")],
+                        items: [(0, "译文"), (1, "原文")],
                         selection: $viewMode
                     )
                 }
@@ -1522,20 +1522,16 @@ public struct ReadingView: View {
                             .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
                     }
 
-                    // 正文：有译文时双语逐段对照（Follo 核心交互），否则单语 markdown
-                    // 双语原文用 bodyText（contentMd ?? excerpt）——绝大多数文章 content_md
-                    // 是空的（正文在 content_html/excerpt，全文未抓），只看 contentMd 会把
-                    // 几乎所有译文文章挡在双语门外，掉到单语只显示原文。
-                    if bilingualMode, let translated = item.llmTranslatedMd, !translated.isEmpty {
-                        BilingualBodyView(
-                            original: bodyText,
-                            translated: translated,
+                    // 正文：译文/原文两个标签——viewMode 0=译文（llm_translated_md 保留原格式），
+                    // viewMode 1=原文（contentMd ?? excerpt）。不再双语对照。
+                    if viewMode == 0, let translated = item.llmTranslatedMd, !translated.isEmpty {
+                        MarkdownBodyView(
+                            markdown: translated,
                             theme: theme,
                             mode: themeMode,
                             fontChoice: fontChoice,
                             fontSize: fontSize,
-                            lineSpacing: lineSpacing,
-                            contentId: item.id   // 读归档 md 文件直接渲染（已配对的双语版本）
+                            lineSpacing: lineSpacing
                         )
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1739,7 +1735,9 @@ public struct ReadingView: View {
         let firstNonEmpty = head.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty } ?? ""
-        let cleaned = firstNonEmpty.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+        // 剥「标题：」前缀（LLM 输出格式标记）+ markdown 标题标记（##）
+        var cleaned = firstNonEmpty.replacingOccurrences(of: "^标题：\\s*", with: "", options: .regularExpression)
+        cleaned = cleaned.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
         return cleaned.isEmpty ? nil : cleaned
     }
 
