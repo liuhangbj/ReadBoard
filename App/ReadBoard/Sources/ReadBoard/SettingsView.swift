@@ -57,7 +57,10 @@ public struct SettingsView: View {
             }
         }
         // 去掉左上角「隐藏左栏」切换按钮——设置页 sidebar 固定显示，不需用户收起
-        .toolbar(removing: .sidebarToggle)
+        // .toolbar(removing: .sidebarToggle) 在 macOS 14+ 对 NavigationSplitView 不生效，
+        // 用 .navigationSplitViewStyle(.balanced) + 隐藏 toolbar 背景更可靠
+        .navigationSplitViewStyle(.balanced)
+        .toolbarBackground(.hidden, for: .windowToolbar)
         .frame(minWidth: 720, minHeight: 500)
     }
 }
@@ -149,7 +152,14 @@ public struct GeneralPane: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("通用")
+        // 标题居中（navigationTitle 默认左对齐，用 toolbar 自定义 title view 居中）
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text("通用")
+                    .font(.headline)
+                    .foregroundStyle(Color.rbText)
+            }
+        }
         .onAppear {
             archiveDirInput = UserDefaults.standard.string(forKey: "archive.dir") ?? ""
             refreshArchiveStats()
@@ -203,7 +213,13 @@ public struct AILLMPane: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("AI 与 LLM")
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text("AI 与 LLM")
+                    .font(.headline)
+                    .foregroundStyle(Color.rbText)
+            }
+        }
     }
 }
 
@@ -405,7 +421,13 @@ public struct DepsPane: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("依赖")
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text("依赖")
+                    .font(.headline)
+                    .foregroundStyle(Color.rbText)
+            }
+        }
         .onAppear {
             deps = DependencyChecker.shared.checkAll()
             for kind in DependencyPaths.Kind.allCases {
@@ -474,7 +496,13 @@ public struct BoardsPane: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("功能板块")
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text("功能板块")
+                    .font(.headline)
+                    .foregroundStyle(Color.rbText)
+            }
+        }
         .onAppear {
             for b in FeatureBoard.allCases { states[b.rawValue] = b.enabled }
         }
@@ -622,7 +650,13 @@ public struct CleanupPane: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("缓存清理")
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text("缓存清理")
+                    .font(.headline)
+                    .foregroundStyle(Color.rbText)
+            }
+        }
         .onAppear {
             archiveDays = cleanup.archiveAfterDays
             deleteDays = cleanup.deleteAfterDays
@@ -971,7 +1005,13 @@ public struct ReaderPane: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("阅读器")
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text("阅读器")
+                    .font(.headline)
+                    .foregroundStyle(Color.rbText)
+            }
+        }
     }
 
     /// ReadingFont → 持久化 key（和 ReadingFont.current 的存储格式一致）

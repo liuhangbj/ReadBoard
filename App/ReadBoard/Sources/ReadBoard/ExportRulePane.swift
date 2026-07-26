@@ -104,7 +104,13 @@ public struct ExportRulePane: View {
                 }
             }
         }
-        .navigationTitle("导出规则")
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text("导出规则")
+                    .font(.headline)
+                    .foregroundStyle(Color.rbText)
+            }
+        }
         .sheet(isPresented: $showEditor) {
             ExportRuleEditor(rule: editing ?? ExportRule(
                 id: 0, name: "", enabled: true, criteria: ExportRule.Criteria(),
