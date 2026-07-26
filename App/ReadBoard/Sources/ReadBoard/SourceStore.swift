@@ -69,6 +69,16 @@ public struct FeedSource: Identifiable, Hashable {
 
     /// 该源是否可转录（播客/视频才有音频流）
     var transcribable: Bool { stype == "podcast" || stype == "youtube" }
+
+    /// 最多保留条数（config.max_keep，0 = 不限制，默认 0）
+    /// 超出后最旧的自动归档（不删除，可检索）。播客源几百上千条，限制保留量。
+    var maxKeep: Int {
+        guard let data = config.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 0 }
+        if let v = obj["max_keep"] as? Int { return v }
+        if let v = obj["max_keep"] as? Double { return Int(v) }
+        return 0
+    }
 }
 
 // MARK: - 文件夹
@@ -301,6 +311,39 @@ public final class SourceStore: ObservableObject {
             db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id])
         }
         reload()
+    }
+
+    /// 设置某源最多保留条数（0 = 不限制）。超出后最旧的自动归档。
+    func setMaxKeep(id: Int64, count: Int) {
+        let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
+        var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+        obj["max_keep"] = count
+        if let data = try? JSONSerialization.data(withJSONObject: obj),
+           let str = String(data: data, encoding: .utf8) {
+            db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id])
+        }
+        reload()
+    }
+
+    /// 执行源级保留策略：超出 max_keep 的最旧内容自动归档（不删除，可检索）
+    /// 返回归档条数。
+    @discardableResult
+    func enforceMaxKeep(sourceId: Int64) -> Int {
+        guard let src = sources.first(where: { $0.id == sourceId }), src.maxKeep > 0 else { return 0 }
+        // 查该源超出保留量的最旧内容（按 published_at 升序，取超出部分）
+        let excess = db.queryRows("""
+            SELECT id FROM content
+            WHERE source_id = ? AND is_archived = 0 AND is_duplicate = 0
+            ORDER BY published_at ASC
+            LIMIT MAX(0, (SELECT COUNT(*) FROM content WHERE source_id = ? AND is_archived = 0 AND is_duplicate = 0) - ?);
+            """, params: [sourceId, sourceId, src.maxKeep])
+        var n = 0
+        for row in excess {
+            guard let cid = Int64(row["id"] ?? "") else { continue }
+            db.execute("UPDATE content SET is_archived = 1 WHERE id = ?", params: [cid])
+            n += 1
+        }
+        return n
     }
 
     /// 文件夹级批量设置抓取间隔（对文件夹内所有源统一设置）

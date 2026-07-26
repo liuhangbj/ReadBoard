@@ -359,6 +359,10 @@ public struct SourceRow: View {
             intervalMenu
                 .frame(width: 88, alignment: .leading)
 
+            // 最多保留条数（固定列）——播客源限制保留量
+            maxKeepMenu
+                .frame(width: 72, alignment: .leading)
+
             // 上次抓取（固定列；无值占位）
             Group {
                 if let t = src.lastFetchedAt {
@@ -477,6 +481,36 @@ public struct SourceRow: View {
         }
         .menuStyle(.borderlessButton)
         .help("自动抓取间隔（点击可修改）")
+    }
+
+    /// 最多保留条数菜单（播客源几百上千条，限制保留量）
+    private var maxKeepMenu: some View {
+        Menu {
+            ForEach([0, 50, 100, 200, 500], id: \.self) { n in
+                Button {
+                    store.setMaxKeep(id: src.id, count: n)
+                    // 设置后立即执行保留策略（超出最旧的归档）
+                    if n > 0 { _ = store.enforceMaxKeep(sourceId: src.id) }
+                } label: {
+                    let label = n == 0 ? "不限制" : "\(n) 条"
+                    if src.maxKeep == n { Label(label, systemImage: "checkmark") }
+                    else { Text(label) }
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "archivebox")
+                    .font(.system(size: 9))
+                Text(src.maxKeep == 0 ? "不限制" : "\(src.maxKeep) 条")
+            }
+            .font(.caption)
+            .foregroundStyle(Color.rbText3)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Color.rbSurface)
+            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
+        }
+        .menuStyle(.borderlessButton)
+        .help("最多保留条数（超出最旧的自动归档，可检索）")
     }
 
     /// 指派到文件夹菜单
