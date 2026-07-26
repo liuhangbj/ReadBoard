@@ -502,12 +502,41 @@ struct BilingualBodyView: View {
         let cleanedOriginal = Self.stripFrontmatterText(original)
         let origParas = splitParagraphs(cleanedOriginal)
         let transParas = splitParagraphs(translated)
-        let count = max(origParas.count, transParas.count)
+        // 错位修复：LLM 翻译时段落数可能不一致（合并/拆分/空段差异），
+        // 按「标题锚点」对齐——# 开头的段落按标题文本匹配，非标题按顺序填充。
         var result: [(String, String)] = []
-        for i in 0..<count {
-            let o = i < origParas.count ? origParas[i] : ""
-            let t = i < transParas.count ? transParas[i] : ""
-            if !o.isEmpty || !t.isEmpty { result.append((o, t)) }
+        var transIndex = 0
+        for origPara in origParas {
+            // 标题段落（# 开头）：按标题文本在译文中找对应
+            if origPara.hasPrefix("#") {
+                let origTitle = origPara.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+                // 在译文中找相同标题（允许译文标题略有差异，取前 20 字符匹配）
+                var matchedTrans = ""
+                for j in transIndex..<transParas.count {
+                    let transPara = transParas[j]
+                    if transPara.hasPrefix("#") {
+                        let transTitle = transPara.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+                        if transTitle.prefix(20) == origTitle.prefix(20) {
+                            matchedTrans = transPara
+                            transIndex = j + 1
+                            break
+                        }
+                    }
+                }
+                result.append((origPara, matchedTrans))
+            } else {
+                // 非标题段落：按顺序取下一个译文段（跳过空段）
+                var matchedTrans = ""
+                while transIndex < transParas.count {
+                    let transPara = transParas[transIndex]
+                    transIndex += 1
+                    if !transPara.isEmpty && !transPara.hasPrefix("#") {
+                        matchedTrans = transPara
+                        break
+                    }
+                }
+                result.append((origPara, matchedTrans))
+            }
         }
         return result
     }
