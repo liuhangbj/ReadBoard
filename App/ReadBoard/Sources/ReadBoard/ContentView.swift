@@ -1452,16 +1452,19 @@ public struct ReadingView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     // 标题（独立字号设置；标题字体跟用户字体选择走，不被主题强制）
                     // 点击直接在浏览器打开原文 + 文本可选择
-                    Text(item.title)
-                        .font(fontChoice.font(size: titleFontSize).bold())
-                        .foregroundStyle(p.text)
-                        .textSelection(.enabled)
-                        .onTapGesture {
-                            if let url = URL(string: item.url), !item.url.isEmpty {
-                                NSWorkspace.shared.open(url)
-                            }
+                    Button {
+                        if let url = URL(string: item.url), !item.url.isEmpty {
+                            NSWorkspace.shared.open(url)
                         }
-                        .help("点击在浏览器打开原文")
+                    } label: {
+                        Text(item.title)
+                            .font(fontChoice.font(size: titleFontSize).bold())
+                            .foregroundStyle(p.text)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .buttonStyle(.plain)
+                    .help("点击在浏览器打开原文")
+                    .textSelection(.enabled)
                     // 中文标题（有译文时显示在英文标题下方——从 translatedHead 第一行取）
                     if let chineseTitle = chineseTitle, chineseTitle != item.title {
                         Text(chineseTitle)
