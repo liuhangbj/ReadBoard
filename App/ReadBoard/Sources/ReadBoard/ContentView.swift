@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 public struct ContentView: View {
     @StateObject private var vm = ContentViewModel()
@@ -1354,7 +1355,12 @@ public struct ReadingView: View {
                 // 双语/原文/翻译切换（有翻译时）：双语对照 / 仅原文 / 仅译文
                 if item.llmTranslatedMd != nil {
                     RBSegmented(
-                        items: [(0, "译文"), (1, "原文")],
+                        items: [(0, "译文"), (1, "原文"), (2, "网页")],
+                        selection: $viewMode
+                    )
+                } else {
+                    RBSegmented(
+                        items: [(1, "原文"), (2, "网页")],
                         selection: $viewMode
                     )
                 }
@@ -1531,9 +1537,13 @@ public struct ReadingView: View {
                             .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
                     }
 
-                    // 正文：译文/原文两个标签——viewMode 0=译文（llm_translated_md 保留原格式），
-                    // viewMode 1=原文（contentMd ?? excerpt）。不再双语对照。
-                    if viewMode == 0, let translated = item.llmTranslatedMd, !translated.isEmpty {
+                    // 正文：译文/原文/网页三个标签——viewMode 0=译文（llm_translated_md 保留原格式），
+                    // viewMode 1=原文（contentMd ?? excerpt），viewMode 2=原网页（content_html WKWebView）。
+                    if viewMode == 2 {
+                        // 原网页视图——WKWebView 渲染 content_html（feed 给的原始 HTML）
+                        WebView(html: loadedContentHtml ?? item.contentHtml ?? "<p>（无网页内容）</p>", baseURL: URL(string: item.url))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if viewMode == 0, let translated = item.llmTranslatedMd, !translated.isEmpty {
                         MarkdownBodyView(
                             markdown: translated,
                             theme: theme,
@@ -1771,8 +1781,13 @@ public struct ReadingView: View {
         guard loadedContentMd == nil else { return }
         if let body = Database.shared.fetchContentBody(id: item.id) {
             loadedContentMd = body.contentMd
+            // contentHtml 也加载（原网页视图用）——但 item 是 let 不可变，用 @State 存
+            loadedContentHtml = body.contentHtml
         }
     }
+
+    /// 原始 HTML（原网页视图用）——@State 缓存，打开时按 id 查
+    @State private var loadedContentHtml: String? = nil
 
     private func runFulltext() {
         let cid = item.id
@@ -2088,5 +2103,46 @@ struct ShortcutHelpView: View {
         }
         .padding(24)
         .frame(width: 430)
+    }
+}
+
+// MARK: - 原网页视图（WKWebView 渲染 content_html）
+
+struct WebView: NSViewRepresentable {
+    let html: String
+    let baseURL: URL?
+
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        // 允许图片/媒体加载（content_html 里的相对/绝对图片链接）
+        config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.setValue(false, forKey: "drawsBackground")   // 透明背景（融入主题）
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        // 包一层 HTML 壳——content_html 常是正文片段（无 <html> 包裹），WKWebView 需要完整文档
+        let wrapped: String
+        if html.lowercased().contains("<html") || html.lowercased().contains("<!doctype") {
+            wrapped = html
+        } else {
+            wrapped = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body { font-family: -apple-system, sans-serif; font-size: 16px; line-height: 1.6; padding: 16px; color: #333; }
+                    img { max-width: 100%; height: auto; }
+                    a { color: #0066cc; }
+                </style>
+            </head>
+            <body>\(html)</body>
+            </html>
+            """
+        }
+        webView.loadHTMLString(wrapped, baseURL: baseURL)
     }
 }

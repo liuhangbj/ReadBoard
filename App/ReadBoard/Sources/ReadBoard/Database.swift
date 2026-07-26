@@ -31,6 +31,8 @@ public struct ContentItem: Identifiable, Hashable {
     let starred: Bool         // 星标
     let archived: Bool        // 归档
     var imageUrl: String? = nil  // 首图（列表缩略图，从 content_html 抽）
+    /// 原始 HTML（feed 给的 content_html，原网页视图用——点开阅读时查，列表轻列不取）
+    var contentHtml: String? = nil
     /// 列表标签用轻量标记（不扛译文全文/媒体地址，只存是否有）
     var hasTranslation: Bool = false  // 有译文/转写（llm_translated_md 非空）
     var isMedia: Bool = false          // 媒体项（podcast/video/含 audio_url）
@@ -86,7 +88,7 @@ public struct ContentItem: Identifiable, Hashable {
 
     /// 填充正文的副本（点开阅读时 fetchContentBody 补大字段）
     /// 保留轻量字段（imageUrl/hasTranslation/isMedia/translatedHead/hasFulltext）——否则点开文章后中栏/右栏中文标题丢失
-    func withBody(contentMd: String?, llmTranslatedMd: String?, audioUrl: String?) -> ContentItem {
+    func withBody(contentMd: String?, llmTranslatedMd: String?, audioUrl: String?, contentHtml: String? = nil) -> ContentItem {
         var copy = ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
                     url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
                     contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
@@ -97,6 +99,7 @@ public struct ContentItem: Identifiable, Hashable {
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
         copy.hasFulltext = hasFulltext
+        copy.contentHtml = contentHtml ?? self.contentHtml
         return copy
     }
 }
@@ -737,12 +740,12 @@ public final class Database: @unchecked Sendable {
             autoSummarize: sp.autoSummarize || fp.autoSummarize)
     }
 
-    /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl)
-    func fetchContentBody(id: Int64) -> (contentMd: String?, llmTranslatedMd: String?, audioUrl: String?)? {
+    /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl, contentHtml)
+    func fetchContentBody(id: Int64) -> (contentMd: String?, llmTranslatedMd: String?, audioUrl: String?, contentHtml: String?)? {
         guard open() else { return nil }
         var stmt: OpaquePointer?
-        var result: (String?, String?, String?)?
-        if sqlite3_prepare_v2(db, "SELECT content_md, llm_translated_md, meta FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
+        var result: (String?, String?, String?, String?)?
+        if sqlite3_prepare_v2(db, "SELECT content_md, llm_translated_md, meta, content_html FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_int64(stmt, 1, id)
             if sqlite3_step(stmt) == SQLITE_ROW {
                 func text(_ i: Int32) -> String? {
@@ -754,7 +757,7 @@ public final class Database: @unchecked Sendable {
                    let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     audioUrl = (obj["audio_url"] as? String) ?? (obj["video_url"] as? String)
                 }
-                result = (text(0), text(1), audioUrl)
+                result = (text(0), text(1), audioUrl, text(3))
             }
         }
         sqlite3_finalize(stmt)
