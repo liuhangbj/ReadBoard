@@ -7,7 +7,10 @@ let package = Package(
     targets: [
         .target(
             name: "ReadBoard",
-            path: "Sources/ReadBoard"
+            path: "Sources/ReadBoard",
+            resources: [
+                .process("../../Resources")
+            ]
         ),
         .executableTarget(
             name: "ReadBoardMain",
