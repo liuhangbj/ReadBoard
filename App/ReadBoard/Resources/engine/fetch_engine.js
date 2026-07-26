@@ -143,6 +143,22 @@ function parseHtmlViaDefuddle(html) {
 }
 
 // ── Jina Reader 兜底：云端渲染穿反爬。Free 无 key(20 RPM) / Pro 有 key(500 RPM+) ──
+// 按域名定制 target-selector：这些站点 readability 自动提取会被 consent 墙/导航干扰，
+// 指定正文容器直接锁定（拿到干净正文，哪怕到付费墙截断点也比摘要丰富）。
+const JINA_TARGET_SELECTOR_BY_HOST = {
+  'www.nytimes.com': 'section[name="articleBody"]',
+  'nytimes.com': 'section[name="articleBody"]',
+};
+
+function jinaTargetSelectorFor(url) {
+  try {
+    const host = new URL(url).hostname;
+    return JINA_TARGET_SELECTOR_BY_HOST[host] || null;
+  } catch {
+    return null;
+  }
+}
+
 function fetchViaJina(url, usePro = false) {
   const apiKey = usePro ? (process.env.JINA_API_KEY || '') : '';
   const jinaUrl = 'https://r.jina.ai/' + url;
@@ -160,6 +176,11 @@ function fetchViaJina(url, usePro = false) {
       },
       timeout: 45000,
     };
+    // 按域名加 target-selector（NYT 等 consent 墙站点锁定正文容器）
+    const targetSelector = jinaTargetSelectorFor(url);
+    if (targetSelector) {
+      options.headers['x-target-selector'] = targetSelector;
+    }
     if (apiKey) options.headers['Authorization'] = `Bearer ${apiKey}`;
     https.get(jinaUrl, options, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -195,6 +216,18 @@ function readJinaResponse(res, resolve, reject, label = 'Jina') {
 
 // ── frontmatter：注入 source/url（readboard MarkdownRenderer 会折叠显示）──
 const TEXT_FRONTMATTER_KEYS = new Set(['title', 'description', 'summary', 'excerpt', 'author', 'authors', 'note']);
+
+// 剥掉 Jina 正文里的广告位/订阅引导残留（NYT 等付费墙站点文内嵌广告 + 结尾订阅提示）
+function cleanJinaBodyNoise(text) {
+  return text
+    // 「Advertisement」「SKIP ADVERTISEMENT」独立成段的广告位标记
+    .replace(/\n\s*Advertisement\s*\n/gi, '\n')
+    .replace(/\n\s*SKIP ADVERTISEMENT\s*\n/gi, '\n')
+    // 结尾订阅引导（NYT「Subscribe to ... to read as many articles as you like.」）
+    .replace(/\n\s*Subscribe to [^\n]*read as many articles as you like\.?\s*$/i, '\n')
+    // 压缩多余空行
+    .replace(/\n{3,}/g, '\n\n');
+}
 
 function isQuoted(v) { return (v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")); }
 function quoteYamlValue(v) { return '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'; }
@@ -296,7 +329,11 @@ async function fetchMarkdownWithEngine(dirtyUrl) {
     }
   }
 
-  const { frontmatter, body } = splitFrontmatter(markdown);
+  let { frontmatter, body } = splitFrontmatter(markdown);
+  // Jina 拿到的正文剥广告位/订阅引导残留（NYT 等付费墙站点）
+  if (engine === 'jina_free' || engine === 'jina_pro') {
+    body = cleanJinaBodyNoise(body);
+  }
   frontmatter.source = url;
   if (!frontmatter.url) frontmatter.url = url;
   // 注入真实抓取引擎——Swift 侧解析此字段记录 fetch_engine（识别哪些源在烧 Jina token）
