@@ -543,6 +543,18 @@ struct BilingualBodyView: View {
             result.append((currentOrig.trimmingCharacters(in: .whitespacesAndNewlines),
                            currentTrans.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
+        // 纯译文格式（无 ||）：原文用 original 参数分段，译文用 translated 整段
+        // 解决纯译文被当原文显示两次的问题（original 显示译文 + translated 空）
+        if result.count == 1, result[0].1.isEmpty {
+            let origParas = splitParagraphs(original)
+            let transParas = splitParagraphs(translated)
+            result = []
+            for i in 0..<max(origParas.count, transParas.count) {
+                let o = i < origParas.count ? origParas[i] : ""
+                let t = i < transParas.count ? transParas[i] : ""
+                if !o.isEmpty || !t.isEmpty { result.append((o, t)) }
+            }
+        }
         return result
     }
 
