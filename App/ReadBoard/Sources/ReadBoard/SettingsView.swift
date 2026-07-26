@@ -193,6 +193,7 @@ public struct AILLMPane: View {
     @State private var jinaApiKey = UserDefaults.standard.string(forKey: "jina.apiKey") ?? ""
     @State private var jinaTesting = false
     @State private var jinaTestResult: String? = nil
+    @State private var jinaProEnabled = UserDefaults.standard.bool(forKey: "jina.pro")
 
     public var body: some View {
         Form {
@@ -205,13 +206,20 @@ public struct AILLMPane: View {
             }
 
             Section("全文提取服务") {
-                Text("defuddle 本地提取失败时，自动 fallback 到 Jina Reader 云端渲染。API key 可选——免费档 20 RPM，付费解锁高反爬域名（Investing.com、NYT 等）。")
+                Text("defuddle 本地提取失败时，自动 fallback 到 Jina Reader 云端渲染。免费档 20 RPM；Pro 解锁高反爬域名（Investing.com、NYT 等）+ 更高限额。")
                     .font(.caption).foregroundStyle(Color.rbText3)
-                SecureField("Jina API Key（可选）", text: $jinaApiKey)
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: jinaApiKey) { _, v in
-                        UserDefaults.standard.set(v, forKey: "jina.apiKey")
-                    }
+                Toggle("Jina Pro（付费）", isOn: Binding(
+                    get: { UserDefaults.standard.bool(forKey: "jina.pro") },
+                    set: { UserDefaults.standard.set($0, forKey: "jina.pro") }
+                ))
+                .tint(Color.rbAccent)
+                if jinaProEnabled {
+                    SecureField("Jina API Key", text: $jinaApiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: jinaApiKey) { _, v in
+                            UserDefaults.standard.set(v, forKey: "jina.apiKey")
+                        }
+                }
                 HStack {
                     Button("测试 Jina") {
                         testJina()
