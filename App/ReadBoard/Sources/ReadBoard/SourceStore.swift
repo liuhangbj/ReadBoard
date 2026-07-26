@@ -48,6 +48,10 @@ public struct FeedSource: Identifiable, Hashable {
         return m
     }
 
+    /// 是否「关闭全文获取/显示摘要」——fetch_mode == summary。
+    /// 统一语义：summary = 不抓全文只留 feed 摘要（文章抓不到兜底 / 播客显示摘要，本质相同）。
+    var isFetchOff: Bool { fetchMode == .summary }
+
     /// 是否自动检测的（config.fetch_mode_auto）
     var fetchModeAuto: Bool {
         guard let data = config.data(using: .utf8),
@@ -261,7 +265,9 @@ public final class SourceStore: ObservableObject {
             obj["fetch_mode"] = detected.rawValue
             obj["fetch_mode_auto"] = true   // 标记是自动检测的
         } else if mode == "off" {
-            obj["fetch_mode"] = "off"
+            // 关闭全文获取 = summary 兜底（不抓全文，只留 feed 摘要）。
+            // 统一用 summary 表达「关闭」——播客的显示摘要和文章的抓不到兜底本质相同
+            obj["fetch_mode"] = "summary"
             obj["fetch_mode_auto"] = false
         }
         if let data = try? JSONSerialization.data(withJSONObject: obj),
@@ -384,12 +390,12 @@ public final class SourceStore: ObservableObject {
         }
     }
 
-    /// 文件夹级批量设为「关闭」（fetch_mode=off, auto=false）
+    /// 文件夹级批量设为「仅摘要」（关闭全文获取=summary 兜底, auto=false）
     func setFolderFetchModeOff(folderId: Int64) {
         for src in sources(inFolder: folderId) {
             let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [src.id]) ?? "{}"
             var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
-            obj["fetch_mode"] = "off"
+            obj["fetch_mode"] = "summary"
             obj["fetch_mode_auto"] = false
             if let data = try? JSONSerialization.data(withJSONObject: obj),
                let str = String(data: data, encoding: .utf8) {

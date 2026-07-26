@@ -464,10 +464,10 @@ public struct SourceRow: View {
             Button {
                 Task { await store.setFetchMode(id: src.id, mode: "off") }
             } label: {
-                if !src.fetchModeAuto && src.fetchMode == .summary {
-                    Label("关闭", systemImage: "checkmark")
+                if src.isFetchOff {
+                    Label("仅摘要", systemImage: "checkmark")
                 } else {
-                    Text("关闭")
+                    Text("仅摘要")
                 }
             }
         } label: {

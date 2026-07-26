@@ -580,7 +580,7 @@ public struct ContentView: View {
             Button {
                 Task { await sourceStore.setFetchMode(id: src.id, mode: "off") }
             } label: {
-                Label("关闭", systemImage: !src.fetchModeAuto && src.fetchMode == .summary ? "checkmark" : "")
+                Label("仅摘要", systemImage: src.isFetchOff ? "checkmark" : "")
             }
         }
         Menu("抓取频率：\(src.fetchIntervalMin < 60 ? "\(src.fetchIntervalMin)分钟" : "\(src.fetchIntervalMin/60)小时")") {
@@ -613,8 +613,8 @@ public struct ContentView: View {
             guard let first = modes.first, modes.allSatisfy({ $0 == first }) else { return nil }
             return ("auto", first)
         }
-        // 全部关闭（!auto && fetchMode==.summary，对应 fetch_mode=off 落到 summary 默认）
-        if srcs.allSatisfy({ !$0.fetchModeAuto && $0.fetchMode == .summary }) {
+        // 全部仅摘要（fetchMode==.summary——关闭全文获取=summary 兜底，播客显示摘要同此）
+        if srcs.allSatisfy({ $0.isFetchOff }) {
             return ("off", nil)
         }
         return nil
@@ -638,11 +638,11 @@ public struct ContentView: View {
             // 重新检测（始终提供，对全组批量探测）
             Button("重新检测") { Task { await sourceStore.redetectFolderFetchMode(folderId: fid) } }
             Divider()
-            // 关闭（打钩：全组都是关闭）
+            // 仅摘要（关闭全文获取=summary 兜底；打钩：全组都是 summary）
             Button {
                 sourceStore.setFolderFetchModeOff(folderId: fid)
             } label: {
-                Label("关闭", systemImage: uniformMode?.kind == "off" ? "checkmark" : "")
+                Label("仅摘要", systemImage: uniformMode?.kind == "off" ? "checkmark" : "")
             }
             Divider()
             // 不一致时：都不打钩，显示「按订阅源设置」并打钩
@@ -673,7 +673,7 @@ public struct ContentView: View {
         guard let uniform else { return "按订阅源设置" }
         switch uniform.kind {
         case "auto": return uniform.mode != nil ? "自动（\(uniform.mode!.displayName)）" : "自动"
-        case "off": return "关闭"
+        case "off": return "仅摘要"
         default: return "按订阅源设置"
         }
     }
@@ -1605,7 +1605,9 @@ public struct ReadingView: View {
 
                     // ── LLM 操作条（胶囊按钮组 + 状态提示，精致排版）──
                     HStack(spacing: 8) {
-                        if isMediaItem, item.llmTranslatedMd == nil, policy.autoTranscribe {
+                        // 转录按钮：媒体项始终显示——单篇手动操作，不受自动开关限制；
+                        // 已有转录稿也显示（可重新转录）
+                        if isMediaItem {
                             CapsuleButton(title: "转录", icon: "waveform", disabled: busy) { runTranscribe() }
                         }
                         if !pipeline.isAvailable {
@@ -1621,12 +1623,9 @@ public struct ReadingView: View {
                             if item.llmSummary == nil, policy.autoSummarize {
                                 CapsuleButton(title: "摘要", icon: "text.quote", disabled: busy) { runSummarize() }
                             }
-                            // 翻译：非媒体项翻正文；媒体项翻简介（无简介译文时显示）
-                            if !isMediaItem, item.llmTranslatedMd == nil, policy.autoTranslate {
-                                CapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
-                            } else if isMediaItem, (item.excerptTranslated ?? "").isEmpty, policy.autoTranslate {
-                                CapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
-                            }
+                            // 翻译按钮：媒体/非媒体都始终显示——单篇手动操作，不受自动开关限制；
+                            // 已有译文也显示（可重新翻译）
+                            CapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
                             if busy {
                                 ProgressView().scaleEffect(0.6).frame(width: 16, height: 16)
                             }
