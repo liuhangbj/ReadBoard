@@ -414,17 +414,22 @@ public final class LLMPipeline: @unchecked Sendable {
     /// 翻译播客 feed 简介（content_html 剥标签）→ 写 llm_excerpt_translated（播客「译文」标签）。
     /// 与转录对照（llm_translated_md）分开存——简介译文和转录对照是两个独立内容。
     @discardableResult
-    func translateExcerpt(contentId: Int64, contentHtml: String) async -> Bool {
+    func translateExcerpt(contentId: Int64, title: String, contentHtml: String) async -> Bool {
         guard isAvailable else { return false }
         // 剥标签成纯文本
         var text = contentHtml.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
         text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return false }
+        // 输出格式：第一行中文标题，空行后中文简介译文——chineseTitle 从第一行取，「译文」标签显示全文
         let prompt = """
-        你是一位专业的翻译。请将以下播客/视频简介完整翻译成中文，要求：
+        你是一位专业的翻译。请将以下播客/视频的标题和简介翻译成中文，要求：
+        - 第一行只输出中文标题（不要"标题："前缀，不要原文标题）
+        - 空一行，然后输出简介的中文译文
         - 语言流畅自然，符合中文表达习惯，不是逐字直译
-        - 直接输出译文，不要任何解释或"以下是翻译"之类的话
+        - 不要任何解释或"以下是翻译"之类的话
+
+        标题：\(title)
 
         简介：
         \(text)

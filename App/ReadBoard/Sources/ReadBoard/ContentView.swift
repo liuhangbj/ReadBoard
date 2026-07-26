@@ -506,7 +506,7 @@ public struct ContentView: View {
             case "translate":
                 // 媒体项翻简介（content_html → llm_excerpt_translated）；非媒体项翻正文
                 if item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil {
-                    ok = await pipeline.translateExcerpt(contentId: item.id, contentHtml: item.contentHtml ?? item.excerpt ?? "")
+                    ok = await pipeline.translateExcerpt(contentId: item.id, title: item.title, contentHtml: item.contentHtml ?? item.excerpt ?? "")
                 } else {
                     ok = await pipeline.translate(contentId: item.id, title: item.title, body: body)
                 }
@@ -1350,7 +1350,8 @@ public struct ReadingView: View {
     /// 当前内容的有效管线开关（源 OR 文件夹）
     @State private var policy = PipelinePolicy()
     /// 媒体项（播客/视频）正文标签：0=原文(简介) / 1=译文(简介翻译) / 2=转录(中英对照)
-    @State private var mediaTab = 0
+    /// @AppStorage 持久化——记住上次读的标签，切文章不重置（和 viewMode 同模式）
+    @AppStorage("reading.mediaTab") private var mediaTab = 0
     /// 版面设置（@AppStorage 直绑——设置面板/阅读器设置页改这里视图自动刷新，
     /// 不再像 @State 静态读 UserDefaults 只在创建读一次。和 uiFontScale 同模式）
     @AppStorage("reading.fontSize") private var fontSize: Double = 16
@@ -1455,9 +1456,13 @@ public struct ReadingView: View {
                             selection: $mediaTab
                         )
                     } else {
+                        // 无转录稿只两段；mediaTab 持久化值可能=2（上次转录），钳制到 0 防越界
                         RBSegmented(
                             items: [(0, "原文"), (1, "译文")],
-                            selection: $mediaTab
+                            selection: Binding(
+                                get: { min(mediaTab, 1) },
+                                set: { mediaTab = $0 }
+                            )
                         )
                     }
                 } else if item.llmTranslatedMd != nil {
@@ -1863,10 +1868,13 @@ public struct ReadingView: View {
         return text.isEmpty ? "(无简介)" : text
     }
 
-    /// 媒体项正文（按 mediaTab 渲染对应内容）
+    /// 媒体项正文（按 mediaTab 渲染对应内容；无转录稿时 mediaTab=2 钳制回原文）
     @ViewBuilder
     private var mediaBodyView: some View {
-        switch mediaTab {
+        // 无转录对照稿时，mediaTab=2（上次记住的转录）无内容，钳制回原文
+        let hasTranscript = !(item.llmTranslatedMd ?? "").isEmpty
+        let tab = (mediaTab == 2 && !hasTranscript) ? 0 : mediaTab
+        switch tab {
         case 0:
             // 原文：feed 简介（剥标签纯文本）
             Text(excerptPlainText)
@@ -1901,10 +1909,11 @@ public struct ReadingView: View {
         }
     }
 
-    /// 中文标题（有译文时从 translatedHead 取第一个非空行，用于显示在英文标题下方）
+    /// 中文标题（非媒体项从正文译文 translatedHead 取；媒体项从简介译文 excerptTranslated 第一行取）
     private var chineseTitle: String? {
-        guard let head = item.translatedHead, !head.isEmpty else { return nil }
-        // 跳过空行，取第一个非空行（llm_translated_md 开头常是空行，第二行才是标题）
+        let head = isMediaItem ? (item.excerptTranslated ?? "") : (item.translatedHead ?? "")
+        guard !head.isEmpty else { return nil }
+        // 跳过空行，取第一个非空行（译文开头常是空行，第二行才是标题）
         let firstNonEmpty = head.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty } ?? ""
@@ -2012,7 +2021,7 @@ public struct ReadingView: View {
             // 非媒体项：翻译正文 → llm_translated_md（译文/原文切换）
             let ok: Bool
             if isMediaItem {
-                ok = await pipeline.translateExcerpt(contentId: cid, contentHtml: item.contentHtml ?? item.excerpt ?? "")
+                ok = await pipeline.translateExcerpt(contentId: cid, title: item.title, contentHtml: item.contentHtml ?? item.excerpt ?? "")
             } else {
                 ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
             }
