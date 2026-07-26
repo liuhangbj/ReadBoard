@@ -603,7 +603,7 @@ public struct ExportRuleEditor: View {
                             .font(.caption)
                             .foregroundStyle(Color.rbText3)
                         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                            ForEach(["title", "source", "author", "url", "score", "published", "archived"], id: \.self) { field in
+                            ForEach(["title", "source", "author", "url", "description", "word_count", "score", "level", "published"], id: \.self) { field in
                                 Toggle(field, isOn: Binding(
                                     get: { selectedFrontmatterFields.contains(field) },
                                     set: { on in

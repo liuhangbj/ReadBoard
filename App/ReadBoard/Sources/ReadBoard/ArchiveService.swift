@@ -230,9 +230,19 @@ public final class ArchiveService: @unchecked Sendable {
         md += "source: \"\(yaml(source))\"\n"
         if !author.isEmpty { md += "author: \"\(yaml(author))\"\n" }
         md += "url: \"\(yaml(url))\"\n"
-        if let s = score, !s.isEmpty { md += "score: \(s)\n" }
+        if !summary.isEmpty { md += "description: \"\(yaml(summary))\"\n" }
+        // 字数统计（正文长度，中英文混算）
+        let wordCount = body.count
+        md += "word_count: \(wordCount)\n"
+        if let s = score, !s.isEmpty {
+            md += "score: \(s)\n"
+            // 评分等级：A(≥80) / B(≥60) / C(<60)
+            let scoreInt = Int(s) ?? 0
+            let level = scoreInt >= 80 ? "A" : scoreInt >= 60 ? "B" : "C"
+            md += "level: \(level)\n"
+        }
         md += "published: \"\(yaml(published))\"\n"
-        md += "archived: true\n---\n\n"
+        md += "---\n\n"
 
         md += "# \(title)\n\n"
         if !summary.isEmpty { md += "> \(summary)\n\n" }
