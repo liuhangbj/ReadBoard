@@ -95,7 +95,7 @@ public struct ContentItem: Identifiable, Hashable {
 
     /// 填充正文的副本（点开阅读时 fetchContentBody 补大字段）
     /// 保留轻量字段（imageUrl/hasTranslation/isMedia/translatedHead/hasFulltext）——否则点开文章后中栏/右栏中文标题丢失
-    func withBody(contentMd: String?, llmTranslatedMd: String?, audioUrl: String?, contentHtml: String? = nil, excerptTranslated: String? = nil) -> ContentItem {
+    func withBody(contentMd: String?, llmTranslatedMd: String?, audioUrl: String?, contentHtml: String? = nil, excerptTranslated: String? = nil, titleTranslated: String? = nil) -> ContentItem {
         var copy = ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
                     url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
                     contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
@@ -105,7 +105,7 @@ public struct ContentItem: Identifiable, Hashable {
         copy.hasTranslation = hasTranslation
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
-        copy.titleTranslated = titleTranslated
+        copy.titleTranslated = titleTranslated ?? self.titleTranslated
         copy.hasFulltext = hasFulltext
         copy.contentHtml = contentHtml ?? self.contentHtml
         copy.excerptTranslated = excerptTranslated ?? self.excerptTranslated
@@ -745,12 +745,12 @@ public final class Database: @unchecked Sendable {
         return PipelinePolicy.from(configJson: row["src_cfg"] ?? "{}")
     }
 
-    /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl, contentHtml, excerptTranslated)
-    func fetchContentBody(id: Int64) -> (contentMd: String?, llmTranslatedMd: String?, audioUrl: String?, contentHtml: String?, excerptTranslated: String?)? {
+    /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl, contentHtml, excerptTranslated, titleTranslated)
+    func fetchContentBody(id: Int64) -> (contentMd: String?, llmTranslatedMd: String?, audioUrl: String?, contentHtml: String?, excerptTranslated: String?, titleTranslated: String?)? {
         guard open() else { return nil }
         var stmt: OpaquePointer?
-        var result: (String?, String?, String?, String?, String?)?
-        if sqlite3_prepare_v2(db, "SELECT content_md, llm_translated_md, meta, content_html, llm_excerpt_translated FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
+        var result: (String?, String?, String?, String?, String?, String?)?
+        if sqlite3_prepare_v2(db, "SELECT content_md, llm_translated_md, meta, content_html, llm_excerpt_translated, llm_title_translated FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_int64(stmt, 1, id)
             if sqlite3_step(stmt) == SQLITE_ROW {
                 func text(_ i: Int32) -> String? {
@@ -762,7 +762,7 @@ public final class Database: @unchecked Sendable {
                    let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     audioUrl = (obj["audio_url"] as? String) ?? (obj["video_url"] as? String)
                 }
-                result = (text(0), text(1), audioUrl, text(3), text(4))
+                result = (text(0), text(1), audioUrl, text(3), text(4), text(5))
             }
         }
         sqlite3_finalize(stmt)

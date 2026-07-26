@@ -189,7 +189,7 @@ public final class ContentViewModel: ObservableObject {
                 guard let self, self.selectedItem?.id == currentId else { return }
                 self.selectedItem = self.selectedItem?.withBody(
                     contentMd: body.contentMd, llmTranslatedMd: body.llmTranslatedMd, audioUrl: body.audioUrl,
-                    contentHtml: body.contentHtml, excerptTranslated: body.excerptTranslated)
+                    contentHtml: body.contentHtml, excerptTranslated: body.excerptTranslated, titleTranslated: body.titleTranslated)
             }
         }
     }
