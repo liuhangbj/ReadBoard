@@ -48,6 +48,13 @@ public struct FeedSource: Identifiable, Hashable {
         return m
     }
 
+    /// 是否自动检测的（config.fetch_mode_auto）
+    var fetchModeAuto: Bool {
+        guard let data = config.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return obj["fetch_mode_auto"] as? Bool ?? false
+    }
+
     /// 抓取间隔（分钟，config.fetch_interval_min，默认 15）
     var fetchIntervalMin: Int {
         guard let data = config.data(using: .utf8),
@@ -241,13 +248,21 @@ public final class SourceStore: ObservableObject {
         return ok
     }
 
-    /// 手动设置某源的全文模式（GUI 覆盖）。打 fetch_mode_manual 标记——
-    /// reprobe 见此标记跳过不覆盖用户手动设置（修 P1-8）。
-    func setFetchMode(id: Int64, mode: FetchMode) {
+    /// 设置某源的全文获取模式——auto=自动检测（四级优先级），off=关闭全文
+    /// 自动检测确定后记录 fetch_mode（后续固定用该模式）
+    func setFetchMode(id: Int64, mode: String) async {
         let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
         var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
-        obj["fetch_mode"] = mode.rawValue
-        obj["fetch_mode_manual"] = true   // 用户手动设的，reprobe 别动
+        if mode == "auto" {
+            // 自动检测——跑 probeMode 确定最高优先级模式
+            guard let identifier = db.scalarString("SELECT identifier FROM content_source WHERE id = ?", params: [id]) else { return }
+            let detected = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
+            obj["fetch_mode"] = detected.rawValue
+            obj["fetch_mode_auto"] = true   // 标记是自动检测的
+        } else if mode == "off" {
+            obj["fetch_mode"] = "off"
+            obj["fetch_mode_auto"] = false
+        }
         if let data = try? JSONSerialization.data(withJSONObject: obj),
            let str = String(data: data, encoding: .utf8) {
             db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id])
@@ -255,21 +270,14 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
-    /// 重新探测某源的全文模式并写回。
-    /// 修 P1-8：用户手动设过（fetch_mode_manual）的源跳过不覆盖——
-    /// 否则用户改成 defuddle，某次 reprobe 又被打回 summary，全文抓取静默退化。
-    func reprobeFetchMode(id: Int64) async {
-        let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
-        if let obj = try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any],
-           obj["fetch_mode_manual"] as? Bool == true {
-            return   // 用户手动设过，不覆盖
-        }
+    /// 重新检测某源的全文模式（强制重跑 probeMode）
+    func redetectFetchMode(id: Int64) async {
         guard let identifier = db.scalarString("SELECT identifier FROM content_source WHERE id = ?", params: [id]) else { return }
-        let mode = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
-        // reprobe 结果不算手动——直接写 config 不打 manual 标记
-        let cur = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
-        var obj = (try? JSONSerialization.jsonObject(with: Data(cur.utf8)) as? [String: Any]) ?? [:]
-        obj["fetch_mode"] = mode.rawValue
+        let detected = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
+        let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
+        var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+        obj["fetch_mode"] = detected.rawValue
+        obj["fetch_mode_auto"] = true
         if let data = try? JSONSerialization.data(withJSONObject: obj),
            let str = String(data: data, encoding: .utf8) {
             db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id])
@@ -277,11 +285,10 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
-    /// 批量探测多个源的全文模式（OPML 导入后后台调用）
-    /// 逐个 probeMode 并写回 config，不覆盖用户手动设置
+    /// 批量重新检测多个源的全文模式（OPML 导入后后台调用）
     func probeFetchModes(ids: [Int64]) async {
         for id in ids {
-            await reprobeFetchMode(id: id)
+            await redetectFetchMode(id: id)
         }
     }
 

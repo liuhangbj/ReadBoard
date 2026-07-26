@@ -11,14 +11,16 @@ import Foundation
 public enum FetchMode: String, CaseIterable, Sendable {
     case feedFull = "feed_full"
     case defuddle = "defuddle"
-    case cdp = "cdp"
+    case jinaFree = "jina_free"
+    case jinaPro = "jina_pro"
     case summary = "summary"
 
     var displayName: String {
         switch self {
         case .feedFull: return "feed 自带全文"
-        case .defuddle: return "defuddle 直连"
-        case .cdp: return "浏览器渲染 (CDP)"
+        case .defuddle: return "defuddle 本地"
+        case .jinaFree: return "Jina Free"
+        case .jinaPro: return "Jina Pro"
         case .summary: return "仅摘要"
         }
     }
@@ -49,6 +51,8 @@ public final class FullTextFetcher: @unchecked Sendable {
     ///      （微信/jiqizhixin 走 CDP 浏览器，虎嗅走预处理，其余 defuddle 直连），
     ///      抓到 → 按域名记 defuddle 或 cdp（语义标记，实际路由 clip_core 定）
     ///   3. 都抓不到 → summary 兜底（留 feed 摘要）
+    /// 自动检测该源最高优先级的全文获取模式——确定后记录，后续固定用该模式
+    /// 优先级：feed 自带全文 → defuddle → Jina Free → Jina Pro → feed 摘要
     func probeMode(feedUrl: String) async -> FetchMode {
         guard let feed = try? await FeedFetcher.fetch(urlString: feedUrl) else {
             return .summary
@@ -60,24 +64,34 @@ public final class FullTextFetcher: @unchecked Sendable {
         let feedLongEnough = samples.contains { $0.html.count >= fullTextMinChars }
         if feedLongEnough { return .feedFull }
 
-        // 第 2 级：抓原页（clip_core 按域名自动路由 defuddle/CDP/预处理）。
-        // 能抓到就按域名标记 mode——cdp 域名（微信/jiqizhixin）记 .cdp，其余记 .defuddle。
+        // 第 2 级：defuddle 本地提取
         for entry in samples where !entry.url.isEmpty {
             if let md = runCLI(mode: "url", input: entry.url), md.count >= fullTextMinChars {
-                return Self.needsBrowser(entry.url) ? .cdp : .defuddle
+                return .defuddle
             }
         }
 
-        // 第 3 级：兜底——feed 摘要
-        return .summary
-    }
+        // 第 3 级：Jina Free（开关控制）
+        if UserDefaults.standard.bool(forKey: "jina.free") {
+            for entry in samples where !entry.url.isEmpty {
+                if let md = runJina(url: entry.url, usePro: false), md.count >= fullTextMinChars {
+                    return .jinaFree
+                }
+            }
+        }
 
-    /// 与 clip_core.needsBrowser 保持一致的域名判定
-    static func needsBrowser(_ urlString: String) -> Bool {
-        guard let host = URL(string: urlString)?.host?.lowercased() else { return false }
-        return host == "mp.weixin.qq.com" || host.hasSuffix(".mp.weixin.qq.com")
-            || host == "cubox.pro" || host.hasSuffix(".cubox.pro")
-            || host == "jiqizhixin.com" || host.hasSuffix(".jiqizhixin.com")
+        // 第 4 级：Jina Pro（开关控制 + 有 key）
+        if UserDefaults.standard.bool(forKey: "jina.pro"),
+           let key = UserDefaults.standard.string(forKey: "jina.apiKey"), !key.isEmpty {
+            for entry in samples where !entry.url.isEmpty {
+                if let md = runJina(url: entry.url, usePro: true), md.count >= fullTextMinChars {
+                    return .jinaPro
+                }
+            }
+        }
+
+        // 兜底：feed 摘要
+        return .summary
     }
 
     // MARK: 执行
@@ -101,8 +115,26 @@ public final class FullTextFetcher: @unchecked Sendable {
             storeMd(contentId: contentId, md: md, engine: mode.rawValue)
             return true
 
-        case .defuddle, .cdp:
+        case .defuddle:
             guard !url.isEmpty, let md = runCLI(mode: "url", input: url), md.count >= 40 else {
+                markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
+                return false
+            }
+            storeMd(contentId: contentId, md: md, engine: mode.rawValue)
+            return true
+
+        case .jinaFree:
+            // Jina Free——直接调 Jina Reader（不经过 clip_core 的 fallback 链）
+            guard !url.isEmpty, let md = runJina(url: url, usePro: false), md.count >= 40 else {
+                markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
+                return false
+            }
+            storeMd(contentId: contentId, md: md, engine: mode.rawValue)
+            return true
+
+        case .jinaPro:
+            // Jina Pro——直接调 Jina Reader（付费通道）
+            guard !url.isEmpty, let md = runJina(url: url, usePro: true), md.count >= 40 else {
                 markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
                 return false
             }
@@ -265,6 +297,23 @@ public final class FullTextFetcher: @unchecked Sendable {
         }
         return String(data: outData, encoding: .utf8)
     }
+
+    /// 直接调 Jina Reader（不经过 clip_core 的 fallback 链）——jinaFree/jinaPro 模式用
+    private func runJina(url: String, usePro: Bool) -> String? {
+        let jinaUrl = "https://r.jina.ai/" + url
+        var request = URLRequest(url: URL(string: jinaUrl)!)
+        request.setValue("text/plain", forHTTPHeaderField: "Accept")
+        if usePro, let key = UserDefaults.standard.string(forKey: "jina.apiKey"), !key.isEmpty {
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        request.timeoutInterval = 45
+        guard let (data, response) = try? URLSession.shared.syncDataTask(with: request),
+              let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200,
+              let text = String(data: data, encoding: .utf8), text.count >= 50 else {
+            return nil
+        }
+        return text
+    }
 }
 
 // MARK: - 批量重抓全文（右键菜单调用）
@@ -318,5 +367,26 @@ extension FullTextFetcher {
         for sid in sourceIds {
             await refetchSourceFulltext(sourceId: sid)
         }
+    }
+}
+
+// MARK: - URLSession 同步请求扩展（Jina 用）
+
+extension URLSession {
+    func syncDataTask(with request: URLRequest) throws -> (Data, URLResponse)? {
+        var result: (Data, URLResponse)?
+        var error: Error?
+        let semaphore = DispatchSemaphore(value: 0)
+        let task = dataTask(with: request) { data, response, err in
+            if let data = data, let response = response {
+                result = (data, response)
+            }
+            error = err
+            semaphore.signal()
+        }
+        task.resume()
+        semaphore.wait()
+        if let error = error { throw error }
+        return result
     }
 }

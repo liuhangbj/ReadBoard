@@ -194,6 +194,8 @@ public struct AILLMPane: View {
     @State private var jinaTesting = false
     @State private var jinaTestResult: String? = nil
     @State private var jinaProEnabled = UserDefaults.standard.bool(forKey: "jina.pro")
+    @State private var showDefuddleAlert = false
+    @State private var defuddleMissing: [String] = []
 
     public var body: some View {
         Form {
@@ -208,6 +210,18 @@ public struct AILLMPane: View {
             Section("全文提取服务") {
                 Text("defuddle 本地提取失败时，自动 fallback 到 Jina Reader 云端渲染。先走免费档（20 RPM），失败再走付费档。注册送 1000 万 token，按量充值。")
                     .font(.caption).foregroundStyle(Color.rbText3)
+                // defuddle 开关——打开时检测依赖，缺失弹窗（是/自定义/否）
+                Toggle("defuddle 本地提取", isOn: Binding(
+                    get: { UserDefaults.standard.bool(forKey: "defuddle.enabled") },
+                    set: { newValue in
+                        if newValue {
+                            checkDefuddleDeps()
+                        } else {
+                            UserDefaults.standard.set(false, forKey: "defuddle.enabled")
+                        }
+                    }
+                ))
+                .tint(Color.rbAccent)
                 Toggle("Jina Free（免费档 20 RPM）", isOn: Binding(
                     get: { UserDefaults.standard.bool(forKey: "jina.free") },
                     set: { UserDefaults.standard.set($0, forKey: "jina.free") }
@@ -261,6 +275,27 @@ public struct AILLMPane: View {
                     .foregroundStyle(Color.rbText)
             }
         }
+        .alert("defuddle 依赖缺失", isPresented: $showDefuddleAlert) {
+            Button("自动下载") {
+                installDefuddle()
+            }
+            Button("自定义路径") {
+                // 打开文件浏览选 defuddle-cli 路径
+                let panel = NSOpenPanel()
+                panel.canChooseFiles = false
+                panel.canChooseDirectories = true
+                panel.message = "选择 defuddle-cli 目录"
+                if panel.runModal() == .OK, let url = panel.url {
+                    UserDefaults.standard.set(url.path, forKey: "defuddle.customPath")
+                    UserDefaults.standard.set(true, forKey: "defuddle.enabled")
+                }
+            }
+            Button("关闭", role: .cancel) {
+                UserDefaults.standard.set(false, forKey: "defuddle.enabled")
+            }
+        } message: {
+            Text("缺少：\(defuddleMissing.joined(separator: "、"))\n\n「自动下载」运行 npm install；「自定义路径」选择已有 defuddle-cli 目录；「关闭」不使用 defuddle。")
+        }
     }
 
     /// 测试 Jina Reader 连通性
@@ -291,6 +326,41 @@ public struct AILLMPane: View {
                 }
             }
         }
+    }
+
+    /// 检测 defuddle 依赖（node + defuddle-cli npm 包）
+    private func checkDefuddleDeps() {
+        var missing: [String] = []
+        // node
+        let nodePath = DependencyPaths.resolve(.node) ?? ""
+        if !FileManager.default.fileExists(atPath: nodePath) {
+            missing.append("node")
+        }
+        // defuddle-cli（npm 包）
+        let defuddlePath = "/Users/hangbits/tools/defuddle-cli/node_modules/defuddle/dist/cli.js"
+        if !FileManager.default.fileExists(atPath: defuddlePath) {
+            missing.append("defuddle-cli")
+        }
+        if missing.isEmpty {
+            // 依赖齐全——直接开启
+            UserDefaults.standard.set(true, forKey: "defuddle.enabled")
+        } else {
+            defuddleMissing = missing
+            showDefuddleAlert = true
+        }
+    }
+
+    /// 自动安装 defuddle 依赖（npm install）
+    private func installDefuddle() {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = ["-c", "cd /Users/hangbits/tools/defuddle-cli && npm install"]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+        // 安装完重新检测
+        checkDefuddleDeps()
     }
 }
 

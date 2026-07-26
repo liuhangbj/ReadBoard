@@ -565,21 +565,20 @@ public struct ContentView: View {
     /// 抓取设置菜单（fetch_mode + 频率）
     @ViewBuilder
     private func fetchSettingsMenu(src: FeedSource) -> some View {
-        Menu("全文模式：\(src.fetchMode.displayName)") {
-            ForEach(FetchMode.allCases, id: \.rawValue) { m in
-                Button {
-                    let changed = src.fetchMode != m
-                    sourceStore.setFetchMode(id: src.id, mode: m)
-                    // 切换全文模式后弹「如何处理历史数据」（重抓全文或只新增）
-                    if changed {
-                        pendingBackfill = ("source", src.id, src.name, m.displayName, "fulltext")
-                    }
-                } label: {
-                    Label(m.displayName, systemImage: src.fetchMode == m ? "checkmark" : "")
-                }
+        Menu("获取全文：\(src.fetchModeAuto ? "自动（\(src.fetchMode.displayName)）" : src.fetchMode.displayName)") {
+            Button {
+                Task { await sourceStore.setFetchMode(id: src.id, mode: "auto") }
+            } label: {
+                Label("自动（\(src.fetchMode.displayName)）",
+                      systemImage: src.fetchModeAuto ? "checkmark" : "")
             }
+            Button("重新检测") { Task { await sourceStore.redetectFetchMode(id: src.id) } }
             Divider()
-            Button("重新探测") { Task { await sourceStore.reprobeFetchMode(id: src.id) } }
+            Button {
+                Task { await sourceStore.setFetchMode(id: src.id, mode: "off") }
+            } label: {
+                Label("关闭", systemImage: !src.fetchModeAuto && src.fetchMode == .summary ? "checkmark" : "")
+            }
         }
         Menu("抓取频率：\(src.fetchIntervalMin < 60 ? "\(src.fetchIntervalMin)分钟" : "\(src.fetchIntervalMin/60)小时")") {
             ForEach([5, 15, 30, 60, 120, 360, 720], id: \.self) { m in

@@ -426,21 +426,31 @@ public struct SourceRow: View {
         .padding(.vertical, 6)
     }
 
-    /// 全文模式选择菜单（仅文章类源）
+    /// 全文模式选择菜单——自动（当前模式）/重新检测/关闭
     private var fetchModeMenu: some View {
         Menu {
-            ForEach(FetchMode.allCases, id: \.rawValue) { m in
-                Button {
-                    store.setFetchMode(id: src.id, mode: m)
-                } label: {
-                    if src.fetchMode == m { Label(m.displayName, systemImage: "checkmark") }
-                    else { Text(m.displayName) }
+            Button {
+                Task { await store.setFetchMode(id: src.id, mode: "auto") }
+            } label: {
+                if src.fetchModeAuto {
+                    Label("自动（\(src.fetchMode.displayName)）", systemImage: "checkmark")
+                } else {
+                    Text("自动")
                 }
             }
+            Button("重新检测") { Task { await store.redetectFetchMode(id: src.id) } }
             Divider()
-            Button("重新探测") { Task { await store.reprobeFetchMode(id: src.id) } }
+            Button {
+                Task { await store.setFetchMode(id: src.id, mode: "off") }
+            } label: {
+                if !src.fetchModeAuto && src.fetchMode == .summary {
+                    Label("关闭", systemImage: "checkmark")
+                } else {
+                    Text("关闭")
+                }
+            }
         } label: {
-            Text(src.fetchMode.displayName)
+            Text(src.fetchModeAuto ? "自动（\(src.fetchMode.displayName)）" : src.fetchMode.displayName)
                 .font(.caption)
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(fetchModeColor.opacity(0.10))
@@ -601,7 +611,8 @@ public struct SourceRow: View {
         switch src.fetchMode {
         case .feedFull: return .rbScoreHigh
         case .defuddle: return .rbAccent
-        case .cdp: return .rbScoreMid
+        case .jinaFree: return .rbScoreMid
+        case .jinaPro: return .rbScoreLow
         case .summary: return .rbScoreNone
         }
     }
