@@ -1545,6 +1545,7 @@ public struct ReadingView: View {
             policy = Database.shared.effectivePolicyFor(contentId: item.id)
             isStarred = item.starred
             isRead = item.isRead
+            loadContentMd()   // 按 id 查 content_md（列表查询不取，点开再查防闪烁）
         }
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(item: item)
@@ -1733,9 +1734,22 @@ public struct ReadingView: View {
     // MARK: - LLM 操作
 
     /// 评分/翻译用的正文：优先 markdown，退回 excerpt
+    /// 正文内容——@State 缓存，打开时按 id 查 content_md（列表查询不取 content_md，
+    /// selectedItem.contentMd 为 nil 导致 contentBody 用 excerpt 闪烁）
+    @State private var loadedContentMd: String? = nil
+
     private var contentBody: String {
+        if let md = loadedContentMd, !md.isEmpty { return md }
         if let md = item.contentMd, !md.isEmpty { return md }
         return item.excerpt ?? ""
+    }
+
+    /// 打开时按 id 查 content_md（列表查询不取大字段，点开再查）
+    private func loadContentMd() {
+        guard loadedContentMd == nil else { return }
+        if let body = Database.shared.fetchContentBody(id: item.id) {
+            loadedContentMd = body.contentMd
+        }
     }
 
     private func runFulltext() {
