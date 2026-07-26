@@ -1478,68 +1478,7 @@ public struct ReadingView: View {
 
                 Spacer()
 
-                // 全文 + 内容处理按钮（两字中文，直接做图标）——放最右侧格式按钮旁
-                Button { runFulltext() } label: {
-                    Text("全文")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.rbText2)
-                        .frame(width: 32, height: 24)
-                }
-                .buttonStyle(.quiet)
-                .help("获取全文")
-
-                Button { runScore() } label: {
-                    Text("评分")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.rbText2)
-                        .frame(width: 32, height: 24)
-                }
-                .buttonStyle(.quiet)
-                .help("AI 评分")
-
-                Button { runSummarize() } label: {
-                    Text("摘要")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.rbText2)
-                        .frame(width: 32, height: 24)
-                }
-                .buttonStyle(.quiet)
-                .help("AI 摘要")
-
-                // 翻译按钮：文章显示；播客/视频无转录稿时显示（翻译摘要），有转录稿隐藏
-                if item.ctype != "podcast" && item.ctype != "video" {
-                    Button { runTranslate() } label: {
-                        Text("翻译")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Color.rbText2)
-                            .frame(width: 32, height: 24)
-                    }
-                    .buttonStyle(.quiet)
-                    .help("AI 翻译")
-                } else if item.llmTranslatedMd == nil {
-                    // 播客/视频无转录稿——显示翻译（翻译摘要/简介）
-                    Button { runTranslate() } label: {
-                        Text("翻译")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Color.rbText2)
-                            .frame(width: 32, height: 24)
-                    }
-                    .buttonStyle(.quiet)
-                    .help("AI 翻译摘要")
-                }
-
-                if item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil {
-                    Button { runTranscribe() } label: {
-                        Text("转录")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Color.rbText2)
-                            .frame(width: 32, height: 24)
-                    }
-                    .buttonStyle(.quiet)
-                    .help("AI 转录")
-                }
-
-                // 版面设置（Aa 图标）
+                // 版面设置（Aa 图标）——右上角只留格式按钮；全文/评分/摘要/翻译/转录统一在标题栏下方胶囊按钮组
                 Button { showLayoutPopover = true } label: {
                     Image(systemName: "textformat")
                         .font(.system(size: 15, weight: .regular))
@@ -1597,9 +1536,12 @@ public struct ReadingView: View {
                     }
 
                     // ── LLM 操作条（胶囊按钮组 + 状态提示，精致排版）──
+                    // 这套是阅读器唯一的操作按钮组（右上角已只留格式）。
+                    // 所有按钮都是单篇手动操作/重操作，不受文件夹/订阅源自动开关限制。
                     HStack(spacing: 8) {
-                        // 转录按钮：媒体项始终显示——单篇手动操作，不受自动开关限制；
-                        // 已有转录稿也显示（可重新转录）
+                        // 获取全文：不需 LLM，任何项都可点（抓正文/重抓）
+                        CapsuleButton(title: "获取全文", icon: "doc.text", disabled: busy) { runFulltext() }
+                        // 转录按钮：媒体项始终显示；已有转录稿也显示（可重新转录）
                         if isMediaItem {
                             CapsuleButton(title: "转录", icon: "waveform", disabled: busy) { runTranscribe() }
                         }
@@ -1610,8 +1552,7 @@ public struct ReadingView: View {
                                     .foregroundStyle(Color.rbScoreLow)
                             }
                         } else {
-                            // 评分/摘要/翻译按钮：均始终显示——单篇手动操作/重操作，
-                            // 不受文件夹/订阅源自动开关限制，已有结果也可重新执行
+                            // 评分/摘要/翻译按钮：均始终显示，已有结果也可重新执行
                             CapsuleButton(title: "AI 评分", icon: "star", disabled: busy) { runScore() }
                             CapsuleButton(title: "摘要", icon: "text.quote", disabled: busy) { runSummarize() }
                             CapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
