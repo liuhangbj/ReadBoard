@@ -328,11 +328,15 @@ public final class LLMPipeline: @unchecked Sendable {
 
             示例格式：
             原文段落1
+
             ||
+
             译文段落1
 
             原文段落2
+
             ||
+
             译文段落2
 
             标题：\(title)

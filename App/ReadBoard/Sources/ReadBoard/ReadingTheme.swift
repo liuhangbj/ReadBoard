@@ -498,24 +498,50 @@ struct BilingualBodyView: View {
 
     private func computePairs() -> [(original: String, translated: String)] {
         // 双语对照格式：LLM 直接输出「原文段||译文段」交替，直接解析（不再后匹配防错位）
-        // 格式：原文段落1\n||\n译文段落1\n\n原文段落2\n||\n译文段落2
-        let paras = translated.components(separatedBy: "\n\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        // 兼容两种格式：\n\n||\n\n（有空行）和 \n||\n（无空行）
         var result: [(String, String)] = []
-        var i = 0
-        while i < paras.count {
-            let orig = paras[i]
-            // 下一个是 ||，再下一个是译文
-            if i + 2 < paras.count, paras[i + 1] == "||" {
-                let trans = paras[i + 2]
-                result.append((orig, trans))
-                i += 3
-            } else {
-                // 非对照格式（兼容旧纯译文）：原文用原标题，译文整段
-                result.append((orig, ""))
+        // 先按 \n\n||\n\n 分割（有空行格式）
+        let sections = translated.components(separatedBy: "\n\n||\n\n")
+        if sections.count > 1 {
+            // 有空行格式：sections[0]=原文1, sections[1]=译文1\n\n原文2, sections[2]=译文2...
+            var i = 0
+            while i < sections.count {
+                let orig = sections[i].trimmingCharacters(in: .whitespacesAndNewlines)
+                // 下一个 section 可能包含 译文+原文（\n\n 分隔），取第一段为译文
+                var trans = ""
+                if i + 1 < sections.count {
+                    let nextParts = sections[i + 1].components(separatedBy: "\n\n")
+                    trans = nextParts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                }
+                if !orig.isEmpty { result.append((orig, trans)) }
                 i += 1
             }
+            return result
+        }
+        // 无空行格式：按 \n||\n 分割
+        let lines = translated.components(separatedBy: "\n")
+        var currentOrig = ""
+        var currentTrans = ""
+        var inTrans = false
+        for line in lines {
+            if line.trimmingCharacters(in: .whitespaces) == "||" {
+                if !currentOrig.isEmpty {
+                    result.append((currentOrig.trimmingCharacters(in: .whitespacesAndNewlines),
+                                   currentTrans.trimmingCharacters(in: .whitespacesAndNewlines)))
+                }
+                currentOrig = ""
+                currentTrans = ""
+                inTrans = true
+            } else if inTrans {
+                currentTrans += line + "\n"
+            } else {
+                currentOrig += line + "\n"
+            }
+        }
+        // 最后一段
+        if !currentOrig.isEmpty {
+            result.append((currentOrig.trimmingCharacters(in: .whitespacesAndNewlines),
+                           currentTrans.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
         return result
     }
