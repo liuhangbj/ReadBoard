@@ -240,8 +240,15 @@ public final class FullTextFetcher: @unchecked Sendable {
         outBox.append(outPipe.fileHandleForReading.readDataToEndOfFile())
         errBox.append(errPipe.fileHandleForReading.readDataToEndOfFile())
         let outData = outBox.value
+        let errData = errBox.value
 
-        guard proc.terminationStatus == 0, !outData.isEmpty else { return nil }
+        guard proc.terminationStatus == 0, !outData.isEmpty else {
+            // 记录失败原因（stderr）——MetalMiner 等源 defuddle 失败排查用
+            if !errData.isEmpty, let errStr = String(data: errData, encoding: .utf8) {
+                print("FullTextFetcher failed: \(errStr.prefix(200))")
+            }
+            return nil
+        }
         return String(data: outData, encoding: .utf8)
     }
 }

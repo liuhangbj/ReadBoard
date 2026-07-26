@@ -1534,7 +1534,8 @@ public struct ReadingView: View {
                             mode: themeMode,
                             fontChoice: fontChoice,
                             fontSize: fontSize,
-                            lineSpacing: lineSpacing
+                            lineSpacing: lineSpacing,
+                            contentId: item.id   // 读归档 md 文件直接渲染（已配对的双语版本）
                         )
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)

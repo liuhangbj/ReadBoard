@@ -490,71 +490,68 @@ struct BilingualBodyView: View {
     let fontChoice: ReadingFont
     let fontSize: Double
     let lineSpacing: Double
+    /// 内容 ID——读归档 md 文件直接渲染（已配对的双语版本，不再实时合成）
+    var contentId: Int64? = nil
 
     private var p: ThemePalette { theme.palette(for: mode) }
 
-    /// 段落对（原文段 + 对应译文段）——@State 缓存，不再每次 body 重建重算 splitParagraphs（修 P1-6）
-    @State private var pairs: [(original: String, translated: String)] = []
+    /// 归档 md 文件内容（已配对的双语版本）——@State 缓存
+    @State private var archivedMd: String? = nil
 
-    private func computePairs() -> [(original: String, translated: String)] {
-        // 双语对照格式：LLM 直接输出「原文段||译文段」交替
-        // 先检查有没有 || 分隔符——没有就是纯译文格式（旧数据），用 original 参数分段 + translated 整段配对
-        guard translated.contains("||") else {
-            // 无 ||（旧纯译文格式）：original 剥 frontmatter 后分段 + translated 分段按顺序配对
-            let cleanedOriginal = Self.stripFrontmatterText(original)
-            let origParas = splitParagraphs(cleanedOriginal)
-            let transParas = splitParagraphs(translated)
-            var result: [(String, String)] = []
-            for i in 0..<max(origParas.count, transParas.count) {
-                let o = i < origParas.count ? origParas[i] : ""
-                let t = i < transParas.count ? transParas[i] : ""
-                if !o.isEmpty || !t.isEmpty { result.append((o, t)) }
-            }
-            return result
+    /// 读归档 md 文件——ArchiveService.renderBilingual 已配对（译文 + --- + ## 原文 + 原文）
+    private func loadArchivedMd() {
+        guard let cid = contentId, archivedMd == nil else { return }
+        if let path = ArchiveService.shared.archiveFilePath(contentId: cid),
+           FileManager.default.fileExists(atPath: path),
+           let content = try? String(contentsOfFile: path, encoding: .utf8) {
+            archivedMd = content
         }
-        // 有 ||：按 \n\n||\n\n 或 \n||\n 分割
-        var result: [(String, String)] = []
-        // 先按 \n\n||\n\n 分割（有空行格式）
-        let sections = translated.components(separatedBy: "\n\n||\n\n")
-        if sections.count > 1 {
-            var i = 0
-            while i < sections.count {
-                let orig = sections[i].trimmingCharacters(in: .whitespacesAndNewlines)
-                var trans = ""
-                if i + 1 < sections.count {
-                    let nextParts = sections[i + 1].components(separatedBy: "\n\n")
-                    trans = nextParts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                }
-                if !orig.isEmpty { result.append((orig, trans)) }
-                i += 1
-            }
-            return result
-        }
-        // 无空行格式：按 \n||\n 分割
-        let lines = translated.components(separatedBy: "\n")
-        var currentOrig = ""
-        var currentTrans = ""
-        var inTrans = false
-        for line in lines {
-            if line.trimmingCharacters(in: .whitespaces) == "||" {
-                if !currentOrig.isEmpty {
-                    result.append((currentOrig.trimmingCharacters(in: .whitespacesAndNewlines),
-                                   currentTrans.trimmingCharacters(in: .whitespacesAndNewlines)))
-                }
-                currentOrig = ""
-                currentTrans = ""
-                inTrans = true
-            } else if inTrans {
-                currentTrans += line + "\n"
+    }
+
+    var body: some View {
+        Group {
+            if let md = archivedMd {
+                // 直接渲染归档 md 文件（已配对的双语版本）
+                MarkdownBodyView(markdown: md, theme: theme, mode: mode,
+                                 fontChoice: fontChoice, fontSize: fontSize, lineSpacing: lineSpacing)
             } else {
-                currentOrig += line + "\n"
+                // 归档文件不存在（未入库/已删除）——回退实时合成（兼容旧数据）
+                legacyBilingualView
             }
         }
-        if !currentOrig.isEmpty {
-            result.append((currentOrig.trimmingCharacters(in: .whitespacesAndNewlines),
-                           currentTrans.trimmingCharacters(in: .whitespacesAndNewlines)))
+        .onAppear { loadArchivedMd() }
+    }
+
+    /// 兼容旧数据：实时合成双语（归档文件不存在时用）
+    private var legacyBilingualView: some View {
+        let cleanedOriginal = Self.stripFrontmatterText(original)
+        let origParas = cleanedOriginal.components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let transParas = translated.components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return VStack(alignment: .leading, spacing: 16) {
+            ForEach(0..<max(origParas.count, transParas.count), id: \.self) { i in
+                VStack(alignment: .leading, spacing: 6) {
+                    if i < origParas.count, !origParas[i].isEmpty {
+                        MarkdownBodyView(markdown: origParas[i], theme: theme, mode: mode,
+                                         fontChoice: fontChoice, fontSize: fontSize, lineSpacing: lineSpacing)
+                    }
+                    if i < transParas.count, !transParas[i].isEmpty {
+                        MarkdownBodyView(markdown: transParas[i], theme: theme, mode: mode,
+                                         fontChoice: fontChoice, fontSize: fontSize, lineSpacing: lineSpacing)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(p.backgroundAlt)
+                            .overlay(alignment: .leading) {
+                                Rectangle().fill(p.link).frame(width: 3)
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
+                    }
+                }
+            }
         }
-        return result
     }
 
     /// 去掉文本开头的 frontmatter 区（调试日志 + --- 包裹的 YAML + 残留时间戳），
@@ -583,42 +580,6 @@ struct BilingualBodyView: View {
         }
         lines = Array(lines[(consumedEnd + 1)...])
         return lines.joined(separator: "\n")
-    }
-
-    private func splitParagraphs(_ text: String) -> [String] {
-        text.components(separatedBy: "\n\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            ForEach(Array(pairs.enumerated()), id: \.offset) { _, pair in
-                VStack(alignment: .leading, spacing: 6) {
-                    // 原文
-                    if !pair.original.isEmpty {
-                        MarkdownBodyView(markdown: pair.original, theme: theme, mode: mode,
-                                         fontChoice: fontChoice, fontSize: fontSize, lineSpacing: lineSpacing)
-                    }
-                    // 译文（色块背景突出，Follo 风格）
-                    if !pair.translated.isEmpty {
-                        MarkdownBodyView(markdown: pair.translated, theme: theme, mode: mode,
-                                         fontChoice: fontChoice, fontSize: fontSize, lineSpacing: lineSpacing)
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(p.backgroundAlt)
-                            .overlay(alignment: .leading) {
-                                Rectangle().fill(p.link).frame(width: 3)
-                            }
-                            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
-                    }
-                }
-            }
-        }
-        // pairs 在原文/译文变化时重算（onChange 比 .task(id:) 更可靠——hashValue 可能冲突）
-        .onAppear { pairs = computePairs() }
-        .onChange(of: original) { _, _ in pairs = computePairs() }
-        .onChange(of: translated) { _, _ in pairs = computePairs() }
     }
 }
 
