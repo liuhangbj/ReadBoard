@@ -798,6 +798,15 @@ public struct ContentView: View {
                             } label: {
                                 Label("重新生成 md 文件", systemImage: "doc.arrow.clockwise")
                             }
+                            // 在 Finder 中打开 md 文件（已归档的显示，未归档的禁用）
+                            if let archivePath = ArchiveService.shared.archiveFilePath(contentId: item.id),
+                               FileManager.default.fileExists(atPath: archivePath) {
+                                Button {
+                                    NSWorkspace.shared.selectFile(archivePath, inFileViewerRootedAtPath: "")
+                                } label: {
+                                    Label("在 Finder 中打开 md", systemImage: "folder")
+                                }
+                            }
                             Button {
                                 Task { await ExportService.shared.runPending(trigger: "manual", contentId: item.id) }
                             } label: {
