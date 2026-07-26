@@ -50,6 +50,7 @@ public struct ContentItem: Identifiable, Hashable {
         copy.hasTranslation = hasTranslation
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
+        copy.hasFulltext = hasFulltext   // 复制时保留全文标记——markingRead 不丢
         return copy
     }
 
@@ -64,6 +65,7 @@ public struct ContentItem: Identifiable, Hashable {
         copy.hasTranslation = hasTranslation
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
+        copy.hasFulltext = hasFulltext
         return copy
     }
 
@@ -78,11 +80,12 @@ public struct ContentItem: Identifiable, Hashable {
         copy.hasTranslation = hasTranslation
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
+        copy.hasFulltext = hasFulltext
         return copy
     }
 
     /// 填充正文的副本（点开阅读时 fetchContentBody 补大字段）
-    /// 保留轻量字段（imageUrl/hasTranslation/isMedia/translatedHead）——否则点开文章后中栏/右栏中文标题丢失
+    /// 保留轻量字段（imageUrl/hasTranslation/isMedia/translatedHead/hasFulltext）——否则点开文章后中栏/右栏中文标题丢失
     func withBody(contentMd: String?, llmTranslatedMd: String?, audioUrl: String?) -> ContentItem {
         var copy = ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
                     url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
@@ -93,6 +96,7 @@ public struct ContentItem: Identifiable, Hashable {
         copy.hasTranslation = hasTranslation
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
+        copy.hasFulltext = hasFulltext
         return copy
     }
 }
