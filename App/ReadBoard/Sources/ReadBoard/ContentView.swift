@@ -1342,7 +1342,19 @@ public struct ReadingView: View {
                 .buttonStyle(.quiet)
                 .help("分享 / 后处理")
 
-                // 全文 + 内容处理按钮（两字中文，直接做图标）
+                Spacer()
+
+                // 双语/原文/翻译切换（有翻译时）：双语对照 / 仅原文 / 仅译文
+                if item.llmTranslatedMd != nil {
+                    RBSegmented(
+                        items: [(0, "双语"), (1, "原文"), (2, "译文")],
+                        selection: $viewMode
+                    )
+                }
+
+                Spacer()
+
+                // 全文 + 内容处理按钮（两字中文，直接做图标）——放最右侧格式按钮旁
                 Button { runFulltext() } label: {
                     Text("全文")
                         .font(.system(size: 12, weight: .medium))
@@ -1391,18 +1403,6 @@ public struct ReadingView: View {
                     .buttonStyle(.quiet)
                     .help("AI 转录")
                 }
-
-                Spacer()
-
-                // 双语/原文/翻译切换（有翻译时）：双语对照 / 仅原文 / 仅译文
-                if item.llmTranslatedMd != nil {
-                    RBSegmented(
-                        items: [(0, "双语"), (1, "原文"), (2, "译文")],
-                        selection: $viewMode
-                    )
-                }
-
-                Spacer()
 
                 // 版面设置（Aa 图标）
                 Button { showLayoutPopover = true } label: {
