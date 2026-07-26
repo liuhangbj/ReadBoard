@@ -725,19 +725,13 @@ public final class Database: @unchecked Sendable {
     /// 某内容的有效管线开关（源 OR 文件夹）。source_id 为 NULL（存量/异常）→ 全关。
     /// 供手动 AI 按钮做开关判定：手动触发也尊重源级配置（用户关掉打分就是不想被打分）。
     func effectivePolicyFor(contentId: Int64) -> PipelinePolicy {
+        // 管线纯按源处理——只读源自己的 config，不看文件夹
         guard let row = queryRows("""
-            SELECT s.config AS src_cfg, f.config AS folder_cfg FROM content c
+            SELECT s.config AS src_cfg FROM content c
             JOIN content_source s ON c.source_id = s.id
-            LEFT JOIN folder f ON s.folder_id = f.id
             WHERE c.id = ?;
             """, params: [contentId]).first else { return PipelinePolicy() }
-        let sp = PipelinePolicy.from(configJson: row["src_cfg"] ?? "{}")
-        let fp = PipelinePolicy.from(configJson: row["folder_cfg"] ?? "{}")
-        return PipelinePolicy(
-            autoScore: sp.autoScore || fp.autoScore,
-            autoTranslate: sp.autoTranslate || fp.autoTranslate,
-            autoTranscribe: sp.autoTranscribe || fp.autoTranscribe,
-            autoSummarize: sp.autoSummarize || fp.autoSummarize)
+        return PipelinePolicy.from(configJson: row["src_cfg"] ?? "{}")
     }
 
     /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl, contentHtml)

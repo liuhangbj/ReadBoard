@@ -657,25 +657,50 @@ public struct ContentView: View {
     }
 
 
-    /// 文件夹级管线总开关菜单
+    /// 文件夹级管线菜单（打钩显示组内一致性：全开=钩，全关=不钩，不一致=「按订阅源设置」不钩）
     @ViewBuilder
     private func folderPipelineMenu(folder: Folder) -> some View {
-        folderMenuItem("AI 打分", key: "auto_score", on: folder.policy.autoScore, folder: folder)
-        folderMenuItem("AI 翻译", key: "auto_translate", on: folder.policy.autoTranslate, folder: folder)
-        folderMenuItem("AI 摘要", key: "auto_summarize", on: folder.policy.autoSummarize, folder: folder)
-        folderMenuItem("转录", key: "auto_transcribe", on: folder.policy.autoTranscribe, folder: folder)
+        folderPipelineItem("AI 打分", key: "auto_score", folder: folder)
+        folderPipelineItem("AI 翻译", key: "auto_translate", folder: folder)
+        folderPipelineItem("AI 摘要", key: "auto_summarize", folder: folder)
+        folderPipelineItem("转录", key: "auto_transcribe", folder: folder)
     }
 
-    private func folderMenuItem(_ label: String, key: String, on: Bool, folder: Folder) -> some View {
-        Button {
-            let turningOn = !on
+    /// 文件夹内所有源某管线键的值是否全一致；一致返回该值（true/false），不一致返回 nil
+    private func folderUniformPolicy(_ fid: Int64, key: String) -> Bool? {
+        let vals = sourceStore.sources(inFolder: fid).map { src -> Bool in
+            let p = PipelinePolicy.from(configJson: src.config)
+            switch key {
+            case "auto_score": return p.autoScore
+            case "auto_translate": return p.autoTranslate
+            case "auto_summarize": return p.autoSummarize
+            case "auto_transcribe": return p.autoTranscribe
+            default: return false
+            }
+        }
+        guard let first = vals.first else { return nil }
+        return vals.allSatisfy { $0 == first } ? first : nil
+    }
+
+    private func folderPipelineItem(_ label: String, key: String, folder: Folder) -> some View {
+        let uniform = folderUniformPolicy(folder.id, key: key)
+        // 一致时：值即组内统一值；不一致时：nil（显示「按订阅源设置」不钩）
+        let isOn = uniform ?? false
+        let inconsistent = uniform == nil
+        return Button {
+            // 切换目标：当前非全开则全设开，当前全开则全设关（不一致时默认全设开）
+            let turningOn = !(uniform ?? false)
             sourceStore.setFolderPolicy(id: folder.id, key: key, value: turningOn)
             // 开启时弹「如何处理历史数据」（和订阅源页一致）
             if turningOn {
                 pendingBackfill = ("folder", folder.id, folder.name, label, "pipeline")
             }
         } label: {
-            Label(label, systemImage: on ? "checkmark" : "")
+            if inconsistent {
+                Label("\(label)（按订阅源设置）", systemImage: "")
+            } else {
+                Label(label, systemImage: isOn ? "checkmark" : "")
+            }
         }
     }
 

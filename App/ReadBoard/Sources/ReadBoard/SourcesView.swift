@@ -271,11 +271,11 @@ public struct FolderHeader: View {
                 .foregroundStyle(Color.rbText)
                 .tracking(0.3)
             Spacer()
-            // 文件夹级总开关(开 = 该组全生效)
-            folderToggle("打分", key: "auto_score", on: folder.policy.autoScore)
-            folderToggle("翻译", key: "auto_translate", on: folder.policy.autoTranslate)
-            folderToggle("摘要", key: "auto_summarize", on: folder.policy.autoSummarize)
-            folderToggle("转录", key: "auto_transcribe", on: folder.policy.autoTranscribe)
+            // 文件夹级开关（状态显示组内一致性：全开=on，其余=off；切换=批量设全部源）
+            folderToggle("打分", key: "auto_score")
+            folderToggle("翻译", key: "auto_translate")
+            folderToggle("摘要", key: "auto_summarize")
+            folderToggle("转录", key: "auto_transcribe")
             Button(role: .destructive) { showDeleteConfirm = true } label: {
                 Image(systemName: "trash")
                     .font(.system(size: 12))
@@ -304,9 +304,27 @@ public struct FolderHeader: View {
         }
     }
 
-    private func folderToggle(_ label: String, key: String, on: Bool) -> some View {
-        Toggle(label, isOn: Binding(
-            get: { on },
+    /// 文件夹内所有源某管线键是否全一致；一致返回该值，不一致返回 nil
+    private func folderUniformPolicy(_ key: String) -> Bool? {
+        let vals = store.sources(inFolder: folder.id).map { src -> Bool in
+            let p = PipelinePolicy.from(configJson: src.config)
+            switch key {
+            case "auto_score": return p.autoScore
+            case "auto_translate": return p.autoTranslate
+            case "auto_summarize": return p.autoSummarize
+            case "auto_transcribe": return p.autoTranscribe
+            default: return false
+            }
+        }
+        guard let first = vals.first else { return nil }
+        return vals.allSatisfy { $0 == first } ? first : nil
+    }
+
+    private func folderToggle(_ label: String, key: String) -> some View {
+        let uniform = folderUniformPolicy(key)
+        let inconsistent = uniform == nil
+        return Toggle(label, isOn: Binding(
+            get: { uniform ?? false },
             set: { newValue in
                 store.setFolderPolicy(id: folder.id, key: key, value: newValue)
                 if newValue { pendingBackfillKey = label }
@@ -316,6 +334,9 @@ public struct FolderHeader: View {
         .font(.caption)
         .controlSize(.small)
         .tint(Color.rbAccent)
+        // 组内不一致时标灰提示（点击仍会批量统一成全开/全关）
+        .foregroundStyle(inconsistent ? Color.rbText3 : Color.rbText)
+        .help(inconsistent ? "组内源设置不一致（点击统一）" : "")
     }
 }
 
@@ -544,27 +565,14 @@ public struct SourceRow: View {
         .frame(width: 24)
     }
 
-    /// 该源所属文件夹的开关（用于"已继承"高亮）
-    private var fp: PipelinePolicy { store.folderPolicy(for: src) }
+    /// 生效策略 = 源自己的设置（管线纯按源处理，文件夹仅作批量设置入口，不影响生效）
+    private var effectivePolicy: PipelinePolicy { src.policy }
 
-    /// 生效策略（文件夹强制覆盖后的状态）——文件夹 config 显式设了就用文件夹的，没设看源级
-    /// 用于 UI 显示：文件夹关 = 全组关，源级开也显示关（被覆盖）
-    private var effectivePolicy: PipelinePolicy {
-        let folderCfg = store.folderConfig(for: src)
-        let srcP = src.policy
-        let folderP = fp
-        return PipelinePolicy(
-            autoScore: folderCfg.contains("auto_score") ? folderP.autoScore : srcP.autoScore,
-            autoTranslate: folderCfg.contains("auto_translate") ? folderP.autoTranslate : srcP.autoTranslate,
-            autoTranscribe: folderCfg.contains("auto_transcribe") ? folderP.autoTranscribe : srcP.autoTranscribe,
-            autoSummarize: folderCfg.contains("auto_summarize") ? folderP.autoSummarize : srcP.autoSummarize
-        )
-    }
+    /// 已废弃：文件夹不再强制覆盖管线，无「已继承」概念
+    private var fp: PipelinePolicy { PipelinePolicy() }
 
-    /// 文件夹是否强制覆盖了某项（用于禁用源级开关的视觉提示）
-    private func isOverridden(key: String) -> Bool {
-        store.folderConfig(for: src).contains(key)
-    }
+    /// 已废弃：文件夹不再覆盖源级开关
+    private func isOverridden(key: String) -> Bool { false }
 
     /// 单个管线开关（打分/翻译/转录）。inherited=true 表示文件夹层已开，标蓝提示。
     /// 打开时弹选项：处理所有历史数据并重新归档（该源存量入管线刷新归档）/ 只处理新增。

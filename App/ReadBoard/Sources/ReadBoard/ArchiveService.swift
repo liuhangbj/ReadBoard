@@ -34,15 +34,12 @@ public final class ArchiveService: @unchecked Sendable {
     /// 没开 = 没有中间环节 = 入库即"完成"，应立即归档纯原文 md。
     func sourceHasNoPipeline(sourceId: Int64?) -> Bool {
         guard let sid = sourceId else { return true }   // 存量/无源：无管线可开
-        guard let row = db.queryRows("""
-            SELECT s.config AS src_cfg, f.config AS folder_cfg
-            FROM content_source s LEFT JOIN folder f ON s.folder_id = f.id
-            WHERE s.id = ?;
-            """, params: [sid]).first else { return true }
+        guard let row = db.queryRows(
+            "SELECT config AS src_cfg FROM content_source WHERE id = ?;",
+            params: [sid]).first else { return true }
+        // 管线纯按源处理——只看源自己的 config
         let sp = PipelinePolicy.from(configJson: row["src_cfg"] ?? "{}")
-        let fp = PipelinePolicy.from(configJson: row["folder_cfg"] ?? "{}")
         return !sp.autoScore && !sp.autoTranslate && !sp.autoSummarize && !sp.autoTranscribe
-            && !fp.autoScore && !fp.autoTranslate && !fp.autoSummarize && !fp.autoTranscribe
     }
 
     /// 新内容入库后调用：源没开任何管线则立即归档（纯原文）。
@@ -57,22 +54,17 @@ public final class ArchiveService: @unchecked Sendable {
     /// 返回新归档条数。
     @discardableResult
     func backfillNoPipelineArchives() -> Int {
-        // 无管线源 = 源 AND 文件夹全关；source_id NULL 的存量也算（无管线可开）
+        // 无管线源 = 源级全关（管线纯按源处理，不看文件夹）；source_id NULL 的存量也算
         let rows = db.queryRows("""
             SELECT c.id FROM content c
             LEFT JOIN content_source s ON c.source_id = s.id
-            LEFT JOIN folder f ON s.folder_id = f.id
             WHERE c.is_duplicate = 0
               AND c.meta NOT LIKE '%archived_at%'
               AND (c.content_md != '' OR c.excerpt != '')
               AND COALESCE(json_extract(s.config,'$.auto_score'),0) = 0
               AND COALESCE(json_extract(s.config,'$.auto_translate'),0) = 0
               AND COALESCE(json_extract(s.config,'$.auto_summarize'),0) = 0
-              AND COALESCE(json_extract(s.config,'$.auto_transcribe'),0) = 0
-              AND COALESCE(json_extract(f.config,'$.auto_score'),0) = 0
-              AND COALESCE(json_extract(f.config,'$.auto_translate'),0) = 0
-              AND COALESCE(json_extract(f.config,'$.auto_summarize'),0) = 0
-              AND COALESCE(json_extract(f.config,'$.auto_transcribe'),0) = 0;
+              AND COALESCE(json_extract(s.config,'$.auto_transcribe'),0) = 0;
             """)
         var n = 0
         for r in rows {
@@ -91,20 +83,18 @@ public final class ArchiveService: @unchecked Sendable {
         guard let row = db.queryRows("""
             SELECT c.ctype, c.meta, c.llm_score, c.llm_summary, c.llm_translated_md,
                    c.content_md, c.excerpt,
-                   s.config AS src_cfg, f.config AS folder_cfg
+                   s.config AS src_cfg
             FROM content c
             JOIN content_source s ON c.source_id = s.id
-            LEFT JOIN folder f ON s.folder_id = f.id
             WHERE c.id = ?;
             """, params: [contentId]).first else { return false }
 
-        // 有效开关 = 源 OR 文件夹
+        // 有效开关 = 源自己的设置（管线纯按源处理）
         let sp = PipelinePolicy.from(configJson: row["src_cfg"] ?? "{}")
-        let fp = PipelinePolicy.from(configJson: row["folder_cfg"] ?? "{}")
-        let autoScore = sp.autoScore || fp.autoScore
-        let autoTranslate = sp.autoTranslate || fp.autoTranslate
-        let autoSummarize = sp.autoSummarize || fp.autoSummarize
-        let autoTranscribe = sp.autoTranscribe || fp.autoTranscribe
+        let autoScore = sp.autoScore
+        let autoTranslate = sp.autoTranslate
+        let autoSummarize = sp.autoSummarize
+        let autoTranscribe = sp.autoTranscribe
 
         let meta = row["meta"] ?? ""
         let isMedia = (row["ctype"] == "podcast" || row["ctype"] == "video"

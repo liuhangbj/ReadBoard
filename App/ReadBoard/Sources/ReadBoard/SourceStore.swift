@@ -204,29 +204,30 @@ public final class SourceStore: ObservableObject {
     }
 
     /// 文件夹级管线开关
+    /// 文件夹级批量设置管线开关：把该值写入组内每个源的 config（不写 folder.config）。
+    /// 设计：文件夹的值没有意义，实际处理只按单个源——文件夹选项仅作批量设置入口 + 打钩显示组内一致性。
     func setFolderPolicy(id: Int64, key: String, value: Bool) {
-        let current = db.scalarString("SELECT config FROM folder WHERE id = ?", params: [id]) ?? "{}"
-        var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
-        obj[key] = value
-        if let data = try? JSONSerialization.data(withJSONObject: obj),
-           let str = String(data: data, encoding: .utf8) {
-            db.execute("UPDATE folder SET config = ? WHERE id = ?", params: [str, id])
+        for src in sources(inFolder: id) {
+            let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [src.id]) ?? "{}"
+            var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+            obj[key] = value
+            if let data = try? JSONSerialization.data(withJSONObject: obj),
+               let str = String(data: data, encoding: .utf8) {
+                db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, src.id])
+            }
         }
-        reload()
+        reload()   // 批量写完只 reload 一次（避免 145 个源 reload 145 次）
     }
 
-    /// 查某源的文件夹开关(供生效判定)
+    /// 查某源的文件夹开关(供生效判定)。已废弃——管线改为纯按源处理，folder 不再存管线值。
+    /// 保留仅为兼容旧调用（返回空策略，不影响生效）。
     func folderPolicy(for source: FeedSource) -> PipelinePolicy {
-        guard let fid = source.folderId,
-              let f = folders.first(where: { $0.id == fid }) else { return PipelinePolicy() }
-        return f.policy
+        PipelinePolicy()
     }
 
-    /// 该源所属文件夹的原始 config JSON（用于判断文件夹是否显式设了某项——强制覆盖逻辑）
+    /// 该源所属文件夹的原始 config JSON。已废弃——folder 不再存管线覆盖值，恒返回空。
     func folderConfig(for source: FeedSource) -> String {
-        guard let fid = source.folderId,
-              let f = folders.first(where: { $0.id == fid }) else { return "{}" }
-        return f.config
+        "{}"
     }
 
     // MARK: 增删改

@@ -497,28 +497,16 @@ public final class PipelineWorker: ObservableObject {
         guard db.open() else { return [:] }
         var stmt: OpaquePointer?
         var map: [Int64: SrcPolicy] = [:]
-        let sql = """
-        SELECT s.id, s.enabled, s.config, f.config
-        FROM content_source s
-        LEFT JOIN folder f ON s.folder_id = f.id;
-        """
+        // 管线纯按源处理——folder 不再存管线覆盖值，无需 JOIN folder
+        let sql = "SELECT id, enabled, config FROM content_source;"
         guard db.prepare(sql, &stmt) else { return [:] }
         defer { sqlite3_finalize(stmt) }
         while sqlite3_step(stmt) == SQLITE_ROW {
             let sid = sqlite3_column_int64(stmt, 0)
             let enabled = sqlite3_column_int64(stmt, 1) == 1
             let srcCfg = colText(stmt, 2) ?? "{}"
-            let folderCfg = colText(stmt, 3) ?? "{}"
-            let sp = PipelinePolicy.from(configJson: srcCfg)
-            let fpp = PipelinePolicy.from(configJson: folderCfg)
-            // 有效 = 文件夹强制覆盖源级（文件夹设了就用文件夹的，没设才看源级）
-            // 用户要求：文件夹开关能整组取消/开启，不被源级干扰
-            let eff = PipelinePolicy(
-                autoScore: folderCfg.contains("auto_score") ? fpp.autoScore : sp.autoScore,
-                autoTranslate: folderCfg.contains("auto_translate") ? fpp.autoTranslate : sp.autoTranslate,
-                autoTranscribe: folderCfg.contains("auto_transcribe") ? fpp.autoTranscribe : sp.autoTranscribe,
-                autoSummarize: folderCfg.contains("auto_summarize") ? fpp.autoSummarize : sp.autoSummarize
-            )
+            // 生效策略 = 源自己的设置（文件夹仅作批量设置入口，不影响生效）
+            let eff = PipelinePolicy.from(configJson: srcCfg)
             // 从源 config 解析 fetch_mode
             var mode: FetchMode = .summary
             if let data = srcCfg.data(using: .utf8),
