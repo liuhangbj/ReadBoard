@@ -2127,6 +2127,10 @@ struct WebView: NSViewRepresentable {
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")   // 透明背景（融入主题）
+        // makeNSView 直接加载 URL（updateNSView 可能不调用——html/url 初始 nil 时不触发更新）
+        if let url = url {
+            webView.load(URLRequest(url: url))
+        }
         return webView
     }
 
