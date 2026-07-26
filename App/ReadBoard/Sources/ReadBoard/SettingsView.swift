@@ -190,6 +190,10 @@ public struct GeneralPane: View {
 // MARK: - AI 与 LLM
 
 public struct AILLMPane: View {
+    @State private var jinaApiKey = UserDefaults.standard.string(forKey: "jina.apiKey") ?? ""
+    @State private var jinaTesting = false
+    @State private var jinaTestResult: String? = nil
+
     public var body: some View {
         Form {
             Section("LLM 服务（三槽按序 fallback，允许留空）") {
@@ -198,6 +202,30 @@ public struct AILLMPane: View {
             }
             ForEach(0..<LLMSettings.slotCount, id: \.self) { i in
                 LLMSlotView(slotIndex: i)
+            }
+
+            Section("全文提取服务") {
+                Text("defuddle 本地提取失败时，自动 fallback 到 Jina Reader 云端渲染。API key 可选——免费档 20 RPM，付费解锁高反爬域名（Investing.com、NYT 等）。")
+                    .font(.caption).foregroundStyle(Color.rbText3)
+                SecureField("Jina API Key（可选）", text: $jinaApiKey)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: jinaApiKey) { _, v in
+                        UserDefaults.standard.set(v, forKey: "jina.apiKey")
+                    }
+                HStack {
+                    Button("测试 Jina") {
+                        testJina()
+                    }
+                    .disabled(jinaTesting)
+                    if jinaTesting {
+                        ProgressView().controlSize(.small)
+                    }
+                    if let r = jinaTestResult {
+                        Text(r)
+                            .font(.caption)
+                            .foregroundStyle(r.hasPrefix("OK") ? Color.rbScoreHigh : Color.rbScoreLow)
+                    }
+                }
             }
 
             Section("AI 子管线开关（需 AI 板块总开关开启）") {
@@ -218,6 +246,36 @@ public struct AILLMPane: View {
                 Text("AI 与 LLM")
                     .font(.headline)
                     .foregroundStyle(Color.rbText)
+            }
+        }
+    }
+
+    /// 测试 Jina Reader 连通性
+    private func testJina() {
+        jinaTesting = true
+        jinaTestResult = nil
+        let key = jinaApiKey
+        Task {
+            let url = URL(string: "https://r.jina.ai/https://example.com")!
+            var req = URLRequest(url: url)
+            req.setValue("text/plain", forHTTPHeaderField: "Accept")
+            if !key.isEmpty {
+                req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            }
+            req.timeoutInterval = 15
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                let len = String(data: data, encoding: .utf8)?.count ?? 0
+                await MainActor.run {
+                    jinaTestResult = code == 200 ? "OK \(len) 字符" : "HTTP \(code)"
+                    jinaTesting = false
+                }
+            } catch {
+                await MainActor.run {
+                    jinaTestResult = "失败：\(error.localizedDescription)"
+                    jinaTesting = false
+                }
             }
         }
     }

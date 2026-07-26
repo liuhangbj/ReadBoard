@@ -1352,15 +1352,10 @@ public struct ReadingView: View {
 
                 Spacer()
 
-                // 双语/原文/翻译切换（有翻译时）：双语对照 / 仅原文 / 仅译文
+                // 双语/原文切换（有翻译时）：译文 / 原文
                 if item.llmTranslatedMd != nil {
                     RBSegmented(
-                        items: [(0, "译文"), (1, "原文"), (2, "网页")],
-                        selection: $viewMode
-                    )
-                } else {
-                    RBSegmented(
-                        items: [(1, "原文"), (2, "网页")],
+                        items: [(0, "译文"), (1, "原文")],
                         selection: $viewMode
                     )
                 }
@@ -1540,18 +1535,9 @@ public struct ReadingView: View {
                             .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
                     }
 
-                    // 正文：译文/原文/网页三个标签——viewMode 0=译文（llm_translated_md 保留原格式），
-                    // viewMode 1=原文（contentMd ?? excerpt），viewMode 2=原网页（content_html WKWebView）。
-                    if viewMode == 2 {
-                        // 原网页视图——WKWebView 直接加载 item.url（显示原网页，不是 content_html 摘要）
-                        if let url = URL(string: item.url), !item.url.isEmpty {
-                            WebView(url: url)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else {
-                            ContentUnavailableView("无链接", systemImage: "link",
-                                                  description: Text("本篇没有 URL"))
-                        }
-                    } else if viewMode == 0, let translated = item.llmTranslatedMd, !translated.isEmpty {
+                    // 正文：译文/原文两个标签——viewMode 0=译文（llm_translated_md 保留原格式），
+                    // viewMode 1=原文（contentMd ?? excerpt）。
+                    if viewMode == 0, let translated = item.llmTranslatedMd, !translated.isEmpty {
                         MarkdownBodyView(
                             markdown: translated,
                             theme: theme,
@@ -2111,57 +2097,5 @@ struct ShortcutHelpView: View {
         }
         .padding(24)
         .frame(width: 430)
-    }
-}
-
-// MARK: - 原网页视图（WKWebView 加载 URL 或渲染 HTML）
-
-struct WebView: NSViewRepresentable {
-    var html: String? = nil
-    var baseURL: URL? = nil
-    var url: URL? = nil
-
-    func makeNSView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        // 允许图片/媒体加载（content_html 里的相对/绝对图片链接）
-        config.preferences.setValue(true, forKey: "developerExtrasEnabled")
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.setValue(false, forKey: "drawsBackground")   // 透明背景（融入主题）
-        // makeNSView 直接加载 URL（updateNSView 可能不调用——html/url 初始 nil 时不触发更新）
-        if let url = url {
-            webView.load(URLRequest(url: url))
-        }
-        return webView
-    }
-
-    func updateNSView(_ webView: WKWebView, context: Context) {
-        // 优先加载 URL（原网页），否则渲染 HTML（content_html）
-        if let url = url {
-            webView.load(URLRequest(url: url))
-            return
-        }
-        guard let html = html else { return }
-        // 包一层 HTML 壳——content_html 常是正文片段（无 <html> 包裹），WKWebView 需要完整文档
-        let wrapped: String
-        if html.lowercased().contains("<html") || html.lowercased().contains("<!doctype") {
-            wrapped = html
-        } else {
-            wrapped = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="utf-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1">
-                <style>
-                    body { font-family: -apple-system, sans-serif; font-size: 16px; line-height: 1.6; padding: 16px; color: #333; }
-                    img { max-width: 100%; height: auto; }
-                    a { color: #0066cc; }
-                </style>
-            </head>
-            <body>\(html)</body>
-            </html>
-            """
-        }
-        webView.loadHTMLString(wrapped, baseURL: baseURL)
     }
 }

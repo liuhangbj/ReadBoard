@@ -181,6 +181,12 @@ public final class FullTextFetcher: @unchecked Sendable {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: nodeBin)
         proc.arguments = args
+        // 传 Jina API key 给 clip_core.js（Jina Reader 付费通道，可选）
+        if let jinaKey = UserDefaults.standard.string(forKey: "jina.apiKey"), !jinaKey.isEmpty {
+            var env = ProcessInfo.processInfo.environment
+            env["JINA_API_KEY"] = jinaKey
+            proc.environment = env
+        }
         let outPipe = Pipe()
         let errPipe = Pipe()
         proc.standardOutput = outPipe
