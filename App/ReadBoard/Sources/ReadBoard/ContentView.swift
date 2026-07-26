@@ -582,14 +582,16 @@ public struct ContentView: View {
         return intervals.allSatisfy { $0 == first } ? first : nil
     }
 
-    /// 文件夹内所有源的「获取全文」状态是否全一致。
-    /// 返回 ("auto", 模式) / ("off", nil) / nil（不一致）。
+    /// 文件夹内所有源的「获取全文」状态是否全一致（设置状态 + 实际模式都一致才算）。
+    /// 返回 ("auto", 模式) / ("off", nil) / nil（不一致→「按订阅源设置」）。
     private func folderUniformFetchMode(_ fid: Int64) -> (kind: String, mode: FetchMode?)? {
         let srcs = sourceStore.sources(inFolder: fid)
         guard !srcs.isEmpty else { return nil }
-        // 全部自动（fetchModeAuto=true）→ auto，模式取第一个的（自动检测出的实际模式可能不同，仅用于显示）
+        // 全部自动（fetchModeAuto=true）→ 还要实际模式全相同才算一致（各源探测结果不同=混合=按订阅源设置）
         if srcs.allSatisfy({ $0.fetchModeAuto }) {
-            return ("auto", srcs.first?.fetchMode)
+            let modes = srcs.map { $0.fetchMode }
+            guard let first = modes.first, modes.allSatisfy({ $0 == first }) else { return nil }
+            return ("auto", first)
         }
         // 全部关闭（!auto && fetchMode==.summary，对应 fetch_mode=off 落到 summary 默认）
         if srcs.allSatisfy({ !$0.fetchModeAuto && $0.fetchMode == .summary }) {
