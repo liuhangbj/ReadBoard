@@ -217,16 +217,29 @@ public final class CacheCleanupService: ObservableObject {
         // 「归档 N 天后自动删除」可关闭——关闭则归档内容永不自动删除
         var deleted = 0
         if deleteEnabled && deleteAfterDays > 0 {
-            // 先备份待删内容，再删
-            backupBeforeDelete(days: deleteAfterDays)
-            db.execute("""
-                DELETE FROM content
+            // 软删除：guid 留底防重抓，删 html + 删 md 文件，列表不显示
+            let toDelete = db.queryRows("""
+                SELECT id FROM content
                 WHERE is_archived = 1 AND starred = 0
                   AND meta NOT LIKE '%archived_at%'
                   AND updated_at < datetime('now', '-\(safeDays(deleteAfterDays)) days')
-                  AND id NOT IN (SELECT content_id FROM content_tag);
+                  AND id NOT IN (SELECT content_id FROM content_tag)
+                  AND deleted_at IS NULL;
                 """)
-            deleted = db.writeChanges()
+            for row in toDelete {
+                guard let cid = Int64(row["id"] ?? "") else { continue }
+                // 1. 删 md 文件（archiveDir/源名/标题-id.md）
+                if let archivePath = ArchiveService.shared.archiveFilePath(contentId: cid),
+                   FileManager.default.fileExists(atPath: archivePath) {
+                    try? FileManager.default.removeItem(atPath: archivePath)
+                }
+                // 2. 软删除：deleted_at 标记 + 清空 content_html（产物删，guid 留底）
+                db.execute("""
+                    UPDATE content SET deleted_at = datetime('now'), content_html = ''
+                    WHERE id = ?;
+                    """, params: [cid])
+                deleted += 1
+            }
         }
 
         // content_job 日志表膨胀控制：每条管线执行都 INSERT，~40k 行/天，

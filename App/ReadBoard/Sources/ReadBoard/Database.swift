@@ -637,6 +637,8 @@ public final class Database: @unchecked Sendable {
         // 排除重复项——is_duplicate=1 的是同内容的副本，不该在列表里重复显示。
         // 与 totalCount/文件夹计数口径对齐（三处都 非归档+非重复），计数才相符。
         conds.append(useFTS ? "c.is_duplicate = 0" : "is_duplicate = 0")
+        // 排除已删除（软删除 guid 留底防重抓，列表不显示）
+        conds.append(useFTS ? "c.deleted_at IS NULL" : "deleted_at IS NULL")
         let col = useFTS ? "c." : ""
         if source != nil { conds.append("\(col)source = ?") }
         if sourceId != nil { conds.append("\(col)source_id = ?") }
