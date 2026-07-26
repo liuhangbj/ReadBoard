@@ -855,18 +855,18 @@ public struct ContentView: View {
                                 } label: {
                                     Label("AI 摘要", systemImage: "text.quote")
                                 }
-                                // 翻译：文章显示；播客/视频有转录稿后也显示
+                                // 翻译：文章显示；播客/视频无转录稿时显示（翻译摘要），有转录稿隐藏
                                 if item.ctype != "podcast" && item.ctype != "video" {
                                     Button {
                                         runPipelineForItem(item: item, type: "translate")
                                     } label: {
                                         Label("AI 翻译", systemImage: "character.bubble")
                                     }
-                                } else if item.llmTranslatedMd != nil {
+                                } else if item.llmTranslatedMd == nil {
                                     Button {
                                         runPipelineForItem(item: item, type: "translate")
                                     } label: {
-                                        Label("AI 翻译转录稿", systemImage: "character.bubble")
+                                        Label("AI 翻译摘要", systemImage: "character.bubble")
                                     }
                                 }
                                 if item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil {
@@ -1389,7 +1389,7 @@ public struct ReadingView: View {
                 .buttonStyle(.quiet)
                 .help("AI 摘要")
 
-                // 翻译按钮：文章显示；播客/视频有转录稿后也显示（翻译转录稿）
+                // 翻译按钮：文章显示；播客/视频无转录稿时显示（翻译摘要），有转录稿隐藏
                 if item.ctype != "podcast" && item.ctype != "video" {
                     Button { runTranslate() } label: {
                         Text("翻译")
@@ -1399,8 +1399,8 @@ public struct ReadingView: View {
                     }
                     .buttonStyle(.quiet)
                     .help("AI 翻译")
-                } else if item.llmTranslatedMd != nil {
-                    // 播客/视频已有转录稿——显示翻译（翻译转录稿为中文）
+                } else if item.llmTranslatedMd == nil {
+                    // 播客/视频无转录稿——显示翻译（翻译摘要/简介）
                     Button { runTranslate() } label: {
                         Text("翻译")
                             .font(.system(size: 12, weight: .medium))
@@ -1408,7 +1408,7 @@ public struct ReadingView: View {
                             .frame(width: 32, height: 24)
                     }
                     .buttonStyle(.quiet)
-                    .help("AI 翻译转录稿")
+                    .help("AI 翻译摘要")
                 }
 
                 if item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil {

@@ -316,7 +316,7 @@ public final class LLMPipeline: @unchecked Sendable {
             translated = titleT + "\n\n" + bodyT
             partial = bodyT.contains("[第 ") && bodyT.contains(" 段翻译失败，保留原文]")
         } else {
-            let truncated = Self.truncateKeepEnds(body, maxChars: 15000)
+            // 翻译不截断——完整正文进 prompt（截断的 [中段已省略] 会被 LLM 翻译进去）
             let prompt = """
             你是一位专业的翻译。请将以下文章完整翻译成\(targetLang)，要求：
             - 保留原文的段落结构、数据、专有名词
@@ -327,7 +327,7 @@ public final class LLMPipeline: @unchecked Sendable {
             标题：\(title)
 
             正文：
-            \(truncated)
+            \(body)
             """
             do {
                 let (text, model) = try await client.chat(
