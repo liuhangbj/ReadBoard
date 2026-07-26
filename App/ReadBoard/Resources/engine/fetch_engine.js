@@ -150,7 +150,16 @@ function fetchViaJina(url, usePro = false) {
   console.error(`${label}: fetching ${jinaUrl.slice(0, 120)}`);
 
   return new Promise((resolve, reject) => {
-    const options = { headers: { 'Accept': 'text/plain' }, timeout: 45000 };
+    const options = {
+      headers: {
+        'Accept': 'text/plain',
+        // readability 自动提取正文（Jina 默认行为），只保留链接文本不占篇幅
+        'x-retain-links': 'text',
+        // 延长超时——让 Jina 加载更多内容（展开按钮/懒加载）
+        'x-timeout': '30',
+      },
+      timeout: 45000,
+    };
     if (apiKey) options.headers['Authorization'] = `Bearer ${apiKey}`;
     https.get(jinaUrl, options, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
