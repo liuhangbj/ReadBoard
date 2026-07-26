@@ -610,7 +610,7 @@ public final class Database: @unchecked Sendable {
                    (c.llm_translated_md IS NOT NULL AND c.llm_translated_md != '') AS has_trans,
                    (c.ctype IN ('podcast','video') OR c.meta LIKE '%audio_url%') AS is_media,
                    substr(c.llm_translated_md, 1, 120) AS translated_head,
-                   (c.content_md IS NOT NULL AND c.content_md != '') AS has_fulltext
+                   (c.content_md IS NOT NULL AND LENGTH(c.content_md) > 500) AS has_fulltext
             FROM content c JOIN content_fts f ON f.rowid = c.id
             """
         } else {
@@ -621,7 +621,7 @@ public final class Database: @unchecked Sendable {
                    (llm_translated_md IS NOT NULL AND llm_translated_md != '') AS has_trans,
                    (ctype IN ('podcast','video') OR meta LIKE '%audio_url%') AS is_media,
                    substr(llm_translated_md, 1, 120) AS translated_head,
-                   (content_md IS NOT NULL AND content_md != '') AS has_fulltext
+                   (content_md IS NOT NULL AND LENGTH(content_md) > 500) AS has_fulltext
             FROM content
             """
         }
