@@ -236,9 +236,9 @@ public final class ArchiveService: @unchecked Sendable {
         md += "word_count: \(wordCount)\n"
         if let s = score, !s.isEmpty {
             md += "score: \(s)\n"
-            // 评分等级：A(≥80) / B(≥60) / C(<60)
+            // 评分等级：S(≥90) / A(85-89) / B(75-84) / C(60-74) / D(0-59)
             let scoreInt = Int(s) ?? 0
-            let level = scoreInt >= 80 ? "A" : scoreInt >= 60 ? "B" : "C"
+            let level = scoreInt >= 90 ? "S" : scoreInt >= 85 ? "A" : scoreInt >= 75 ? "B" : scoreInt >= 60 ? "C" : "D"
             md += "level: \(level)\n"
         }
         md += "published: \"\(yaml(published))\"\n"
