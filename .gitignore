@@ -5,10 +5,12 @@ Data/trash/
 Data/readboard.db
 Data/readboard.db-shm
 Data/readboard.db-wal
+readboard.db
 
 # 构建产物
 .build/
 App/ReadBoard/.build/
+App/ReadBoard.app/
 
 # macOS
 .DS_Store

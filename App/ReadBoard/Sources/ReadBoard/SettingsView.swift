@@ -229,7 +229,10 @@ public struct AILLMPane: View {
                 .tint(Color.rbAccent)
                 Toggle("Jina Pro（充值 token）", isOn: Binding(
                     get: { UserDefaults.standard.bool(forKey: "jina.pro") },
-                    set: { UserDefaults.standard.set($0, forKey: "jina.pro") }
+                    set: { newValue in
+                        UserDefaults.standard.set(newValue, forKey: "jina.pro")
+                        jinaProEnabled = newValue
+                    }
                 ))
                 .tint(Color.rbAccent)
                 if jinaProEnabled {
