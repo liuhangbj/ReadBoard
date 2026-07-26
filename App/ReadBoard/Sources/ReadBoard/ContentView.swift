@@ -533,7 +533,7 @@ public struct ContentView: View {
         pipelineMenuItem("AI 翻译", key: "auto_translate", on: src.policy.autoTranslate, src: src)
         pipelineMenuItem("AI 摘要", key: "auto_summarize", on: src.policy.autoSummarize, src: src)
         if src.transcribable {
-            pipelineMenuItem("转录", key: "auto_transcribe", on: src.policy.autoTranscribe, src: src)
+            pipelineMenuItem("AI 转录", key: "auto_transcribe", on: src.policy.autoTranscribe, src: src)
         }
     }
 
@@ -671,7 +671,7 @@ public struct ContentView: View {
         folderPipelineItem("AI 打分", key: "auto_score", folder: folder)
         folderPipelineItem("AI 翻译", key: "auto_translate", folder: folder)
         folderPipelineItem("AI 摘要", key: "auto_summarize", folder: folder)
-        folderPipelineItem("转录", key: "auto_transcribe", folder: folder)
+        folderPipelineItem("AI 转录", key: "auto_transcribe", folder: folder)
     }
 
     /// 文件夹内所有源某管线键的值是否全一致；一致返回该值（true/false），不一致返回 nil
@@ -1175,18 +1175,29 @@ public struct ArticleRow: View {
                                     .strokeBorder(scoreColor(s).opacity(0.22), lineWidth: RB.Line.hair)
                             )
                     }
-                    // 全文 badge（有全文绿 / 无全文红）——hasFulltext 轻列标记（content_md 非空）
-                    if item.hasFulltext {
-                        RBadge(text: "全文", color: .rbScoreHigh, scale: scale)
-                    } else {
-                        RBadge(text: "无全文", color: .rbScoreLow, scale: scale)
+                    // 全文 badge（有全文绿 / 无全文红）——仅文章；媒体项没正文概念不显示（播客靠转录非全文）
+                    if !item.isMedia {
+                        if item.hasFulltext {
+                            RBadge(text: "全文", color: .rbScoreHigh, scale: scale)
+                        } else {
+                            RBadge(text: "无全文", color: .rbScoreLow, scale: scale)
+                        }
                     }
                     // 管线已处理 badge（两字标签）
                     if let sum = item.llmSummary, !sum.isEmpty {
                         RBadge(text: "摘要", color: .rbSummary, scale: scale)
                     }
-                    if item.hasTranslation {
-                        RBadge(text: item.isMedia ? "转录" : "翻译", color: .rbTranslate, scale: scale)
+                    // 翻译/转录 badge：文章翻译=hasTranslation(llm_translated_md)；
+                    // 媒体项分开——翻译=hasExcerptTrans(简介翻译 llm_excerpt_translated)，转录=hasTranslation(转录稿 llm_translated_md)
+                    if item.isMedia {
+                        if item.hasExcerptTrans {
+                            RBadge(text: "翻译", color: .rbTranslate, scale: scale)
+                        }
+                        if item.hasTranslation {
+                            RBadge(text: "转录", color: .rbSummary, scale: scale)
+                        }
+                    } else if item.hasTranslation {
+                        RBadge(text: "翻译", color: .rbTranslate, scale: scale)
                     }
                     if showDate, let pd = item.publishedAt, pd.count >= 10 {
                         Text(formattedDate(pd))
@@ -1541,10 +1552,6 @@ public struct ReadingView: View {
                     HStack(spacing: 8) {
                         // 获取全文：不需 LLM，任何项都可点（抓正文/重抓）
                         CapsuleButton(title: "获取全文", icon: "doc.text", disabled: busy) { runFulltext() }
-                        // 转录按钮：媒体项始终显示；已有转录稿也显示（可重新转录）
-                        if isMediaItem {
-                            CapsuleButton(title: "转录", icon: "waveform", disabled: busy) { runTranscribe() }
-                        }
                         if !pipeline.isAvailable {
                             if !isMediaItem {
                                 Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
@@ -1554,7 +1561,7 @@ public struct ReadingView: View {
                         } else {
                             // 评分/摘要/翻译按钮：均始终显示，已有结果也可重新执行
                             CapsuleButton(title: "AI 评分", icon: "star", disabled: busy) { runScore() }
-                            CapsuleButton(title: "摘要", icon: "text.quote", disabled: busy) { runSummarize() }
+                            CapsuleButton(title: "AI 摘要", icon: "text.quote", disabled: busy) { runSummarize() }
                             CapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
                             if busy {
                                 ProgressView().scaleEffect(0.6).frame(width: 16, height: 16)
@@ -1565,6 +1572,10 @@ public struct ReadingView: View {
                                     .foregroundStyle(Color.rbText3)
                                     .lineLimit(1)
                             }
+                        }
+                        // AI 转录：媒体项始终显示（放最后）；已有转录稿也显示（可重新转录）
+                        if isMediaItem {
+                            CapsuleButton(title: "AI 转录", icon: "waveform", disabled: busy) { runTranscribe() }
                         }
                         Spacer()
                     }
