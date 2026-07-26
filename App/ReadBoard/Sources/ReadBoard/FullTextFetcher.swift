@@ -98,6 +98,7 @@ public final class FullTextFetcher: @unchecked Sendable {
 
     /// 按 mode 抓全文并写入 content_md / fetch_status / fetch_engine。
     /// 失败时自动降级到下一级模式（defuddle→Jina Free→Jina Pro→summary）。
+    /// 降级成功后更新源的 fetch_mode——下次直接用降级后的模式，不再重复失败。
     /// 返回是否成功拿到全文。
     @discardableResult
     func fetchAndStore(contentId: Int64, url: String, feedHtml: String?, mode: FetchMode) async -> Bool {
@@ -105,7 +106,13 @@ public final class FullTextFetcher: @unchecked Sendable {
         var currentMode = mode
         while true {
             let success = tryFetch(contentId: contentId, url: url, feedHtml: feedHtml, mode: currentMode)
-            if success { return true }
+            if success {
+                // 降级成功了——更新源的 fetch_mode 为降级后的模式
+                if currentMode != mode {
+                    updateSourceFetchMode(contentId: contentId, newMode: currentMode)
+                }
+                return true
+            }
             // 降级到下一级
             guard let next = nextFallbackMode(after: currentMode) else {
                 // 已到最底层（summary）——summary 的 tryFetch 一定返回 false，但已标记 fetched
@@ -113,6 +120,19 @@ public final class FullTextFetcher: @unchecked Sendable {
             }
             print("FullTextFetcher: \(currentMode.displayName) failed, falling back to \(next.displayName)")
             currentMode = next
+        }
+    }
+
+    /// 降级成功后更新源的 fetch_mode——下次直接用降级后的模式
+    private func updateSourceFetchMode(contentId: Int64, newMode: FetchMode) {
+        guard let sourceId = db.scalarInt("SELECT source_id FROM content WHERE id = ?", params: [contentId]) else { return }
+        let sid = Int64(sourceId)
+        let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [sid]) ?? "{}"
+        var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+        obj["fetch_mode"] = newMode.rawValue
+        if let data = try? JSONSerialization.data(withJSONObject: obj),
+           let str = String(data: data, encoding: .utf8) {
+            db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, sid])
         }
     }
 
