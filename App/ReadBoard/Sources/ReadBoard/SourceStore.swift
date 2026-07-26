@@ -362,6 +362,42 @@ public final class SourceStore: ObservableObject {
         }
     }
 
+    // MARK: - 文件夹抓取设置（统一菜单用）
+
+    /// 文件夹内所有源（按 folder_id）
+    func sources(inFolder folderId: Int64) -> [FeedSource] {
+        sources.filter { $0.folderId == folderId }
+    }
+
+    /// 文件夹级批量设为「自动检测」模式（对每个源跑 probeMode 确定模式，标记 auto）
+    func setFolderFetchModeAuto(folderId: Int64) async {
+        for src in sources(inFolder: folderId) {
+            await setFetchMode(id: src.id, mode: "auto")
+        }
+    }
+
+    /// 文件夹级批量重新检测（对每个源强制重跑 probeMode）
+    func redetectFolderFetchMode(folderId: Int64) async {
+        for src in sources(inFolder: folderId) {
+            await redetectFetchMode(id: src.id)
+        }
+    }
+
+    /// 文件夹级批量设为「关闭」（fetch_mode=off, auto=false）
+    func setFolderFetchModeOff(folderId: Int64) {
+        for src in sources(inFolder: folderId) {
+            let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [src.id]) ?? "{}"
+            var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+            obj["fetch_mode"] = "off"
+            obj["fetch_mode_auto"] = false
+            if let data = try? JSONSerialization.data(withJSONObject: obj),
+               let str = String(data: data, encoding: .utf8) {
+                db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, src.id])
+            }
+        }
+        reload()
+    }
+
     func removeSource(id: Int64) {
         // 修 P0-3：删源前先把该源内容归档（保留可查）——ON DELETE SET NULL 会把
         // source_id 抹成 NULL，孤儿内容 source_id=NULL 后 worker/retention 都

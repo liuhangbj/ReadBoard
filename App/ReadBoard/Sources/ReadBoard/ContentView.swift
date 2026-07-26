@@ -428,26 +428,9 @@ public struct ContentView: View {
                     Label("内容处理", systemImage: "gearshape.2")
                 }
             }
-            // 全文抓取模式（对文件夹内所有源批量设置）
+            // 抓取设置（与订阅源统一：获取全文三态 + 抓取频率，打钩反映组内一致性）
             Menu {
-                ForEach(FetchMode.allCases, id: \.rawValue) { m in
-                    Button {
-                        sourceStore.setFolderFetchMode(folderId: fid, mode: m)
-                        // 切换后弹「如何处理历史数据」（重抓全文或只新增）
-                        pendingBackfill = ("folder", fid, node.name, m.displayName, "fulltext")
-                    } label: {
-                        Text(m.displayName)
-                    }
-                }
-                Divider()
-                // 抓取间隔（对文件夹内所有源批量设置）
-                Menu("抓取间隔") {
-                    ForEach([5, 15, 30, 60, 120, 360, 720], id: \.self) { m in
-                        Button { sourceStore.setFolderFetchInterval(folderId: fid, minutes: m) } label: {
-                            Text(m < 60 ? "\(m) 分钟" : "\(m/60) 小时")
-                        }
-                    }
-                }
+                folderFetchSettingsMenu(folderId: fid)
             } label: {
                 Label("抓取设置", systemImage: "arrow.down.circle")
             }
@@ -589,6 +572,90 @@ public struct ContentView: View {
             }
         }
     }
+
+    // MARK: 文件夹抓取设置（与订阅源统一：打钩反映组内是否一致）
+
+    /// 文件夹内所有源的 fetch_interval_min 是否全一致；一致返回该值
+    private func folderUniformInterval(_ fid: Int64) -> Int? {
+        let intervals = sourceStore.sources(inFolder: fid).map { $0.fetchIntervalMin }
+        guard let first = intervals.first else { return nil }
+        return intervals.allSatisfy { $0 == first } ? first : nil
+    }
+
+    /// 文件夹内所有源的「获取全文」状态是否全一致。
+    /// 返回 ("auto", 模式) / ("off", nil) / nil（不一致）。
+    private func folderUniformFetchMode(_ fid: Int64) -> (kind: String, mode: FetchMode?)? {
+        let srcs = sourceStore.sources(inFolder: fid)
+        guard !srcs.isEmpty else { return nil }
+        // 全部自动（fetchModeAuto=true）→ auto，模式取第一个的（自动检测出的实际模式可能不同，仅用于显示）
+        if srcs.allSatisfy({ $0.fetchModeAuto }) {
+            return ("auto", srcs.first?.fetchMode)
+        }
+        // 全部关闭（!auto && fetchMode==.summary，对应 fetch_mode=off 落到 summary 默认）
+        if srcs.allSatisfy({ !$0.fetchModeAuto && $0.fetchMode == .summary }) {
+            return ("off", nil)
+        }
+        return nil
+    }
+
+    /// 文件夹抓取设置菜单（结构和打钩位置与订阅源完全一致；不一致显示「按订阅源设置」）
+    @ViewBuilder
+    private func folderFetchSettingsMenu(folderId fid: Int64) -> some View {
+        let uniformMode = folderUniformFetchMode(fid)
+        let uniformInterval = folderUniformInterval(fid)
+
+        // ── 获取全文 ──
+        Menu("获取全文：\(folderFetchModeLabel(fid, uniform: uniformMode))") {
+            // 自动（打钩：全组都是自动）
+            Button {
+                Task { await sourceStore.setFolderFetchModeAuto(folderId: fid) }
+            } label: {
+                Label("自动\(uniformMode?.kind == "auto" && uniformMode?.mode != nil ? "（\(uniformMode!.mode!.displayName)）" : "")",
+                      systemImage: uniformMode?.kind == "auto" ? "checkmark" : "")
+            }
+            // 重新检测（始终提供，对全组批量探测）
+            Button("重新检测") { Task { await sourceStore.redetectFolderFetchMode(folderId: fid) } }
+            Divider()
+            // 关闭（打钩：全组都是关闭）
+            Button {
+                sourceStore.setFolderFetchModeOff(folderId: fid)
+            } label: {
+                Label("关闭", systemImage: uniformMode?.kind == "off" ? "checkmark" : "")
+            }
+            Divider()
+            // 不一致时：都不打钩，显示「按订阅源设置」并打钩
+            Button {} label: {
+                Label("按订阅源设置", systemImage: uniformMode == nil ? "checkmark" : "")
+            }
+            .disabled(true)
+        }
+
+        // ── 抓取频率 ──
+        Menu("抓取频率：\(uniformInterval != nil ? (uniformInterval! < 60 ? "\(uniformInterval!)分钟" : "\(uniformInterval!/60)小时") : "按订阅源设置")") {
+            ForEach([5, 15, 30, 60, 120, 360, 720], id: \.self) { m in
+                Button { sourceStore.setFolderFetchInterval(folderId: fid, minutes: m) } label: {
+                    Label(m < 60 ? "\(m) 分钟" : "\(m/60) 小时",
+                          systemImage: uniformInterval == m ? "checkmark" : "")
+                }
+            }
+            Divider()
+            Button {} label: {
+                Label("按订阅源设置", systemImage: uniformInterval == nil ? "checkmark" : "")
+            }
+            .disabled(true)
+        }
+    }
+
+    /// 文件夹「获取全文」菜单标题的当前值文本
+    private func folderFetchModeLabel(_ fid: Int64, uniform: (kind: String, mode: FetchMode?)?) -> String {
+        guard let uniform else { return "按订阅源设置" }
+        switch uniform.kind {
+        case "auto": return uniform.mode != nil ? "自动（\(uniform.mode!.displayName)）" : "自动"
+        case "off": return "关闭"
+        default: return "按订阅源设置"
+        }
+    }
+
 
     /// 文件夹级管线总开关菜单
     @ViewBuilder
