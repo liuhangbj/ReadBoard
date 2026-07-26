@@ -1543,9 +1543,14 @@ public struct ReadingView: View {
                     // 正文：译文/原文/网页三个标签——viewMode 0=译文（llm_translated_md 保留原格式），
                     // viewMode 1=原文（contentMd ?? excerpt），viewMode 2=原网页（content_html WKWebView）。
                     if viewMode == 2 {
-                        // 原网页视图——WKWebView 渲染 content_html（feed 给的原始 HTML）
-                        WebView(html: loadedContentHtml ?? item.contentHtml ?? "<p>（无网页内容）</p>", baseURL: URL(string: item.url))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        // 原网页视图——WKWebView 直接加载 item.url（显示原网页，不是 content_html 摘要）
+                        if let url = URL(string: item.url), !item.url.isEmpty {
+                            WebView(url: url)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else {
+                            ContentUnavailableView("无链接", systemImage: "link",
+                                                  description: Text("本篇没有 URL"))
+                        }
                     } else if viewMode == 0, let translated = item.llmTranslatedMd, !translated.isEmpty {
                         MarkdownBodyView(
                             markdown: translated,
@@ -2109,11 +2114,12 @@ struct ShortcutHelpView: View {
     }
 }
 
-// MARK: - 原网页视图（WKWebView 渲染 content_html）
+// MARK: - 原网页视图（WKWebView 加载 URL 或渲染 HTML）
 
 struct WebView: NSViewRepresentable {
-    let html: String
-    let baseURL: URL?
+    var html: String? = nil
+    var baseURL: URL? = nil
+    var url: URL? = nil
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -2125,6 +2131,12 @@ struct WebView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        // 优先加载 URL（原网页），否则渲染 HTML（content_html）
+        if let url = url {
+            webView.load(URLRequest(url: url))
+            return
+        }
+        guard let html = html else { return }
         // 包一层 HTML 壳——content_html 常是正文片段（无 <html> 包裹），WKWebView 需要完整文档
         let wrapped: String
         if html.lowercased().contains("<html") || html.lowercased().contains("<!doctype") {
