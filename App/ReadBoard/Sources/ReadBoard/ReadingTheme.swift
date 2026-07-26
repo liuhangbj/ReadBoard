@@ -599,10 +599,10 @@ struct BilingualBodyView: View {
                 }
             }
         }
-        // pairs 只在原文/译文变化时重算一次（此前每次 body 重建都算）
-        .task(id: "\(original.hashValue)|\(translated.hashValue)") {
-            pairs = computePairs()
-        }
+        // pairs 在原文/译文变化时重算（onChange 比 .task(id:) 更可靠——hashValue 可能冲突）
+        .onAppear { pairs = computePairs() }
+        .onChange(of: original) { _, _ in pairs = computePairs() }
+        .onChange(of: translated) { _, _ in pairs = computePairs() }
     }
 }
 

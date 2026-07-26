@@ -1071,8 +1071,8 @@ public struct ArticleRow: View {
                                     .strokeBorder(scoreColor(s).opacity(0.22), lineWidth: RB.Line.hair)
                             )
                     }
-                    // 全文 badge（有全文绿 / 无全文红）——content_md 非空即全文
-                    if let md = item.contentMd, !md.isEmpty {
+                    // 全文 badge（有全文绿 / 无全文红）——hasFulltext 轻列标记（content_md 非空）
+                    if item.hasFulltext {
                         RBadge(text: "全文", color: .rbScoreHigh, scale: scale)
                     } else {
                         RBadge(text: "无全文", color: .rbScoreLow, scale: scale)
