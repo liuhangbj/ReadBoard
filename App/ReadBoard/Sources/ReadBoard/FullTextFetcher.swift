@@ -4,9 +4,10 @@ import Foundation
 // 探测每个源最适合的全文获取方式, 缓存进 content_source.config.fetch_mode:
 //   feed_full  — feed 自带 content_html ≥800 字符, 直接用 defuddle 转 md
 //   defuddle   — defuddle 直连原页抓得动
-//   cdp        — 需要浏览器渲染(Chrome CDP), 经 clip_core.fetchMarkdown
+//   cdp        — 需要浏览器渲染(Chrome CDP/微信绕过)。暂未收编——engine 返回 NEEDS_CDP 退出码 3，降级 summary
 //   summary    — 抓不到全文, 只留摘要
 // 执行时按 mode 走对应路径, 结果写 content_md + fetch_status + fetch_engine。
+// 抓取引擎：Resources/engine/fetch_engine.js（自包含，defuddle+Jina，node_modules 随 App 打包）
 
 public enum FetchMode: String, CaseIterable, Sendable {
     case feedFull = "feed_full"
@@ -31,7 +32,7 @@ public final class FullTextFetcher: @unchecked Sendable {
 
     /// node / CLI 脚本路径（node 走 DependencyPaths 解析，脚本在 App 资源内）
     private var nodeBin: String { DependencyPaths.resolve(.node) ?? "node" }
-    private let cliPath = NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/fetch_fulltext.js"
+    private let cliPath = NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/engine/fetch_engine.js"
 
     /// 正文达到该长度视为"全文"（阈值, 与探测一致）
     private let fullTextMinChars = 800
@@ -47,9 +48,8 @@ public final class FullTextFetcher: @unchecked Sendable {
     ///
     /// 逻辑（与你的理解一致）：
     ///   1. feed 自带全文（content_html 够长）→ feedFull，直接 html 转 md
-    ///   2. 否则调工具抓原页——clip_core 内部已按域名自动路由
-    ///      （微信/jiqizhixin 走 CDP 浏览器，虎嗅走预处理，其余 defuddle 直连），
-    ///      抓到 → 按域名记 defuddle 或 cdp（语义标记，实际路由 clip_core 定）
+    ///   2. 否则调 engine 抓原页——内部按域名路由（虎嗅预处理 / defuddle 直连 / Jina 兜底），
+    ///      需 CDP 的源（微信/cubox/jiqizhixin）返回 NEEDS_CDP 退出码 3 → 降级 summary
     ///   3. 都抓不到 → summary 兜底（留 feed 摘要）
     /// 自动检测该源最高优先级的全文获取模式——确定后记录，后续固定用该模式
     /// 优先级：feed 自带全文 → defuddle → Jina Free → Jina Pro → feed 摘要
@@ -260,8 +260,10 @@ public final class FullTextFetcher: @unchecked Sendable {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: nodeBin)
         proc.arguments = args
-        // 传 Jina 配置给 clip_core.js
+        // 传 Jina 配置给 fetch_engine.js
         var env = ProcessInfo.processInfo.environment
+        // node 路径——fetch_engine 用它调 defuddle CLI（保持与 App 解析的一致）
+        env["READBOARD_NODE_BIN"] = nodeBin
         // Jina Free 开关（默认关——免费档 20 RPM，不能所有源都走）
         if UserDefaults.standard.bool(forKey: "jina.free") {
             env["JINA_FREE_ENABLED"] = "1"

@@ -282,22 +282,11 @@ public struct AILLMPane: View {
             Button("自动下载") {
                 installDefuddle()
             }
-            Button("自定义路径") {
-                // 打开文件浏览选 defuddle-cli 路径
-                let panel = NSOpenPanel()
-                panel.canChooseFiles = false
-                panel.canChooseDirectories = true
-                panel.message = "选择 defuddle-cli 目录"
-                if panel.runModal() == .OK, let url = panel.url {
-                    UserDefaults.standard.set(url.path, forKey: "defuddle.customPath")
-                    UserDefaults.standard.set(true, forKey: "defuddle.enabled")
-                }
-            }
             Button("关闭", role: .cancel) {
                 UserDefaults.standard.set(false, forKey: "defuddle.enabled")
             }
         } message: {
-            Text("缺少：\(defuddleMissing.joined(separator: "、"))\n\n「自动下载」运行 npm install；「自定义路径」选择已有 defuddle-cli 目录；「关闭」不使用 defuddle。")
+            Text("缺少：\(defuddleMissing.joined(separator: "、"))\n\n「自动下载」在项目内 engine 目录运行 npm install 安装 defuddle；「关闭」不使用 defuddle（仅 Jina/摘要）。")
         }
     }
 
@@ -331,7 +320,7 @@ public struct AILLMPane: View {
         }
     }
 
-    /// 检测 defuddle 依赖（node + defuddle-cli npm 包）
+    /// 检测 defuddle 依赖（node + 项目内 engine 的 defuddle npm 包）
     private func checkDefuddleDeps() {
         var missing: [String] = []
         // node
@@ -339,8 +328,8 @@ public struct AILLMPane: View {
         if !FileManager.default.fileExists(atPath: nodePath) {
             missing.append("node")
         }
-        // defuddle-cli（npm 包）
-        let defuddlePath = "/Users/hangbits/tools/defuddle-cli/node_modules/defuddle/dist/cli.js"
+        // defuddle-cli（项目内 engine/node_modules，自包含）
+        let defuddlePath = NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/engine/node_modules/defuddle/dist/cli.js"
         if !FileManager.default.fileExists(atPath: defuddlePath) {
             missing.append("defuddle-cli")
         }
@@ -353,11 +342,14 @@ public struct AILLMPane: View {
         }
     }
 
-    /// 自动安装 defuddle 依赖（npm install）
+    /// 自动安装 defuddle 依赖（项目内 engine 目录 npm install）
     private func installDefuddle() {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
-        task.arguments = ["-c", "cd /Users/hangbits/tools/defuddle-cli && npm install"]
+        let engineDir = NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/engine"
+        let nodeBin = DependencyPaths.resolve(.node) ?? "node"
+        let npmBin = nodeBin.replacingOccurrences(of: "/node", with: "/npm")
+        task.arguments = ["-c", "cd '\(engineDir)' && '\(npmBin)' install"]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         try? task.run()

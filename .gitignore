@@ -12,5 +12,8 @@ readboard.db
 App/ReadBoard/.build/
 App/ReadBoard.app/
 
+# node 依赖（engine 的 package.json 进 git，node_modules 首次 npm install 重建）
+App/ReadBoard/Resources/engine/node_modules/
+
 # macOS
 .DS_Store
