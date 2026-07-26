@@ -330,6 +330,12 @@ public final class FullTextFetcher: @unchecked Sendable {
         let jinaUrl = "https://r.jina.ai/" + url
         var request = URLRequest(url: URL(string: jinaUrl)!)
         request.setValue("text/plain", forHTTPHeaderField: "Accept")
+        // 只保留链接文本，去掉 URL——导航链接变纯文本不占篇幅
+        request.setValue("text", forHTTPHeaderField: "x-retain-links")
+        // 按域名指定 CSS 选择器——只返回正文区域，不要导航/推荐
+        if let selector = Self.jinaTargetSelector(for: url) {
+            request.setValue(selector, forHTTPHeaderField: "x-target-selector")
+        }
         if usePro, let key = UserDefaults.standard.string(forKey: "jina.apiKey"), !key.isEmpty {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
@@ -348,6 +354,21 @@ public final class FullTextFetcher: @unchecked Sendable {
             return nil
         }
         return text
+    }
+
+    /// 按域名返回 Jina target-selector——常见站点配 CSS 选择器，只取正文区域
+    private static func jinaTargetSelector(for urlString: String) -> String? {
+        guard let host = URL(string: urlString)?.host?.lowercased() else { return nil }
+        // Fast Company
+        if host.contains("fastcompany.com") { return "article" }
+        // Investing.com
+        if host.contains("investing.com") { return "article" }
+        // NYT
+        if host.contains("nytimes.com") { return "section[name=\"articleBody\"]" }
+        // Seeking Alpha
+        if host.contains("seekingalpha.com") { return "article" }
+        // 默认不指定——Jina 自动提取
+        return nil
     }
 }
 
