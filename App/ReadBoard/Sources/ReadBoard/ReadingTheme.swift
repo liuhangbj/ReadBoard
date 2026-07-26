@@ -497,17 +497,27 @@ struct BilingualBodyView: View {
     @State private var pairs: [(original: String, translated: String)] = []
 
     private func computePairs() -> [(original: String, translated: String)] {
-        // 双语对照格式：LLM 直接输出「原文段||译文段」交替，直接解析（不再后匹配防错位）
-        // 兼容两种格式：\n\n||\n\n（有空行）和 \n||\n（无空行）
+        // 双语对照格式：LLM 直接输出「原文段||译文段」交替
+        // 先检查有没有 || 分隔符——没有就是纯译文格式（旧数据），用 original 参数分段 + translated 整段配对
+        guard translated.contains("||") else {
+            let origParas = splitParagraphs(original)
+            let transParas = splitParagraphs(translated)
+            var result: [(String, String)] = []
+            for i in 0..<max(origParas.count, transParas.count) {
+                let o = i < origParas.count ? origParas[i] : ""
+                let t = i < transParas.count ? transParas[i] : ""
+                if !o.isEmpty || !t.isEmpty { result.append((o, t)) }
+            }
+            return result
+        }
+        // 有 ||：按 \n\n||\n\n 或 \n||\n 分割
         var result: [(String, String)] = []
         // 先按 \n\n||\n\n 分割（有空行格式）
         let sections = translated.components(separatedBy: "\n\n||\n\n")
         if sections.count > 1 {
-            // 有空行格式：sections[0]=原文1, sections[1]=译文1\n\n原文2, sections[2]=译文2...
             var i = 0
             while i < sections.count {
                 let orig = sections[i].trimmingCharacters(in: .whitespacesAndNewlines)
-                // 下一个 section 可能包含 译文+原文（\n\n 分隔），取第一段为译文
                 var trans = ""
                 if i + 1 < sections.count {
                     let nextParts = sections[i + 1].components(separatedBy: "\n\n")
@@ -538,22 +548,9 @@ struct BilingualBodyView: View {
                 currentOrig += line + "\n"
             }
         }
-        // 最后一段
         if !currentOrig.isEmpty {
             result.append((currentOrig.trimmingCharacters(in: .whitespacesAndNewlines),
                            currentTrans.trimmingCharacters(in: .whitespacesAndNewlines)))
-        }
-        // 纯译文格式（无 ||）：原文用 original 参数分段，译文用 translated 整段
-        // 解决纯译文被当原文显示两次的问题（original 显示译文 + translated 空）
-        if result.count == 1, result[0].1.isEmpty {
-            let origParas = splitParagraphs(original)
-            let transParas = splitParagraphs(translated)
-            result = []
-            for i in 0..<max(origParas.count, transParas.count) {
-                let o = i < origParas.count ? origParas[i] : ""
-                let t = i < transParas.count ? transParas[i] : ""
-                if !o.isEmpty || !t.isEmpty { result.append((o, t)) }
-            }
         }
         return result
     }
