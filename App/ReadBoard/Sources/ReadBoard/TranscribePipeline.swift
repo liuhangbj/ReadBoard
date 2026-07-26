@@ -70,12 +70,13 @@ public final class TranscribePipeline: @unchecked Sendable {
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !text.isEmpty else { throw TranscribeError.emptyTranscript }
 
-            // 4. 非中文 → LLM 全文翻译成中文（收编 Follo 能力）；中文直接用
-            if lang != "zh", llm.isAvailable, let translated = await llm.translateRaw(text, targetLang: "中文") {
-                text = translated
+            // 4. 非中文 → LLM 生成「中英文对照」版本（碎句合并成通顺段落+逐段对照）。
+            //    中文转录稿直接用（无需对照）。对照版存 llm_translated_md。
+            if lang != "zh", llm.isAvailable, let bilingual = await llm.translateBilingual(text) {
+                text = bilingual
             }
 
-            // 5. 写库：译文进 llm_translated_md
+            // 5. 写库：中英文对照稿进 llm_translated_md
             let ok = db.execute(
                 "UPDATE content SET llm_translated_md = ?, llm_processed_at = datetime('now') WHERE id = ?",
                 params: [text, contentId])

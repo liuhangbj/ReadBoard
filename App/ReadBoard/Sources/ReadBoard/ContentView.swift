@@ -504,7 +504,12 @@ public struct ContentView: View {
             case "summarize":
                 ok = await pipeline.summarize(contentId: item.id, title: item.title, body: body)
             case "translate":
-                ok = await pipeline.translate(contentId: item.id, title: item.title, body: body)
+                // 媒体项翻简介（content_html → llm_excerpt_translated）；非媒体项翻正文
+                if item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil {
+                    ok = await pipeline.translateExcerpt(contentId: item.id, contentHtml: item.contentHtml ?? item.excerpt ?? "")
+                } else {
+                    ok = await pipeline.translate(contentId: item.id, title: item.title, body: body)
+                }
             case "transcribe":
                 ok = await transcriber.transcribe(contentId: item.id, title: item.title,
                                                   audioUrl: item.audioUrl, pageUrl: item.url,
@@ -532,6 +537,17 @@ public struct ContentView: View {
         }
     }
 
+    /// 管线项的内容图标（与中栏单篇右键一致）
+    private func pipelineIcon(_ key: String) -> String {
+        switch key {
+        case "auto_score": return "star"
+        case "auto_translate": return "character.bubble"
+        case "auto_summarize": return "text.quote"
+        case "auto_transcribe": return "waveform"
+        default: return "gearshape"
+        }
+    }
+
     private func pipelineMenuItem(_ label: String, key: String, on: Bool, src: FeedSource) -> some View {
         Button {
             let turningOn = !on
@@ -541,7 +557,11 @@ public struct ContentView: View {
                 pendingBackfill = ("source", src.id, src.name, label, "pipeline")
             }
         } label: {
-            Label(label, systemImage: on ? "checkmark" : "")
+            // 内容图标 + 勾选态（开=checkmark 在标签后）
+            Label(label, systemImage: pipelineIcon(key))
+            if on {
+                Image(systemName: "checkmark")
+            }
         }
     }
 
@@ -699,9 +719,12 @@ public struct ContentView: View {
             }
         } label: {
             if inconsistent {
-                Label("\(label)（按订阅源设置）", systemImage: "")
+                Label("\(label)（按订阅源设置）", systemImage: pipelineIcon(key))
             } else {
-                Label(label, systemImage: isOn ? "checkmark" : "")
+                Label(label, systemImage: pipelineIcon(key))
+                if isOn {
+                    Image(systemName: "checkmark")
+                }
             }
         }
     }
@@ -949,19 +972,11 @@ public struct ContentView: View {
                                 } label: {
                                     Label("AI 摘要", systemImage: "text.quote")
                                 }
-                                // 翻译：文章显示；播客/视频无转录稿时显示（翻译摘要），有转录稿隐藏
-                                if item.ctype != "podcast" && item.ctype != "video" {
-                                    Button {
-                                        runPipelineForItem(item: item, type: "translate")
-                                    } label: {
-                                        Label("AI 翻译", systemImage: "character.bubble")
-                                    }
-                                } else if item.llmTranslatedMd == nil {
-                                    Button {
-                                        runPipelineForItem(item: item, type: "translate")
-                                    } label: {
-                                        Label("AI 翻译摘要", systemImage: "character.bubble")
-                                    }
+                                // 翻译：文章翻正文；播客/视频翻简介（与转录对照独立）——统一命名「AI 翻译」
+                                Button {
+                                    runPipelineForItem(item: item, type: "translate")
+                                } label: {
+                                    Label("AI 翻译", systemImage: "character.bubble")
                                 }
                                 if item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil {
                                     Button {
@@ -1350,6 +1365,8 @@ public struct ReadingView: View {
     @State private var busyForId: Int64? = nil
     /// 当前内容的有效管线开关（源 OR 文件夹）
     @State private var policy = PipelinePolicy()
+    /// 媒体项（播客/视频）正文标签：0=原文(简介) / 1=译文(简介翻译) / 2=转录(中英对照)
+    @State private var mediaTab = 0
     /// 版面设置（@AppStorage 直绑——设置面板/阅读器设置页改这里视图自动刷新，
     /// 不再像 @State 静态读 UserDefaults 只在创建读一次。和 uiFontScale 同模式）
     @AppStorage("reading.fontSize") private var fontSize: Double = 16
@@ -1445,8 +1462,8 @@ public struct ReadingView: View {
 
                 Spacer()
 
-                // 双语/原文切换（有翻译时）：译文 / 原文
-                if item.llmTranslatedMd != nil {
+                // 双语/原文切换（有翻译时）：译文 / 原文——仅非媒体项（媒体项用正文区三标签）
+                if !isMediaItem, item.llmTranslatedMd != nil {
                     RBSegmented(
                         items: [(0, "译文"), (1, "原文")],
                         selection: $viewMode
@@ -1567,10 +1584,24 @@ public struct ReadingView: View {
                             .foregroundStyle(p.textSecondary)
                     }
 
-                    // ── 播客音频播放器（podcast 且有 audioUrl 时显示）──
+                    // ── 播客音频播放器（podcast 且有 audioUrl 时显示，固定顶部——切标签不动）──
                     if item.ctype == "podcast", let audioUrl = item.audioUrl, !audioUrl.isEmpty {
                         AudioPlayerView(audioUrl: audioUrl, title: item.title)
                             .padding(.vertical, 4)
+                    }
+
+                    // ── 媒体项三标签：原文(简介) / 译文(简介翻译) / 转录(中英对照) ──
+                    if isMediaItem {
+                        HStack(spacing: 0) {
+                            mediaTabButton(0, "原文")
+                            mediaTabButton(1, "译文")
+                            // 转录标签：有转录对照稿(llm_translated_md)才显示
+                            if let t = item.llmTranslatedMd, !t.isEmpty {
+                                mediaTabButton(2, "转录")
+                            }
+                            Spacer()
+                        }
+                        .padding(.vertical, 4)
                     }
 
                     // ── LLM 操作条（胶囊按钮组 + 状态提示，精致排版）──
@@ -1591,7 +1622,10 @@ public struct ReadingView: View {
                             if item.llmSummary == nil, policy.autoSummarize {
                                 CapsuleButton(title: "摘要", icon: "text.quote", disabled: busy) { runSummarize() }
                             }
+                            // 翻译：非媒体项翻正文；媒体项翻简介（无简介译文时显示）
                             if !isMediaItem, item.llmTranslatedMd == nil, policy.autoTranslate {
+                                CapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
+                            } else if isMediaItem, (item.excerptTranslated ?? "").isEmpty, policy.autoTranslate {
                                 CapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
                             }
                             if busy {
@@ -1628,9 +1662,13 @@ public struct ReadingView: View {
                             .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
                     }
 
-                    // 正文：译文/原文两个标签——viewMode 0=译文（llm_translated_md 保留原格式），
-                    // viewMode 1=原文（contentMd ?? excerpt）。
-                    if viewMode == 0, let translated = item.llmTranslatedMd, !translated.isEmpty {
+                    // 正文：媒体项按三标签渲染（原文/译文/转录），非媒体项按译文/原文两标签
+                    if isMediaItem {
+                        mediaBodyView
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if viewMode == 0, let translated = item.llmTranslatedMd, !translated.isEmpty {
+                        // viewMode 0=译文（llm_translated_md 保留原格式）
                         MarkdownBodyView(
                             markdown: translated,
                             theme: theme,
@@ -1642,6 +1680,7 @@ public struct ReadingView: View {
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
+                        // viewMode 1=原文（contentMd ?? excerpt）
                         MarkdownBodyView(
                             markdown: bodyText,
                             theme: theme,
@@ -1834,6 +1873,69 @@ public struct ReadingView: View {
         item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil
     }
 
+    // MARK: 媒体项三标签（原文/译文/转录）
+
+    /// 媒体项标签按钮（原文/译文/转录切换）
+    private func mediaTabButton(_ idx: Int, _ label: String) -> some View {
+        Button { mediaTab = idx } label: {
+            Text(label)
+                .font(.system(size: 13, weight: mediaTab == idx ? .semibold : .regular))
+                .foregroundStyle(mediaTab == idx ? Color.rbAccent : Color.rbText3)
+                .padding(.horizontal, 12).padding(.vertical, 5)
+                .background(mediaTab == idx ? Color.rbAccent.opacity(0.12) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
+        }
+        .buttonStyle(.quiet)
+    }
+
+    /// feed 简介原文（剥标签的纯文本——content_html 是 HTML 片段）
+    private var excerptPlainText: String {
+        let html = item.contentHtml ?? item.excerpt ?? ""
+        guard !html.isEmpty else { return "(无简介)" }
+        var text = html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        return text.isEmpty ? "(无简介)" : text
+    }
+
+    /// 媒体项正文（按 mediaTab 渲染对应内容）
+    @ViewBuilder
+    private var mediaBodyView: some View {
+        switch mediaTab {
+        case 0:
+            // 原文：feed 简介（剥标签纯文本）
+            Text(excerptPlainText)
+                .font(.system(size: fontSize))
+                .foregroundStyle(theme.palette(for: themeMode).text)
+                .lineSpacing(lineSpacing)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case 1:
+            // 译文：简介的中文翻译（llm_excerpt_translated）；没有则提示点「AI 翻译」
+            if let t = item.excerptTranslated, !t.isEmpty {
+                MarkdownBodyView(markdown: t, theme: theme, mode: themeMode, fontChoice: fontChoice,
+                                 fontSize: fontSize, lineSpacing: lineSpacing)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text("尚无译文——点右上角「翻译」生成简介的中文翻译")
+                    .font(.system(size: fontSize))
+                    .foregroundStyle(theme.palette(for: themeMode).textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        default:
+            // 转录：中英对照转录稿（llm_translated_md）
+            if let t = item.llmTranslatedMd, !t.isEmpty {
+                MarkdownBodyView(markdown: t, theme: theme, mode: themeMode, fontChoice: fontChoice,
+                                 fontSize: fontSize, lineSpacing: lineSpacing)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text("尚无转录稿——点「转录」生成中英文对照稿")
+                    .font(.system(size: fontSize))
+                    .foregroundStyle(theme.palette(for: themeMode).textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
     /// 中文标题（有译文时从 translatedHead 取第一个非空行，用于显示在英文标题下方）
     private var chineseTitle: String? {
         guard let head = item.translatedHead, !head.isEmpty else { return nil }
@@ -1941,7 +2043,14 @@ public struct ReadingView: View {
         busyForId = cid
         statusMsg = "翻译中…"
         Task {
-            let ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
+            // 媒体项：翻译 feed 简介 → llm_excerpt_translated（「译文」标签）；
+            // 非媒体项：翻译正文 → llm_translated_md（译文/原文切换）
+            let ok: Bool
+            if isMediaItem {
+                ok = await pipeline.translateExcerpt(contentId: cid, contentHtml: item.contentHtml ?? item.excerpt ?? "")
+            } else {
+                ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
+            }
             if ok { ArchiveService.shared.rearchive(contentId: cid) }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
@@ -1949,8 +2058,9 @@ public struct ReadingView: View {
                 busy = false
                 statusMsg = ok ? "✅ 翻译完成" : "❌ 翻译失败"
                 if ok {
-                    // 翻译完成：若当前是仅原文，切到双语对照让用户立刻看到译文
-                    if viewMode == 1 { viewMode = 0 }
+                    // 非媒体：仅原文→双语对照；媒体：切到「译文」标签立刻看到
+                    if isMediaItem { mediaTab = 1 }
+                    else if viewMode == 1 { viewMode = 0 }
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)
                 }
             }

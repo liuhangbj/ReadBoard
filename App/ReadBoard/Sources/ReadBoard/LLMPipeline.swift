@@ -259,6 +259,55 @@ public final class LLMPipeline: @unchecked Sendable {
         }
     }
 
+    // MARK: - 中英文对照翻译（转录稿专用）
+
+    /// 把英文转录稿翻译成「中英文对照」md：英段+中段交替，空行分隔。
+    /// 转录稿是 whisper 碎句，让 LLM 先合并成通顺段落再对照——顺带提升可读性。
+    /// 长文本（>12000 字）分块处理，逐块对照后拼接。
+    func translateBilingual(_ text: String) async -> String? {
+        guard isAvailable else { return nil }
+        if text.count > 12000 {
+            let chunks = Self.splitByParagraph(text, maxChars: 12000)
+            guard !chunks.isEmpty else { return nil }
+            var parts: [String] = []
+            var anyOK = false
+            for chunk in chunks {
+                if let t = await translateBilingualSingle(chunk) {
+                    parts.append(t); anyOK = true
+                } else {
+                    parts.append(chunk)   // 单块失败保留原文，不静默丢
+                }
+            }
+            return anyOK ? parts.joined(separator: "\n\n") : nil
+        }
+        return await translateBilingualSingle(text)
+    }
+
+    /// 单块中英对照（<=12000 字）。prompt 已实测：格式稳定（英段+中段交替空行分隔），无代码块/开场白。
+    private func translateBilingualSingle(_ text: String) async -> String? {
+        let prompt = """
+        你是一位专业的翻译。下面是一段英文播客转录稿。请输出**中英文对照**版本，要求：
+        - 按语义把转录稿组织成自然段落（转录稿是碎句，先合并成通顺的句子再分段）
+        - 每段先英文原文，紧接一段中文译文，交替排列
+        - 英文段落和中文段落之间空一行，段与段之间空一行
+        - 保留 markdown 格式，不要代码块包裹，不要任何解释或开场白
+        - 直接输出对照内容
+
+        转录稿：
+        \(text)
+        """
+        do {
+            let (out, _) = try await client.chat(
+                messages: [ChatMessage(role: "user", content: prompt)],
+                temperature: 0.3, maxTokens: 4096)
+            let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        } catch {
+            return nil
+        }
+    }
+
+
     /// 分块翻译：按段落边界切 ~12000 字一块，逐块翻译后拼接。单块失败则该块保留原文，
     /// 不至于整篇丢。块间无上下文，靠段落边界保证语义相对完整。
     private func translateChunked(_ text: String, targetLang: String) async -> String? {
@@ -360,5 +409,38 @@ public final class LLMPipeline: @unchecked Sendable {
                 """, params: [contentId])
         }
         return ok
+    }
+
+    /// 翻译播客 feed 简介（content_html 剥标签）→ 写 llm_excerpt_translated（播客「译文」标签）。
+    /// 与转录对照（llm_translated_md）分开存——简介译文和转录对照是两个独立内容。
+    @discardableResult
+    func translateExcerpt(contentId: Int64, contentHtml: String) async -> Bool {
+        guard isAvailable else { return false }
+        // 剥标签成纯文本
+        var text = contentHtml.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return false }
+        let prompt = """
+        你是一位专业的翻译。请将以下播客/视频简介完整翻译成中文，要求：
+        - 语言流畅自然，符合中文表达习惯，不是逐字直译
+        - 直接输出译文，不要任何解释或"以下是翻译"之类的话
+
+        简介：
+        \(text)
+        """
+        do {
+            let (out, _) = try await client.chat(
+                messages: [ChatMessage(role: "user", content: prompt)],
+                temperature: 0.3, maxTokens: 4096)
+            let t = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty else { return false }
+            return db.execute(
+                "UPDATE content SET llm_excerpt_translated = ? WHERE id = ?",
+                params: [t, contentId])
+        } catch {
+            setError(Self.describeError(error))
+            return false
+        }
     }
 }

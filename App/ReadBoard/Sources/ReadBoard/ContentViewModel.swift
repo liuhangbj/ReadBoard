@@ -180,15 +180,16 @@ public final class ContentViewModel: ObservableObject {
 
     /// 正文/译文/媒体地址按需加载：列表查询不取这些大字段，点开才查并填回 selectedItem
     private func loadBodyIfNeeded(for id: Int64) {
-        // 已有正文则不重复查
-        if selectedItem?.id == id, selectedItem?.contentMd != nil || selectedItem?.audioUrl != nil { return }
+        // 已有正文则不重复查。媒体项(audioUrl 非空)也要查——需 content_html(原文标签)/excerptTranslated(译文标签)
+        if selectedItem?.id == id, selectedItem?.contentMd != nil, selectedItem?.contentHtml != nil { return }
         let currentId = id
         Task.detached(priority: .userInitiated) { [db] in
             guard let body = db.fetchContentBody(id: currentId) else { return }
             await MainActor.run { [weak self] in
                 guard let self, self.selectedItem?.id == currentId else { return }
                 self.selectedItem = self.selectedItem?.withBody(
-                    contentMd: body.contentMd, llmTranslatedMd: body.llmTranslatedMd, audioUrl: body.audioUrl)
+                    contentMd: body.contentMd, llmTranslatedMd: body.llmTranslatedMd, audioUrl: body.audioUrl,
+                    contentHtml: body.contentHtml, excerptTranslated: body.excerptTranslated)
             }
         }
     }
