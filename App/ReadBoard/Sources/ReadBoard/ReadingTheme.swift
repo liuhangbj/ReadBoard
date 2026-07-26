@@ -501,44 +501,44 @@ struct BilingualBodyView: View {
         // 否则双语模式下 frontmatter 混进第一段露出来（和单语模式一致的剥离逻辑）。
         let cleanedOriginal = Self.stripFrontmatterText(original)
         let origParas = splitParagraphs(cleanedOriginal)
-        let transParas = splitParagraphs(translated)
-        // 错位修复：LLM 翻译时段落数可能不一致（合并/拆分/空段差异），
-        // 按「标题锚点」对齐——# 开头的段落按标题文本匹配，非标题按顺序填充。
-        var result: [(String, String)] = []
-        var transIndex = 0
-        for origPara in origParas {
-            // 标题段落（# 开头）：按标题文本在译文中找对应
-            if origPara.hasPrefix("#") {
-                let origTitle = origPara.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
-                // 在译文中找相同标题（允许译文标题略有差异，取前 20 字符匹配）
-                var matchedTrans = ""
-                for j in transIndex..<transParas.count {
-                    let transPara = transParas[j]
-                    if transPara.hasPrefix("#") {
-                        let transTitle = transPara.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
-                        if transTitle.prefix(20) == origTitle.prefix(20) {
-                            matchedTrans = transPara
-                            transIndex = j + 1
-                            break
-                        }
-                    }
-                }
-                result.append((origPara, matchedTrans))
-            } else {
-                // 非标题段落：按顺序取下一个译文段（跳过空段）
-                var matchedTrans = ""
-                while transIndex < transParas.count {
-                    let transPara = transParas[transIndex]
-                    transIndex += 1
-                    if !transPara.isEmpty && !transPara.hasPrefix("#") {
-                        matchedTrans = transPara
-                        break
-                    }
-                }
-                result.append((origPara, matchedTrans))
+        // 译文按 [P1][P2]…编号对齐——LLM 翻译输出带编号，精确匹配（解决段落数不一致错位）
+        let transMap = Self.parseTranslatedParagraphs(translated)
+        // 兼容旧格式（无编号）：按顺序填充
+        if transMap.isEmpty {
+            let transParas = splitParagraphs(translated)
+            var result: [(String, String)] = []
+            for (i, origPara) in origParas.enumerated() {
+                let transPara = i < transParas.count ? transParas[i] : ""
+                result.append((origPara, transPara))
             }
+            return result
+        }
+        // 新格式（带编号）：按编号精确对齐
+        var result: [(String, String)] = []
+        for (i, origPara) in origParas.enumerated() {
+            let key = "P\(i + 1)"
+            let transPara = transMap[key] ?? ""
+            result.append((origPara, transPara))
         }
         return result
+    }
+
+    /// 解析译文段落——[P1] 段落1 [P2] 段落2 → ["P1": "段落1", "P2": "段落2"]
+    /// LLM 翻译输出带编号标记，按编号精确对齐原文段落。
+    static func parseTranslatedParagraphs(_ text: String) -> [String: String] {
+        var map: [String: String] = [:]
+        let paras = text.components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        for para in paras {
+            // 匹配 [P1] 开头
+            if let range = para.range(of: #"^\[P(\d+)\]"#, options: .regularExpression) {
+                let tag = String(para[range]).replacingOccurrences(of: "[", with: "").replacingOccurrences(of: "]", with: "")
+                let content = String(para[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                map[tag] = content
+            }
+        }
+        return map
     }
 
     /// 去掉文本开头的 frontmatter 区（调试日志 + --- 包裹的 YAML + 残留时间戳），
