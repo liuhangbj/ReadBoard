@@ -206,9 +206,9 @@ public struct AILLMPane: View {
             }
 
             Section("全文提取服务") {
-                Text("defuddle 本地提取失败时，自动 fallback 到 Jina Reader 云端渲染。免费档 20 RPM；Pro 解锁高反爬域名（Investing.com、NYT 等）+ 更高限额。")
+                Text("defuddle 本地提取失败时，自动 fallback 到 Jina Reader 云端渲染。先走免费档（20 RPM），失败再走付费档。注册送 1000 万 token，按量充值。")
                     .font(.caption).foregroundStyle(Color.rbText3)
-                Toggle("Jina Pro（付费）", isOn: Binding(
+                Toggle("Jina Pro（充值 token）", isOn: Binding(
                     get: { UserDefaults.standard.bool(forKey: "jina.pro") },
                     set: { UserDefaults.standard.set($0, forKey: "jina.pro") }
                 ))
