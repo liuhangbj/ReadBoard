@@ -303,6 +303,15 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
+    /// 文件夹级批量设置抓取间隔（对文件夹内所有源统一设置）
+    func setFolderFetchInterval(folderId: Int64, minutes: Int) {
+        let ids = db.queryRows("SELECT id FROM content_source WHERE folder_id = ?",
+                               params: [folderId]).compactMap { Int64($0["id"] ?? "") }
+        for sid in ids {
+            setFetchInterval(id: sid, minutes: minutes)
+        }
+    }
+
     func removeSource(id: Int64) {
         // 修 P0-3：删源前先把该源内容归档（保留可查）——ON DELETE SET NULL 会把
         // source_id 抹成 NULL，孤儿内容 source_id=NULL 后 worker/retention 都

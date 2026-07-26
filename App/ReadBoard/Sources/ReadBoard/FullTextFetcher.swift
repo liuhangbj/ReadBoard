@@ -243,3 +243,57 @@ public final class FullTextFetcher: @unchecked Sendable {
         return String(data: outData, encoding: .utf8)
     }
 }
+
+// MARK: - 批量重抓全文（右键菜单调用）
+
+extension FullTextFetcher {
+    /// 重抓单篇全文
+    func refetchSingleFulltext(contentId: Int64) async {
+        guard let row = Database.shared.queryRows("""
+            SELECT c.url, c.content_html, s.config
+            FROM content c LEFT JOIN content_source s ON c.source_id = s.id
+            WHERE c.id = ?
+            """, params: [contentId]).first else { return }
+        let url = row["url"] ?? ""
+        let feedHtml = row["content_html"]
+        // 从源 config 解析 fetch_mode
+        var mode: FetchMode = .summary
+        if let cfg = row["config"], !cfg.isEmpty,
+           let data = cfg.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let raw = obj["fetch_mode"] as? String,
+           let m = FetchMode(rawValue: raw) { mode = m }
+        await fetchAndStore(contentId: contentId, url: url, feedHtml: feedHtml, mode: mode)
+    }
+
+    /// 重抓某源全部文章全文
+    func refetchSourceFulltext(sourceId: Int64) async {
+        let rows = Database.shared.queryRows("""
+            SELECT c.id, c.url, c.content_html, s.config
+            FROM content c LEFT JOIN content_source s ON c.source_id = s.id
+            WHERE c.source_id = ? AND c.is_duplicate = 0
+            """, params: [sourceId])
+        for row in rows {
+            guard let cid = Int64(row["id"] ?? "") else { continue }
+            let url = row["url"] ?? ""
+            let feedHtml = row["content_html"]
+            var mode: FetchMode = .summary
+            if let cfg = row["config"], !cfg.isEmpty,
+               let data = cfg.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let raw = obj["fetch_mode"] as? String,
+               let m = FetchMode(rawValue: raw) { mode = m }
+            await fetchAndStore(contentId: cid, url: url, feedHtml: feedHtml, mode: mode)
+        }
+    }
+
+    /// 重抓文件夹内所有源的全部文章全文
+    func refetchFolderFulltext(folderId: Int64) async {
+        let sourceIds = Database.shared.queryRows("""
+            SELECT id FROM content_source WHERE folder_id = ?
+            """, params: [folderId]).compactMap { Int64($0["id"] ?? "") }
+        for sid in sourceIds {
+            await refetchSourceFulltext(sourceId: sid)
+        }
+    }
+}

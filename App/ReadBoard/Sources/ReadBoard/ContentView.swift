@@ -385,6 +385,12 @@ public struct ContentView: View {
                 } label: {
                     Label("抓取设置", systemImage: "arrow.down.circle")
                 }
+                // 重新抓取全文（该源全部文章重抓）
+                Button {
+                    Task { await FullTextFetcher.shared.refetchSourceFulltext(sourceId: sid) }
+                } label: {
+                    Label("重新抓取全文", systemImage: "arrow.triangle.2.circlepath")
+                }
                 Divider()
                 Menu {
                     Button("无文件夹") { sourceStore.assignSource(sourceId: sid, folderId: nil); vm.loadAll() }
@@ -432,8 +438,23 @@ public struct ContentView: View {
                         Text(m.displayName)
                     }
                 }
+                Divider()
+                // 抓取间隔（对文件夹内所有源批量设置）
+                Menu("抓取间隔") {
+                    ForEach([5, 15, 30, 60, 120, 360, 720], id: \.self) { m in
+                        Button { sourceStore.setFolderFetchInterval(folderId: fid, minutes: m) } label: {
+                            Text(m < 60 ? "\(m) 分钟" : "\(m/60) 小时")
+                        }
+                    }
+                }
             } label: {
                 Label("抓取设置", systemImage: "arrow.down.circle")
+            }
+            // 重新抓取全文（对文件夹内所有源批量重抓）
+            Button {
+                Task { await FullTextFetcher.shared.refetchFolderFulltext(folderId: fid) }
+            } label: {
+                Label("重新抓取全文", systemImage: "arrow.triangle.2.circlepath")
             }
             Divider()
             Button(role: .destructive) { sourceStore.removeFolder(id: fid); vm.loadAll() } label: {
@@ -850,6 +871,12 @@ public struct ContentView: View {
                                 }
                             } label: {
                                 Label("内容处理", systemImage: "gearshape.2")
+                            }
+                            // 重新抓取全文（单篇重抓）
+                            Button {
+                                Task { await FullTextFetcher.shared.refetchSingleFulltext(contentId: item.id) }
+                            } label: {
+                                Label("重新抓取全文", systemImage: "arrow.triangle.2.circlepath")
                             }
 
                             // ── 后处理 ──
@@ -1315,6 +1342,56 @@ public struct ReadingView: View {
                 .buttonStyle(.quiet)
                 .help("分享 / 后处理")
 
+                // 全文 + 内容处理按钮（两字中文，直接做图标）
+                Button { runFulltext() } label: {
+                    Text("全文")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.rbText2)
+                        .frame(width: 32, height: 24)
+                }
+                .buttonStyle(.quiet)
+                .help("获取全文")
+
+                Button { runScore() } label: {
+                    Text("评分")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.rbText2)
+                        .frame(width: 32, height: 24)
+                }
+                .buttonStyle(.quiet)
+                .help("AI 评分")
+
+                Button { runSummarize() } label: {
+                    Text("摘要")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.rbText2)
+                        .frame(width: 32, height: 24)
+                }
+                .buttonStyle(.quiet)
+                .help("AI 摘要")
+
+                if item.ctype != "podcast" && item.ctype != "video" {
+                    Button { runTranslate() } label: {
+                        Text("翻译")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.rbText2)
+                            .frame(width: 32, height: 24)
+                    }
+                    .buttonStyle(.quiet)
+                    .help("AI 翻译")
+                }
+
+                if item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil {
+                    Button { runTranscribe() } label: {
+                        Text("转录")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.rbText2)
+                            .frame(width: 32, height: 24)
+                    }
+                    .buttonStyle(.quiet)
+                    .help("AI 转录")
+                }
+
                 Spacer()
 
                 // 双语/原文/翻译切换（有翻译时）：双语对照 / 仅原文 / 仅译文
@@ -1659,6 +1736,38 @@ public struct ReadingView: View {
     private var contentBody: String {
         if let md = item.contentMd, !md.isEmpty { return md }
         return item.excerpt ?? ""
+    }
+
+    private func runFulltext() {
+        let cid = item.id
+        guard PipelineWorker.shared.tryLockContent(cid) else {
+            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            return
+        }
+        busy = true
+        busyForId = cid
+        statusMsg = "获取全文中…"
+        Task {
+            // 从源 config 解析 fetch_mode
+            let srcConfig = Database.shared.queryRows("""
+                SELECT s.config FROM content c LEFT JOIN content_source s ON c.source_id = s.id WHERE c.id = ?
+                """, params: [cid]).first?["config"] ?? "{}"
+            var mode: FetchMode = .summary
+            if let data = srcConfig.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let raw = obj["fetch_mode"] as? String,
+               let m = FetchMode(rawValue: raw) { mode = m }
+            let ok = await FullTextFetcher.shared.fetchAndStore(
+                contentId: cid, url: item.url, feedHtml: nil, mode: mode)
+            if ok { ArchiveService.shared.rearchive(contentId: cid) }
+            await MainActor.run {
+                PipelineWorker.shared.unlockContent(cid)
+                guard busyForId == cid else { return }
+                busy = false
+                statusMsg = ok ? "✅ 全文获取完成" : "❌ 全文获取失败"
+                if ok { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
+            }
+        }
     }
 
     private func runScore() {
