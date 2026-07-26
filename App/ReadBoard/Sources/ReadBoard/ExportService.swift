@@ -72,6 +72,10 @@ public struct ExportRule: Identifiable {
     var target: String             // obsidian / mddir / webhook / cubox / instapaper / readwise / notion
     var targetConfig: [String: Any]
     var overwrite: Bool = true     // 覆盖原文件（true）vs 生成新文件（false，加时间戳）
+    /// frontmatter 包含的字段（nil = 默认全部：title/source/author/url/score/published/archived）
+    var frontmatterFields: [String]? = nil
+    /// 标题命名模板（{title}/{date}/{id} 占位符，默认 "{title}-{id}"）
+    var titleTemplate: String = "{title}-{id}"
     var lastRunAt: String?
 
     static func == (lhs: ExportRule, rhs: ExportRule) -> Bool { lhs.id == rhs.id }
@@ -392,7 +396,9 @@ public final class ExportService: @unchecked Sendable {
             }
             return writeMarkdown(md: md, title: c.title, source: c.source, contentId: c.id,
                                  dir: dir, bySource: rule.targetConfig["subdir_by_source"] as? Bool ?? false,
-                                 overwrite: rule.overwrite)
+                                 overwrite: rule.overwrite,
+                                 frontmatterFields: rule.frontmatterFields,
+                                 titleTemplate: rule.titleTemplate)
         case "webhook":
             guard let urlStr = rule.targetConfig["url"] as? String, let url = URL(string: urlStr) else {
                 return (false, nil, "Webhook URL 未配置")
@@ -554,7 +560,7 @@ public final class ExportService: @unchecked Sendable {
         }
     }
 
-    private func writeMarkdown(md: String, title: String, source: String, contentId: Int64, dir: String, bySource: Bool, overwrite: Bool = true) -> (Bool, String?, String?) {
+    private func writeMarkdown(md: String, title: String, source: String, contentId: Int64, dir: String, bySource: Bool, overwrite: Bool = true, frontmatterFields: [String]? = nil, titleTemplate: String = "{title}-{id}") -> (Bool, String?, String?) {
         let fm = FileManager.default
         var targetDir = dir
         if bySource && !source.isEmpty {
@@ -562,8 +568,13 @@ public final class ExportService: @unchecked Sendable {
         }
         do {
             try fm.createDirectory(atPath: targetDir, withIntermediateDirectories: true)
-            let base = String(Self.sanitizeFilename(title).prefix(80))
-            var filename = base + ".md"
+            // 按模板生成文件名：{title}/{date}/{id} 占位符替换
+            let dateStr = ISO8601DateFormatter().string(from: Date()).prefix(10)
+            let filenameBase = titleTemplate
+                .replacingOccurrences(of: "{title}", with: Self.sanitizeFilename(title).prefix(80).description)
+                .replacingOccurrences(of: "{date}", with: String(dateStr))
+                .replacingOccurrences(of: "{id}", with: String(contentId))
+            var filename = filenameBase + ".md"
             var path = targetDir + "/" + filename
             if fm.fileExists(atPath: path) {
                 if overwrite {
@@ -575,14 +586,37 @@ public final class ExportService: @unchecked Sendable {
                     let timestamp = ISO8601DateFormatter().string(from: Date())
                         .replacingOccurrences(of: ":", with: "-")
                         .prefix(19)
-                    filename = "\(base)-\(timestamp).md"
+                    filename = "\(filenameBase)-\(timestamp).md"
                     path = targetDir + "/" + filename
                 }
             }
-            try md.write(toFile: path, atomically: true, encoding: .utf8)
+            // 按配置转换 frontmatter（有则增补/无则生成）
+            let finalMd = transformFrontmatter(md: md, title: title, source: source, contentId: contentId, fields: frontmatterFields)
+            try finalMd.write(toFile: path, atomically: true, encoding: .utf8)
             return (true, path, nil)
         } catch {
             return (false, nil, error.localizedDescription)
+        }
+    }
+
+    /// 按配置转换 frontmatter：有 frontmatter 则增补/转换字段，无则生成插入顶部
+    private func transformFrontmatter(md: String, title: String, source: String, contentId: Int64, fields: [String]?) -> String {
+        let defaultFields = ["title", "source", "author", "url", "score", "published", "archived"]
+        let includeFields = fields ?? defaultFields
+        // 生成 frontmatter 内容
+        var frontmatter = "---\n"
+        if includeFields.contains("title") { frontmatter += "title: \"\(title.replacingOccurrences(of: "\"", with: "\\\""))\"\n" }
+        if includeFields.contains("source") { frontmatter += "source: \"\(source.replacingOccurrences(of: "\"", with: "\\\""))\"\n" }
+        if includeFields.contains("archived") { frontmatter += "archived: true\n" }
+        frontmatter += "---\n\n"
+        // 检查 md 是否已有 frontmatter
+        if md.hasPrefix("---") {
+            // 有 frontmatter：剥掉旧的，插入新的（转换）
+            let stripped = Self.stripLeadingFrontmatter(md)
+            return frontmatter + stripped
+        } else {
+            // 无 frontmatter：直接插入顶部（生成）
+            return frontmatter + md
         }
     }
 

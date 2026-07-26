@@ -334,6 +334,8 @@ public struct ExportRuleEditor: View {
     @State private var keywordsText = ""
     @State private var selectedContentTypes: Set<String> = []
     @State private var selectedLanguages: Set<String> = []
+    // frontmatter 配置
+    @State private var selectedFrontmatterFields: Set<String> = []
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -591,6 +593,38 @@ public struct ExportRuleEditor: View {
                             .onChange(of: notionToken) { _, v in rule.targetConfig["token"] = v }
                         TextField("Notion Database ID", text: $notionDatabaseId)
                             .onChange(of: notionDatabaseId) { _, v in rule.targetConfig["database_id"] = v }
+                    }
+                }
+
+                // frontmatter 配置（仅本地目录目标：mddir/obsidian）
+                if rule.target == "obsidian" || rule.target == "mddir" {
+                    Section("frontmatter 配置") {
+                        Text("选择包含的字段（不选 = 默认全部）")
+                            .font(.caption)
+                            .foregroundStyle(Color.rbText3)
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                            ForEach(["title", "source", "author", "url", "score", "published", "archived"], id: \.self) { field in
+                                Toggle(field, isOn: Binding(
+                                    get: { selectedFrontmatterFields.contains(field) },
+                                    set: { on in
+                                        if on { selectedFrontmatterFields.insert(field) }
+                                        else { selectedFrontmatterFields.remove(field) }
+                                        rule.frontmatterFields = selectedFrontmatterFields.isEmpty ? nil : Array(selectedFrontmatterFields)
+                                    }
+                                ))
+                                .tint(Color.rbAccent)
+                            }
+                        }
+                    }
+
+                    Section("标题命名") {
+                        Picker("命名规则", selection: $rule.titleTemplate) {
+                            Text("标题-ID（title-12345）").tag("{title}-{id}")
+                            Text("仅标题（title）").tag("{title}")
+                            Text("标题-日期（title-2026-07-26）").tag("{title}-{date}")
+                            Text("标题-日期-ID（title-2026-07-26-12345）").tag("{title}-{date}-{id}")
+                        }
+                        .tint(Color.rbAccent)
                     }
                 }
             }
