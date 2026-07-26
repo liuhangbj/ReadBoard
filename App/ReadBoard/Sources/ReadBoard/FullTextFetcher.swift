@@ -339,6 +339,14 @@ public final class FullTextFetcher: @unchecked Sendable {
               let text = String(data: data, encoding: .utf8), text.count >= 50 else {
             return nil
         }
+        // CAPTCHA/验证页检测——Jina 返回错误页不算成功
+        let lower = text.lowercased()
+        if lower.contains("access to this page has been denied")
+            || lower.contains("press & hold to confirm")
+            || lower.contains("captcha")
+            || lower.contains("please make sure you are authorized") {
+            return nil
+        }
         return text
     }
 }
