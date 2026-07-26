@@ -565,12 +565,16 @@ public final class SourceStore: ObservableObject {
                 isDup = 1
                 dupOf = Int64(existingId)
             }
+            // 播客/视频：简介(entry.html)剥标签写进 excerpt——播客的「摘要」存摘要字段，
+            // content_html 之后可随统一规则删除（文章 content_html 是全文原料另行处理）
+            let excerptForInsert: String? = (ctype == "podcast" || ctype == "video")
+                ? Self.stripHtml(entry.html) : nil
             let ok = self.db.execute(
                 """
-                INSERT INTO content (ctype, guid, source, source_id, title, author, url, published_at, content_html, fetch_status, meta, content_hash, is_duplicate, duplicate_of)
-                VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?)
+                INSERT INTO content (ctype, guid, source, source_id, title, author, url, published_at, content_html, excerpt, fetch_status, meta, content_hash, is_duplicate, duplicate_of)
+                VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)
                 """,
-                params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url, published, entry.html, metaJson, hash, isDup, dupOf.map { Int($0) }]
+                params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url, published, entry.html, excerptForInsert, metaJson, hash, isDup, dupOf.map { Int($0) }]
             )
             if ok { newId = self.db.lastInsertId() }
             return ok
@@ -586,6 +590,14 @@ public final class SourceStore: ObservableObject {
     }
 
     // MARK: 内容去重辅助
+
+    /// 剥 HTML 标签成纯文本（压空白）——播客简介入 excerpt 用
+    static func stripHtml(_ html: String) -> String {
+        var text = html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        return text
+    }
 
     /// url 规范化：去 utm_*/fbclid/gclid 等追踪参数 + 去 fragment + 去尾斜杠 + 小写 scheme/host
     static func normalizeUrl(_ urlString: String) -> String {

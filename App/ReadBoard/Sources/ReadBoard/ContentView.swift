@@ -506,7 +506,7 @@ public struct ContentView: View {
             case "translate":
                 // 媒体项翻简介（content_html → llm_excerpt_translated）；非媒体项翻正文
                 if item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil {
-                    ok = await pipeline.translateExcerpt(contentId: item.id, title: item.title, contentHtml: item.contentHtml ?? item.excerpt ?? "")
+                    ok = await pipeline.translateExcerpt(contentId: item.id, title: item.title, contentHtml: item.excerpt ?? item.contentHtml ?? "")
                 } else {
                     ok = await pipeline.translate(contentId: item.id, title: item.title, body: body)
                 }
@@ -1814,9 +1814,10 @@ public struct ReadingView: View {
 
     // MARK: 媒体项三标签（原文/译文/转录）
 
-    /// feed 简介原文（剥标签的纯文本——content_html 是 HTML 片段）
+    /// feed 简介原文（excerpt 已是剥标签纯文本——播客简介存摘要字段；兜底 content_html 剥标签兼容旧数据）
     private var excerptPlainText: String {
-        let html = item.contentHtml ?? item.excerpt ?? ""
+        if let ex = item.excerpt, !ex.isEmpty { return ex }
+        let html = item.contentHtml ?? ""
         guard !html.isEmpty else { return "(无简介)" }
         var text = html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
         text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
@@ -1982,7 +1983,7 @@ public struct ReadingView: View {
             // 非媒体项：翻译正文 → llm_translated_md（译文/原文切换）
             let ok: Bool
             if isMediaItem {
-                ok = await pipeline.translateExcerpt(contentId: cid, title: item.title, contentHtml: item.contentHtml ?? item.excerpt ?? "")
+                ok = await pipeline.translateExcerpt(contentId: cid, title: item.title, contentHtml: item.excerpt ?? item.contentHtml ?? "")
             } else {
                 ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
             }
