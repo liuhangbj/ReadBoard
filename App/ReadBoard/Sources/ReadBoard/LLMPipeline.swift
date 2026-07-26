@@ -263,11 +263,13 @@ public final class LLMPipeline: @unchecked Sendable {
 
     /// 把英文转录稿翻译成「中英文对照」md：英段+中段交替，空行分隔。
     /// 转录稿是 whisper 碎句，让 LLM 先合并成通顺段落再对照——顺带提升可读性。
-    /// 长文本（>12000 字）分块处理，逐块对照后拼接。
+    /// 长文本（>6000 字）分块处理，逐块对照后拼接。
+    /// 注意：对照输出是双倍内容（英+中），单块 6000 字 ≈ 8000 字符对照 ≈ 2500-4000 token，
+    /// 配 maxTokens 8192 不截断（实测 12000 字单块 + 4096 token 会被 finish_reason=length 腰斩）。
     func translateBilingual(_ text: String) async -> String? {
         guard isAvailable else { return nil }
-        if text.count > 12000 {
-            let chunks = Self.splitByParagraph(text, maxChars: 12000)
+        if text.count > 6000 {
+            let chunks = Self.splitByParagraph(text, maxChars: 6000)
             guard !chunks.isEmpty else { return nil }
             var parts: [String] = []
             var anyOK = false
@@ -283,7 +285,7 @@ public final class LLMPipeline: @unchecked Sendable {
         return await translateBilingualSingle(text)
     }
 
-    /// 单块中英对照（<=12000 字）。prompt 已实测：格式稳定（英段+中段交替空行分隔），无代码块/开场白。
+    /// 单块中英对照（<=6000 字）。prompt 已实测：格式稳定（英段+中段交替空行分隔），无代码块/开场白。
     private func translateBilingualSingle(_ text: String) async -> String? {
         let prompt = """
         你是一位专业的翻译。下面是一段英文播客转录稿。请输出**中英文对照**版本，要求：
@@ -299,7 +301,7 @@ public final class LLMPipeline: @unchecked Sendable {
         do {
             let (out, _) = try await client.chat(
                 messages: [ChatMessage(role: "user", content: prompt)],
-                temperature: 0.3, maxTokens: 4096)
+                temperature: 0.3, maxTokens: 8192)
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         } catch {
