@@ -1029,9 +1029,26 @@ public struct ArticleRow: View {
                             }
                         }
                     }
-                    // 评分 badge（加「评分」前缀）
+                    // 评分 badge（固定宽度——个位数/0 不短一截）
                     if let s = item.llmScore {
-                        RBadge(text: "评分 \(s)", color: scoreColor(s), scale: scale)
+                        Text("评分 \(s)")
+                            .font(.system(size: RB.F.badge * scale, weight: .medium))
+                            .foregroundStyle(scoreColor(s))
+                            .frame(width: 52, alignment: .center)   // 固定宽度
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(scoreColor(s).opacity(0.10))
+                            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: RB.Radius.sm)
+                                    .strokeBorder(scoreColor(s).opacity(0.22), lineWidth: RB.Line.hair)
+                            )
+                    }
+                    // 全文 badge（有全文绿 / 无全文红）——content_md 非空即全文
+                    if let md = item.contentMd, !md.isEmpty {
+                        RBadge(text: "全文", color: .rbScoreHigh, scale: scale)
+                    } else {
+                        RBadge(text: "无全文", color: .rbScoreLow, scale: scale)
                     }
                     // 管线已处理 badge（两字标签）
                     if let sum = item.llmSummary, !sum.isEmpty {
