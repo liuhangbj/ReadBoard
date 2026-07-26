@@ -40,6 +40,8 @@ public struct ContentItem: Identifiable, Hashable {
     var isMedia: Bool = false          // 媒体项（podcast/video/含 audio_url）
     /// 译文开头 120 字符（中栏标题显示中文用——llm_translated_md 第一行是中文标题）
     var translatedHead: String? = nil
+    /// 标题的中文翻译（媒体项翻译时连标题一起翻——中栏/标题栏显示中文标题，列表轻列直查）
+    var titleTranslated: String? = nil
     /// 有全文（content_md 非空）——全文 badge 用，列表轻列不扛 content_md 大字段
     var hasFulltext: Bool = false
 
@@ -54,6 +56,7 @@ public struct ContentItem: Identifiable, Hashable {
         copy.hasTranslation = hasTranslation
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
+        copy.titleTranslated = titleTranslated
         copy.hasFulltext = hasFulltext   // 复制时保留全文标记——markingRead 不丢
         return copy
     }
@@ -69,6 +72,7 @@ public struct ContentItem: Identifiable, Hashable {
         copy.hasTranslation = hasTranslation
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
+        copy.titleTranslated = titleTranslated
         copy.hasFulltext = hasFulltext
         return copy
     }
@@ -84,6 +88,7 @@ public struct ContentItem: Identifiable, Hashable {
         copy.hasTranslation = hasTranslation
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
+        copy.titleTranslated = titleTranslated
         copy.hasFulltext = hasFulltext
         return copy
     }
@@ -100,6 +105,7 @@ public struct ContentItem: Identifiable, Hashable {
         copy.hasTranslation = hasTranslation
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
+        copy.titleTranslated = titleTranslated
         copy.hasFulltext = hasFulltext
         copy.contentHtml = contentHtml ?? self.contentHtml
         copy.excerptTranslated = excerptTranslated ?? self.excerptTranslated
@@ -616,6 +622,7 @@ public final class Database: @unchecked Sendable {
                    (c.llm_translated_md IS NOT NULL AND c.llm_translated_md != '') AS has_trans,
                    (c.ctype IN ('podcast','video') OR c.meta LIKE '%audio_url%') AS is_media,
                    substr(c.llm_translated_md, 1, 120) AS translated_head,
+                   c.llm_title_translated AS title_translated,
                    (c.content_md IS NOT NULL AND LENGTH(c.content_md) > 500) AS has_fulltext
             FROM content c JOIN content_fts f ON f.rowid = c.id
             """
@@ -627,6 +634,7 @@ public final class Database: @unchecked Sendable {
                    (llm_translated_md IS NOT NULL AND llm_translated_md != '') AS has_trans,
                    (ctype IN ('podcast','video') OR meta LIKE '%audio_url%') AS is_media,
                    substr(llm_translated_md, 1, 120) AS translated_head,
+                   llm_title_translated AS title_translated,
                    (content_md IS NOT NULL AND LENGTH(content_md) > 500) AS has_fulltext
             FROM content
             """
@@ -923,7 +931,7 @@ public final class Database: @unchecked Sendable {
         if sqlite3_column_count(stmt) > 15, let html = text(15) {
             item.imageUrl = Self.firstImageUrl(in: html)
         }
-        // 列表标签轻量标记（列 16 has_trans / 列 17 is_media / 列 18 translated_head / 列 19 has_fulltext）
+        // 列表标签轻量标记（列 16 has_trans / 列 17 is_media / 列 18 translated_head / 列 19 title_translated / 列 20 has_fulltext）
         if sqlite3_column_count(stmt) > 17 {
             item.hasTranslation = sqlite3_column_int(stmt, 16) == 1
             item.isMedia = sqlite3_column_int(stmt, 17) == 1
@@ -932,7 +940,10 @@ public final class Database: @unchecked Sendable {
             item.translatedHead = text(18)
         }
         if sqlite3_column_count(stmt) > 19 {
-            item.hasFulltext = sqlite3_column_int(stmt, 19) == 1
+            item.titleTranslated = text(19)
+        }
+        if sqlite3_column_count(stmt) > 20 {
+            item.hasFulltext = sqlite3_column_int(stmt, 20) == 1
         }
         return item
     }

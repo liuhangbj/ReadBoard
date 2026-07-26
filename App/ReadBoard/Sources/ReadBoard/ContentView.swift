@@ -1104,8 +1104,12 @@ public struct ArticleRow: View {
         item.ctype != "wechat" && item.ctype != "social"
     }
 
-    /// 显示标题：有译文时取 translatedHead 第一个非空行（中文标题），否则原标题
+    /// 显示标题：媒体项优先标题译文（llm_title_translated）；否则有正文译文取 translatedHead 第一个非空行；都没有用原标题
     private var displayTitle: String {
+        // 媒体项：标题译文（独立的 llm_title_translated 字段，不再靠 excerptTranslated 第一行猜）
+        if let t = item.titleTranslated, !t.isEmpty {
+            return t
+        }
         guard let head = item.translatedHead, !head.isEmpty else {
             return item.title
         }
@@ -1909,9 +1913,14 @@ public struct ReadingView: View {
         }
     }
 
-    /// 中文标题（非媒体项从正文译文 translatedHead 取；媒体项从简介译文 excerptTranslated 第一行取）
+    /// 中文标题（媒体项取标题译文 titleTranslated；非媒体项从正文译文 translatedHead 第一行取）
     private var chineseTitle: String? {
-        let head = isMediaItem ? (item.excerptTranslated ?? "") : (item.translatedHead ?? "")
+        // 媒体项：独立的标题译文（llm_title_translated）
+        if isMediaItem {
+            guard let t = item.titleTranslated, !t.isEmpty else { return nil }
+            return t
+        }
+        let head = item.translatedHead ?? ""
         guard !head.isEmpty else { return nil }
         // 跳过空行，取第一个非空行（译文开头常是空行，第二行才是标题）
         let firstNonEmpty = head.components(separatedBy: "\n")

@@ -421,13 +421,14 @@ public final class LLMPipeline: @unchecked Sendable {
         text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return false }
-        // 输出格式：第一行中文标题，空行后中文简介译文——chineseTitle 从第一行取，「译文」标签显示全文
+        // 一次调用翻标题+简介，用固定分隔符拆开分存两字段（标题→llm_title_translated 供中栏/标题栏，
+        // 简介→llm_excerpt_translated 供「译文」标签）
         let prompt = """
-        你是一位专业的翻译。请将以下播客/视频的标题和简介翻译成中文，要求：
-        - 第一行只输出中文标题（不要"标题："前缀，不要原文标题）
-        - 空一行，然后输出简介的中文译文
-        - 语言流畅自然，符合中文表达习惯，不是逐字直译
-        - 不要任何解释或"以下是翻译"之类的话
+        你是一位专业的翻译。请将以下播客/视频的标题和简介翻译成中文，严格按格式输出：
+        第一行只输出中文标题（不要"标题："前缀，不要原文标题），
+        第二行只输出四个等号 ==== （作为分隔符），
+        第三行起输出简介的中文译文。
+        语言流畅自然，符合中文表达习惯，不是逐字直译。不要任何解释或"以下是翻译"之类的话。
 
         标题：\(title)
 
@@ -440,9 +441,21 @@ public final class LLMPipeline: @unchecked Sendable {
                 temperature: 0.3, maxTokens: 4096)
             let t = out.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty else { return false }
-            return db.execute(
-                "UPDATE content SET llm_excerpt_translated = ? WHERE id = ?",
-                params: [t, contentId])
+            // 按 ==== 分隔符拆标题/简介
+            let parts = t.components(separatedBy: "\n====\n")
+            var titleT = ""
+            var excerptT = t
+            if parts.count >= 2 {
+                titleT = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                excerptT = parts.dropFirst().joined(separator: "\n====\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            // 分存：标题译文 + 简介译文（一次事务两次 UPDATE）
+            var ok = true
+            if !titleT.isEmpty {
+                ok = db.execute("UPDATE content SET llm_title_translated = ? WHERE id = ?", params: [titleT, contentId]) && ok
+            }
+            ok = db.execute("UPDATE content SET llm_excerpt_translated = ? WHERE id = ?", params: [excerptT, contentId]) && ok
+            return ok
         } catch {
             setError(Self.describeError(error))
             return false
