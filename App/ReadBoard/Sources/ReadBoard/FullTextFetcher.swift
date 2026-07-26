@@ -332,10 +332,10 @@ public final class FullTextFetcher: @unchecked Sendable {
         request.setValue("text/plain", forHTTPHeaderField: "Accept")
         // 只保留链接文本，去掉 URL——导航链接变纯文本不占篇幅
         request.setValue("text", forHTTPHeaderField: "x-retain-links")
-        // 按域名指定 CSS 选择器——只返回正文区域，不要导航/推荐
-        if let selector = Self.jinaTargetSelector(for: url) {
-            request.setValue(selector, forHTTPHeaderField: "x-target-selector")
-        }
+        // 延长超时——让 Jina 加载更多内容（展开按钮/懒加载）
+        request.setValue("30", forHTTPHeaderField: "x-timeout")
+        // 移除导航/广告/页脚——按通用选择器
+        request.setValue("nav, footer, .sidebar, .ads, header, .advertisement, .social-share, .newsletter-signup", forHTTPHeaderField: "x-remove-selector")
         if usePro, let key = UserDefaults.standard.string(forKey: "jina.apiKey"), !key.isEmpty {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
@@ -353,22 +353,43 @@ public final class FullTextFetcher: @unchecked Sendable {
             || lower.contains("please make sure you are authorized") {
             return nil
         }
-        return text
+        // 清洗 Jina 返回——去掉导航/推荐链接段落（[text](url) 且 text < 50 字符的段落）
+        let cleaned = Self.cleanJinaMarkdown(text)
+        return cleaned.count >= 50 ? cleaned : nil
     }
 
-    /// 按域名返回 Jina target-selector——常见站点配 CSS 选择器，只取正文区域
-    private static func jinaTargetSelector(for urlString: String) -> String? {
-        guard let host = URL(string: urlString)?.host?.lowercased() else { return nil }
-        // Fast Company
-        if host.contains("fastcompany.com") { return "article" }
-        // Investing.com
-        if host.contains("investing.com") { return "article" }
-        // NYT
-        if host.contains("nytimes.com") { return "section[name=\"articleBody\"]" }
-        // Seeking Alpha
-        if host.contains("seekingalpha.com") { return "article" }
-        // 默认不指定——Jina 自动提取
-        return nil
+    /// 清洗 Jina 返回的 markdown——去掉导航栏、推荐链接、订阅按钮等噪音段落
+    /// 规则：段落全是链接（[text](url) 格式）且链接文本 < 50 字符 → 噪音
+    private static func cleanJinaMarkdown(_ md: String) -> String {
+        let paragraphs = md.components(separatedBy: "\n\n")
+        var cleaned: [String] = []
+        for para in paragraphs {
+            let trimmed = para.trimmingCharacters(in: .whitespacesAndNewlines)
+            // 空段落跳过
+            if trimmed.isEmpty { continue }
+            // 全是链接的段落（导航/推荐）——链接文本 < 50 字符
+            let linkPattern = #"\[([^\]]{1,50})\]\([^)]+\)"#
+            let regex = try! NSRegularExpression(pattern: linkPattern)
+            let range = NSRange(trimmed.startIndex..., in: trimmed)
+            let matches = regex.matches(in: trimmed, range: range)
+            var linkTextLen = 0
+            for match in matches {
+                if let r = Range(match.range(at: 1), in: trimmed) {
+                    linkTextLen += trimmed[r].count
+                }
+            }
+            // 段落长度和链接文本长度接近 → 全是链接，噪音
+            if Double(linkTextLen) / Double(trimmed.count) > 0.8, trimmed.count < 500 {
+                continue
+            }
+            // 订阅/导航关键词
+            let navKeywords = ["subscribe", "sign in", "log in", "menu", "navigation"]
+            if navKeywords.contains(where: { trimmed.lowercased().contains($0) }), trimmed.count < 200 {
+                continue
+            }
+            cleaned.append(trimmed)
+        }
+        return cleaned.joined(separator: "\n\n")
     }
 }
 
