@@ -1354,7 +1354,7 @@ public struct ReadingView: View {
                 // 双语/原文/翻译切换（有翻译时）：双语对照 / 仅原文 / 仅译文
                 if item.llmTranslatedMd != nil {
                     RBSegmented(
-                        items: [(0, "双语"), (1, "原文"), (2, "译文")],
+                        items: [(0, "双语"), (1, "原文")],
                         selection: $viewMode
                     )
                 }
@@ -1720,12 +1720,8 @@ public struct ReadingView: View {
     }
 
     private var bodyText: String {
-        // 仅译文：有译文显示译文；无译文（还没翻译）显示提示而非掉回原文
-        if viewMode == 2 {
-            if let t = item.llmTranslatedMd, !t.isEmpty { return t }
-            return "（本篇尚未翻译——点上方「AI 翻译」生成译文后此处显示）"
-        }
-        // 双语/仅原文：优先原文 md
+        // 双语/仅原文：优先原文 md（contentMd ?? excerpt）
+        if let md = loadedContentMd, !md.isEmpty { return md }
         if let md = item.contentMd, !md.isEmpty { return md }
         return item.excerpt ?? "(无内容)"
     }
