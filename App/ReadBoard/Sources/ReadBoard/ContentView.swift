@@ -1462,8 +1462,21 @@ public struct ReadingView: View {
 
                 Spacer()
 
-                // 双语/原文切换（有翻译时）：译文 / 原文——仅非媒体项（媒体项用正文区三标签）
-                if !isMediaItem, item.llmTranslatedMd != nil {
+                // 视图切换：非媒体项「译文/原文」两段；媒体项「原文/译文/转录」三段（同一组件同一位置）
+                if isMediaItem {
+                    // 媒体项三标签：有转录对照稿才显示「转录」段
+                    if let t = item.llmTranslatedMd, !t.isEmpty {
+                        RBSegmented(
+                            items: [(0, "原文"), (1, "译文"), (2, "转录")],
+                            selection: $mediaTab
+                        )
+                    } else {
+                        RBSegmented(
+                            items: [(0, "原文"), (1, "译文")],
+                            selection: $mediaTab
+                        )
+                    }
+                } else if item.llmTranslatedMd != nil {
                     RBSegmented(
                         items: [(0, "译文"), (1, "原文")],
                         selection: $viewMode
@@ -1588,20 +1601,6 @@ public struct ReadingView: View {
                     if item.ctype == "podcast", let audioUrl = item.audioUrl, !audioUrl.isEmpty {
                         AudioPlayerView(audioUrl: audioUrl, title: item.title)
                             .padding(.vertical, 4)
-                    }
-
-                    // ── 媒体项三标签：原文(简介) / 译文(简介翻译) / 转录(中英对照) ──
-                    if isMediaItem {
-                        HStack(spacing: 0) {
-                            mediaTabButton(0, "原文")
-                            mediaTabButton(1, "译文")
-                            // 转录标签：有转录对照稿(llm_translated_md)才显示
-                            if let t = item.llmTranslatedMd, !t.isEmpty {
-                                mediaTabButton(2, "转录")
-                            }
-                            Spacer()
-                        }
-                        .padding(.vertical, 4)
                     }
 
                     // ── LLM 操作条（胶囊按钮组 + 状态提示，精致排版）──
@@ -1874,19 +1873,6 @@ public struct ReadingView: View {
     }
 
     // MARK: 媒体项三标签（原文/译文/转录）
-
-    /// 媒体项标签按钮（原文/译文/转录切换）
-    private func mediaTabButton(_ idx: Int, _ label: String) -> some View {
-        Button { mediaTab = idx } label: {
-            Text(label)
-                .font(.system(size: 13, weight: mediaTab == idx ? .semibold : .regular))
-                .foregroundStyle(mediaTab == idx ? Color.rbAccent : Color.rbText3)
-                .padding(.horizontal, 12).padding(.vertical, 5)
-                .background(mediaTab == idx ? Color.rbAccent.opacity(0.12) : Color.clear)
-                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
-        }
-        .buttonStyle(.quiet)
-    }
 
     /// feed 简介原文（剥标签的纯文本——content_html 是 HTML 片段）
     private var excerptPlainText: String {
