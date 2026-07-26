@@ -537,17 +537,6 @@ public struct ContentView: View {
         }
     }
 
-    /// 管线项的内容图标（与中栏单篇右键一致）
-    private func pipelineIcon(_ key: String) -> String {
-        switch key {
-        case "auto_score": return "star"
-        case "auto_translate": return "character.bubble"
-        case "auto_summarize": return "text.quote"
-        case "auto_transcribe": return "waveform"
-        default: return "gearshape"
-        }
-    }
-
     private func pipelineMenuItem(_ label: String, key: String, on: Bool, src: FeedSource) -> some View {
         Button {
             let turningOn = !on
@@ -557,11 +546,8 @@ public struct ContentView: View {
                 pendingBackfill = ("source", src.id, src.name, label, "pipeline")
             }
         } label: {
-            // 内容图标 + 勾选态（开=checkmark 在标签后）
-            Label(label, systemImage: pipelineIcon(key))
-            if on {
-                Image(systemName: "checkmark")
-            }
+            // 只留打钩表勾选态（不要内容图标——勾选清晰可见最重要）
+            Label(label, systemImage: on ? "checkmark" : "")
         }
     }
 
@@ -718,13 +704,11 @@ public struct ContentView: View {
                 pendingBackfill = ("folder", folder.id, folder.name, label, "pipeline")
             }
         } label: {
+            // 只留打钩表勾选态；不一致显示「按订阅源设置」不钩
             if inconsistent {
-                Label("\(label)（按订阅源设置）", systemImage: pipelineIcon(key))
+                Label("\(label)（按订阅源设置）", systemImage: "")
             } else {
-                Label(label, systemImage: pipelineIcon(key))
-                if isOn {
-                    Image(systemName: "checkmark")
-                }
+                Label(label, systemImage: isOn ? "checkmark" : "")
             }
         }
     }
@@ -1617,14 +1601,10 @@ public struct ReadingView: View {
                                     .foregroundStyle(Color.rbScoreLow)
                             }
                         } else {
-                            if item.llmScore == nil, policy.autoScore {
-                                CapsuleButton(title: "AI 评分", icon: "star", disabled: busy) { runScore() }
-                            }
-                            if item.llmSummary == nil, policy.autoSummarize {
-                                CapsuleButton(title: "摘要", icon: "text.quote", disabled: busy) { runSummarize() }
-                            }
-                            // 翻译按钮：媒体/非媒体都始终显示——单篇手动操作，不受自动开关限制；
-                            // 已有译文也显示（可重新翻译）
+                            // 评分/摘要/翻译按钮：均始终显示——单篇手动操作/重操作，
+                            // 不受文件夹/订阅源自动开关限制，已有结果也可重新执行
+                            CapsuleButton(title: "AI 评分", icon: "star", disabled: busy) { runScore() }
+                            CapsuleButton(title: "摘要", icon: "text.quote", disabled: busy) { runSummarize() }
                             CapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
                             if busy {
                                 ProgressView().scaleEffect(0.6).frame(width: 16, height: 16)
