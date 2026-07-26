@@ -235,7 +235,9 @@ function stringifyFrontmatter(frontmatter) {
 }
 
 // ── 主流程：url → markdown（defuddle → Jina Free → Jina Pro）──
-async function fetchMarkdown(dirtyUrl) {
+// 返回 { markdown, engine }——engine 是实际抓取成功的引擎（defuddle/jina_free/jina_pro），
+// 让 Swift 侧正确记录 fetch_engine（黑盒内部 fallback 后，标签要反映真实路径）。
+async function fetchMarkdownWithEngine(dirtyUrl) {
   const url = cleanUrl(dirtyUrl);
   if (url !== dirtyUrl) console.error(`Cleaned URL: ${dirtyUrl} -> ${url}`);
 
@@ -247,13 +249,16 @@ async function fetchMarkdown(dirtyUrl) {
   }
 
   let markdown;
+  let engine = 'defuddle';
   if (needsHtmlPreprocess(url)) {
     console.error('Huxiu article detected, pre-processing HTML...');
     const html = await fetchHtml(url);
     markdown = parseHtmlViaDefuddle(removeHuxiuAiSummary(html));
+    engine = 'defuddle';
   } else {
     try {
       markdown = await fetchViaDefuddleWithRetry(url);
+      engine = 'defuddle';
     } catch (defuddleErr) {
       const jinaFreeEnabled = process.env.JINA_FREE_ENABLED === '1';
       const hasProKey = !!process.env.JINA_API_KEY;
@@ -262,12 +267,14 @@ async function fetchMarkdown(dirtyUrl) {
       if (jinaFreeEnabled) {
         try {
           markdown = await fetchViaJina(url, false);
+          engine = 'jina_free';
         } catch (jinaFreeErr) {
           const is429 = jinaFreeErr.message?.includes('429') || jinaFreeErr.message?.includes('rate');
           if (is429 && !hasProKey) throw jinaFreeErr;
           if (hasProKey) {
             console.error(`${is429 ? 'Jina Free rate limited' : `Jina Free failed (${jinaFreeErr.message?.slice(0, 80)})`}, trying Jina Pro...`);
             markdown = await fetchViaJina(url, true);
+            engine = 'jina_pro';
           } else {
             throw jinaFreeErr;
           }
@@ -275,6 +282,7 @@ async function fetchMarkdown(dirtyUrl) {
       } else if (hasProKey) {
         console.error('Jina Free disabled, trying Jina Pro...');
         markdown = await fetchViaJina(url, true);
+        engine = 'jina_pro';
       }
     }
   }
@@ -282,7 +290,9 @@ async function fetchMarkdown(dirtyUrl) {
   const { frontmatter, body } = splitFrontmatter(markdown);
   frontmatter.source = url;
   if (!frontmatter.url) frontmatter.url = url;
-  return stringifyFrontmatter(frontmatter) + body.trimStart();
+  // 注入真实抓取引擎——Swift 侧解析此字段记录 fetch_engine（识别哪些源在烧 Jina token）
+  frontmatter.rb_fetch_engine = engine;
+  return { markdown: stringifyFrontmatter(frontmatter) + body.trimStart(), engine };
 }
 
 // ── CLI 入口 ──
@@ -292,7 +302,10 @@ async function fetchMarkdown(dirtyUrl) {
     if (mode === 'url') {
       const url = process.argv[3];
       if (!url) { console.error('usage: node fetch_engine.js url <url>'); process.exit(2); }
-      process.stdout.write(await fetchMarkdown(url));
+      const { markdown, engine } = await fetchMarkdownWithEngine(url);
+      process.stdout.write(markdown);
+      // 真实引擎标记写 stderr 最后一行（固定前缀，Swift 侧解析；不污染 stdout 的 markdown）
+      console.error(`RB_FETCH_ENGINE:${engine}`);
     } else if (mode === 'html') {
       let html = '';
       process.stdin.setEncoding('utf8');

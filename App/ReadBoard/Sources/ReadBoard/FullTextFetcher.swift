@@ -27,6 +27,18 @@ public enum FetchMode: String, CaseIterable, Sendable {
     }
 }
 
+extension FullTextFetcher {
+    /// 引擎 tag（fetch_engine.js 输出）→ fetch_engine 记录值。tag 与 FetchMode rawValue 一致，直接用。
+    static func mapEngineTag(_ tag: String?) -> String? {
+        guard let tag, !tag.isEmpty else { return nil }
+        return FetchMode(rawValue: tag) != nil ? tag : nil
+    }
+    /// 引擎 tag → FetchMode
+    static func fetchMode(forEngineTag tag: String) -> FetchMode? {
+        FetchMode(rawValue: tag)
+    }
+}
+
 public final class FullTextFetcher: @unchecked Sendable {
     static let shared = FullTextFetcher()
 
@@ -64,9 +76,14 @@ public final class FullTextFetcher: @unchecked Sendable {
         let feedLongEnough = samples.contains { $0.html.count >= fullTextMinChars }
         if feedLongEnough { return .feedFull }
 
-        // 第 2 级：defuddle 本地提取
+        // 第 2 级：defuddle 本地提取（引擎内部可能 fallback 到 Jina——用真实引擎标记模式）
         for entry in samples where !entry.url.isEmpty {
-            if let md = runCLI(mode: "url", input: entry.url), md.count >= fullTextMinChars {
+            let (md, realEngine) = runCLI(mode: "url", input: entry.url)
+            if let md, md.count >= fullTextMinChars {
+                // 真实引擎是 Jina Free/Pro 时直接返回对应模式——源管理显示真实抓取路径
+                if let realEngine, let realMode = Self.fetchMode(forEngineTag: realEngine) {
+                    return realMode
+                }
                 return .defuddle
             }
         }
@@ -149,11 +166,18 @@ public final class FullTextFetcher: @unchecked Sendable {
             return true
 
         case .defuddle:
-            guard !url.isEmpty, let md = runCLI(mode: "url", input: url), md.count >= 40 else {
+            let (md, realEngine) = runCLI(mode: "url", input: url)
+            guard !url.isEmpty, let md, md.count >= 40 else {
                 markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
                 return false
             }
-            storeMd(contentId: contentId, md: md, engine: mode.rawValue)
+            // 用引擎回传的真实抓取引擎记录——defuddle 内部可能走了 Jina Free/Pro
+            let actualEngine = Self.mapEngineTag(realEngine) ?? mode.rawValue
+            storeMd(contentId: contentId, md: md, engine: actualEngine)
+            // 真实引擎与调用模式不同（内部降级）——回写源的 fetch_mode，下次直接用真实引擎
+            if let realEngine, let realMode = Self.fetchMode(forEngineTag: realEngine), realMode != mode {
+                updateSourceFetchMode(contentId: contentId, newMode: realMode)
+            }
             return true
 
         case .jinaFree:
@@ -236,7 +260,8 @@ public final class FullTextFetcher: @unchecked Sendable {
     // MARK: CLI 调用
 
     /// 调 node CLI 的 url 模式
-    private func runCLI(mode: String, input: String) -> String? {
+    /// url 模式：返回 (markdown, realEngine)——realEngine 是引擎内部 fallback 后的真实抓取引擎
+    private func runCLI(mode: String, input: String) -> (String?, String?) {
         runProcess(args: [cliPath, mode, input], stdinData: nil)
     }
 
@@ -253,10 +278,12 @@ public final class FullTextFetcher: @unchecked Sendable {
             wrapped = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>"
                     + html + "</body></html>"
         }
-        return runProcess(args: [cliPath, "html"], stdinData: wrapped.data(using: .utf8))
+        return runProcess(args: [cliPath, "html"], stdinData: wrapped.data(using: .utf8)).0
     }
 
-    private func runProcess(args: [String], stdinData: Data?) -> String? {
+    /// 返回 (markdown, realEngine)：realEngine 从 stderr 的 RB_FETCH_ENGINE 解析（url 模式），
+    /// html 模式无此标记返回 nil（调用方按 defuddle 记）。
+    private func runProcess(args: [String], stdinData: Data?) -> (String?, String?) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: nodeBin)
         proc.arguments = args
@@ -316,7 +343,7 @@ public final class FullTextFetcher: @unchecked Sendable {
         } catch {
             outPipe.fileHandleForReading.readabilityHandler = nil
             errPipe.fileHandleForReading.readabilityHandler = nil
-            return nil
+            return (nil, nil)
         }
 
         // 超时保护：单次抓取最长 60s——此前无超时，一次挂死 runOnce 永不返回，
@@ -342,9 +369,17 @@ public final class FullTextFetcher: @unchecked Sendable {
             if !errData.isEmpty, let errStr = String(data: errData, encoding: .utf8) {
                 print("FullTextFetcher failed: \(errStr.prefix(200))")
             }
-            return nil
+            return (nil, nil)
         }
-        return String(data: outData, encoding: .utf8)
+        // 从 stderr 解析真实抓取引擎（fetch_engine.js url 模式输出 RB_FETCH_ENGINE:xxx）
+        // ——引擎内部 fallback 后，标签要反映真实路径（识别哪些源在烧 Jina token）
+        var realEngine: String? = nil
+        if let errStr = String(data: errData, encoding: .utf8) {
+            for line in errStr.split(separator: "\n") where line.hasPrefix("RB_FETCH_ENGINE:") {
+                realEngine = String(line.dropFirst("RB_FETCH_ENGINE:".count)).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return (String(data: outData, encoding: .utf8), realEngine)
     }
 
     /// 直接调 Jina Reader（不经过 clip_core 的 fallback 链）——jinaFree/jinaPro 模式用
