@@ -126,6 +126,8 @@ public final class FullTextFetcher: @unchecked Sendable {
             "UPDATE content SET content_md = ?, fetch_status = 2, fetch_engine = ? WHERE id = ?",
             params: [md, engine, contentId]
         )
+        // 全文抓取完成——发通知刷新 ArticleRow 全文 badge（绿/红）
+        NotificationCenter.default.post(name: .contentUpdated, object: nil)
     }
 
     /// summary 模式兜底：excerpt 空时从 content_html 剥标签生成
