@@ -286,15 +286,15 @@ public final class LLMPipeline: @unchecked Sendable {
         return await translateBilingualSingle(text)
     }
 
-    /// 单块中英对照（<=12000 字）。prompt 已实测：格式稳定（英段+中段交替空行分隔），无代码块/开场白。
+    /// 单块中英对照（<=12000 字）。prompt 已实测：英文普通段落 + 中文 `> ` 引用块，格式稳定。
     private func translateBilingualSingle(_ text: String) async -> String? {
         let prompt = """
         你是一位专业的翻译。下面是一段英文播客转录稿。请输出**中英文对照**版本，要求：
         - 按语义把转录稿组织成自然段落（转录稿是碎句，先合并成通顺的句子再分段）
-        - 每段先英文原文，紧接一段中文译文，交替排列
-        - 英文段落和中文段落之间空一行，段与段之间空一行
-        - 保留 markdown 格式，不要代码块包裹，不要任何解释或开场白
-        - 直接输出对照内容
+        - 每段先英文原文（普通段落），紧接一段中文译文
+        - 中文译文必须用 markdown 引用块语法：每行以 `> ` 开头（大于号+空格），英文原文不用引用块
+        - 英文段和中文段之间空一行，段与段之间空一行
+        - 不要代码块包裹，不要任何解释或开场白，直接输出对照内容
 
         转录稿：
         \(text)
