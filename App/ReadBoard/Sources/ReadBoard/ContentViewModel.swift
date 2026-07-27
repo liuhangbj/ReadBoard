@@ -15,7 +15,7 @@ public final class ContentViewModel: ObservableObject {
     /// 看归档 = readFilter 选了归档分支（派生，不再独立 Toggle）
     var showArchived: Bool { readFilter == .archived }
     /// 处理状态筛选（多选）：score/summary/translate/transcribe。空 = 不限。
-    /// 多选为「或」关系（满足任一即纳入），符合"我想看已打分或已翻译的"直觉。
+    /// 多选为「或」关系（满足任一即纳入），符合"我想看已 AI 评分或已翻译的"直觉。
     @Published var processedFilters: Set<String> = []
     @Published var keyword: String = ""            // 搜索关键词（标题/正文）
     /// 文章列表排序：newest（最新优先，默认）/ oldest（最早优先）/ score（评分优先）
@@ -80,20 +80,44 @@ public final class ContentViewModel: ObservableObject {
     private nonisolated(unsafe) var updateObserver: NSObjectProtocol?
 
     init() {
-        // 评分/翻译完成后刷新列表与当前选中项
+        // 评分/翻译完成后刷新列表。
+        // ⚠️ 根因修复（11:47 系统日志符号化堆栈实锤）：
+        // 原实现 `Task { @MainActor in self.reload() }` —— Task @MainActor 会被 SwiftUI
+        // 在当前视图更新周期内排干执行 → reload() 写 @Published items 正中
+        // "Publishing changes from within view updates is not allowed"
+        // （堆栈：items.setter ← reload() ← 本闭包）→ 渲染提交被判 undefined behavior 丢弃，
+        // 全 app 出现「点了不上屏、再点任意处才上屏」的家族病（切标签/AI按钮/摘要卡/译文标题/图片）。
+        // GCD DispatchQueue.main.async 是独立 runloop 回调，不会被卷进视图更新周期——
+        // 这是逃离"更新中发布"的标准通道。
+        //
+        // 同块内恢复刷新 selectedItem 实例（当年禁用是因 Task 在布局期执行→分支切换→UAF）：
+        // GCD 延迟块在布局外执行，且 ContentItem 相等只比 id（List 选中态保持）——
+        // 两个崩溃前提都不在了。恢复后：翻译/摘要/评分完成 → 译文标题/摘要卡/评分标自动上屏，
+        // 不再靠「切别的文章再切回来」。注意列表是轻列：llmTranslatedMd/contentMd 仍靠
+        // ReadingView 的 @State/DB 兜底（translatedText），不依赖本实例。
         updateObserver = NotificationCenter.default.addObserver(
             forName: .contentUpdated, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            // GCD 异步（非 Task @MainActor）——独立 runloop 回调，不会被 SwiftUI 卷进
+            // 当前视图更新周期 → 不再触发 "Publishing changes from within view updates"。
+            // ⚠️ 防抖合并（05:08 渲染风暴实锤）：后台管线每完成一件就 post 一次，
+            // 逐次 reload = 300 行 + 300 个 AsyncImage 全量重建 ×N 次/分钟 → 内存疯涨 + AG cycle。
+            // 0.75s 合并：连发只跑最后一次 reload，风暴砍成一次。
+            guard let self else { return }
+            self.pendingReload?.cancel()
+            let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                let currentId = self.selectedItem?.id
                 self.reload()
-                if let cid = currentId {
-                    self.selectedItem = self.items.first { $0.id == cid }
-                }
+                // 仍然不替换 selectedItem——替换会诱发 AttributeGraph 无限重绘循环（12:10 hang 实锤）。
+                // 正文/摘要/译文标题新鲜度由 ReadingView 的 @State 镜像 + DB 兜底链解决。
             }
+            self.pendingReload = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: work)
         }
     }
+
+    /// 通知防抖用的可取消工作项（连发 contentUpdated 时只保留最后一个）
+    private var pendingReload: DispatchWorkItem?
 
     deinit {
         if let obs = updateObserver {
@@ -113,28 +137,54 @@ public final class ContentViewModel: ObservableObject {
     /// 是否可能还有更多（上次取回的数量 == pageSize）
     @Published var hasMore: Bool = false
 
+    /// reload 序号（最新者优先）：快速连续触发时旧查询结果直接丢弃
+    private var reloadSeq = 0
+
+    /// 重新加载（异步版，17:05 定案）：
+    /// 原版在主线程同步跑 fetchContents(300行) + sidebarTree + 两组计数——
+    /// 67k 行库上每次切文件夹/订阅源都按出风火轮（用户实测定位）。
+    /// DB 查询放后台，@Published 回主线程写；reloadSeq 保证乱序归并以最新为准。
     func reload() {
+        reloadSeq += 1
+        let seq = reloadSeq
         let minS: Int? = minScore > 0 ? minScore : nil
         let kw = keyword.trimmingCharacters(in: .whitespaces)
-        let page = db.fetchContents(sourceId: selectedSourceId, folderId: selectedFolderId,
-                                    minScore: minS,
-                                    includeUnscored: includeUnscored,
-                                    unreadOnly: readFilter == .unread,
-                                    keyword: kw.isEmpty ? nil : kw,
-                                    starredOnly: readFilter == .starred,
-                                    archived: showArchived,
-                                    processedFilters: processedFilters, sortOrder: sortOrder.rawValue,
-                                    limit: Self.pageSize, offset: 0)
-        items = page
-        hasMore = page.count >= Self.pageSize
-        // 修 P1-6：筛选变化（哪怕改排序）不再销毁正在读的文章——保留 selectedItem，
-        // 用户继续读完当前篇，不因筛选/排序变化被关掉。只在文章被删除/归档消失时
-        // 才清（open 时校验还在不在 DB，不在才清）。
-        // 同步刷左栏未读数——已读/全部已读/归档等操作改变了未读计数，
-        // 只刷中栏会导致左栏角标不更新（用户：全部标已读后未读数字不刷新）。
-        sidebarTree = db.fetchSidebarTree()
-        totalCount = db.totalCount()
-        totalUnread = db.totalUnread()
+        let keywordArg = kw.isEmpty ? nil : kw
+        let sourceId = selectedSourceId
+        let folderId = selectedFolderId
+        let unscored = includeUnscored
+        let unreadOnly = readFilter == .unread
+        let starredOnly = readFilter == .starred
+        let archivedFlag = showArchived
+        let processed = processedFilters
+        let sort = sortOrder.rawValue
+        let pageSize = Self.pageSize
+        Task.detached(priority: .userInitiated) {
+            let page = Database.shared.fetchContents(sourceId: sourceId, folderId: folderId,
+                                        minScore: minS,
+                                        includeUnscored: unscored,
+                                        unreadOnly: unreadOnly,
+                                        keyword: keywordArg,
+                                        starredOnly: starredOnly,
+                                        archived: archivedFlag,
+                                        processedFilters: processed, sortOrder: sort,
+                                        limit: pageSize, offset: 0)
+            let tree = Database.shared.fetchSidebarTree()
+            let total = Database.shared.totalCount()
+            let unread = Database.shared.totalUnread()
+            await MainActor.run { [weak self] in
+                guard let self, self.reloadSeq == seq else { return }
+                self.items = page
+                self.hasMore = page.count >= Self.pageSize
+                // 修 P1-6：筛选变化（哪怕改排序）不再销毁正在读的文章——保留 selectedItem，
+                // 用户继续读完当前篇，不因筛选/排序变化被关掉。
+                self.sidebarTree = tree
+                self.totalCount = total
+                self.totalUnread = unread
+                // 全量重查后 DB 已权威——清空乐观已读标记（防与「标为未读」等操作打架）
+                self.readMarks.removeAll()
+            }
+        }
     }
 
     /// 加载下一页（滚动到底触发）。追加而非替换。
@@ -166,14 +216,23 @@ public final class ContentViewModel: ObservableObject {
 
     /// 打开文章：选中并标已读，异步加载正文（列表是轻列，正文点开才查）
     func open(_ item: ContentItem) {
-        selectedItem = item
-        if !item.isRead {
-            db.markRead(contentId: item.id)
-            // 本地同步已读状态，避免等下次 reload
-            if let idx = items.firstIndex(where: { $0.id == item.id }) {
-                items[idx] = items[idx].markingRead()
+        Trace.i("open 文章 id=\(item.id) ctype=\(item.ctype) mem=\(Trace.mb())MB", category: "read")
+        let wasUnread = !item.isRead
+        // 选中项立即出详情；未读则给阅读区一个已读实例（工具条已读态即时正确）。
+        // 这只是个新实例，不碰 items 数组——表格数据纹丝不动。
+        selectedItem = wasUnread ? item.markingRead() : item
+        if wasUnread {
+            // 已读写入移出主线程：writeQueue.sync 会等后台管线的在途写事务，
+            // 快速连点时主线程被按出风火轮；写库结果无需同步等待。
+            let cid = item.id
+            Task.detached { @Sendable in Database.shared.markRead(contentId: cid) }
+            // ⚠️ 铁证：任何对 items（表格数据源）的改写——同步/0.3s 延迟——快速连点时
+            // 都会落进渲染窗口 → reentrant → AG cycle → 闪退（watch5/7 对照实验）。
+            // 已读标记走非结构性通道：readMarks 只影响行内颜色/圆点（表格结构纹丝不动），
+            // 即便落在渲染窗口也只是"更新中发布"（丢一帧自愈），不会重入崩溃。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.readMarks[item.id] = true
             }
-            selectedItem = items.first { $0.id == item.id }
         }
         loadBodyIfNeeded(for: item.id)
     }
@@ -183,21 +242,36 @@ public final class ContentViewModel: ObservableObject {
         // 已有正文则不重复查。媒体项(audioUrl 非空)也要查——需 content_html(原文标签)/excerptTranslated(译文标签)
         if selectedItem?.id == id, selectedItem?.contentMd != nil, selectedItem?.contentHtml != nil { return }
         let currentId = id
+        Trace.d("loadBodyIfNeeded 起 fetchContentBody id=\(currentId)", category: "read")
         Task.detached(priority: .userInitiated) { [db] in
-            guard let body = db.fetchContentBody(id: currentId) else { return }
+            let t0 = Date()
+            guard let body = db.fetchContentBody(id: currentId) else {
+                Trace.w("fetchContentBody 返回 nil id=\(currentId)", category: "read")
+                return
+            }
+            let mdKb = (body.contentMd ?? "").count / 1024
+            let htmlKb = (body.contentHtml ?? "").count / 1024
+            let transKb = (body.llmTranslatedMd ?? "").count / 1024
+            Trace.i("fetchContentBody 完成 id=\(currentId) content_md=\(mdKb)KB content_html=\(htmlKb)KB llm_translated_md=\(transKb)KB 用时=\(Int(t0.timeIntervalSinceNow * -1000))ms mem=\(Trace.mb())MB", category: "read")
             await MainActor.run { [weak self] in
                 guard let self, self.selectedItem?.id == currentId else { return }
-                self.selectedItem = self.selectedItem?.withBody(
-                    contentMd: body.contentMd, llmTranslatedMd: body.llmTranslatedMd, audioUrl: body.audioUrl,
-                    contentHtml: body.contentHtml, excerptTranslated: body.excerptTranslated, titleTranslated: body.titleTranslated)
+                // 不替换 selectedItem——ReadingView 的 @State loadContentMd 已同步加载
+                // contentMd/llmTranslatedMd 等字段。替换 selectedItem 会触发
+                // "Publishing changes from within view updates" → 无限重绘循环 →
+                // AttributeGraph cycle → StackLayout.makeChildren use-after-free 崩溃。
             }
         }
     }
 
     /// 切换已读/未读
     func toggleRead(_ item: ContentItem) {
-        if item.isRead { db.markUnread(contentId: item.id) }
-        else { db.markRead(contentId: item.id) }
+        if item.isRead {
+            db.markUnread(contentId: item.id)
+            readMarks[item.id] = nil
+        } else {
+            db.markRead(contentId: item.id)
+            readMarks[item.id] = true
+        }
         reload()
     }
 
@@ -226,6 +300,9 @@ public final class ContentViewModel: ObservableObject {
 
     // MARK: 轻提示（3s 自动消失）
     @Published var toastMessage: String? = nil
+    /// 已读乐观标记（非结构性）：open() 点未读后写入，ArticleRow 据此立即消点。
+    /// 不碰 items（表格数据源），重载后 DB 已权威即清空。详见 open() 注释（watch5/7 对照实验）。
+    @Published var readMarks: [Int64: Bool] = [:]
     private var toastTask: Task<Void, Never>?
     private func showToast(_ msg: String) {
         toastMessage = msg

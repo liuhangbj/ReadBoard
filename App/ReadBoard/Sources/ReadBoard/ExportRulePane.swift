@@ -50,7 +50,7 @@ public struct ExportRulePane: View {
                 ContentUnavailableView(
                     "还没有导出规则",
                     systemImage: "square.and.arrow.up",
-                    description: Text("新建一条规则：按评分/来源/是否已翻译等条件，把内容自动导出到 Obsidian、Markdown 目录或 Webhook。"))
+                    description: Text("新建一条规则：按 AI 评分/来源/是否已翻译等条件，把内容自动导出到 Obsidian、Markdown 目录或 Webhook。"))
             } else {
                 List {
                     ForEach(rules) { rule in
@@ -109,13 +109,6 @@ public struct ExportRulePane: View {
                         .padding(.vertical, 4)
                     }
                 }
-            }
-        }
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text("导出规则")
-                    .font(.headline)
-                    .foregroundStyle(Color.rbText)
             }
         }
         .sheet(isPresented: $showEditor) {
@@ -344,7 +337,7 @@ public struct ExportRuleEditor: View {
                     TextField("规则名称", text: $rule.name)
                     Picker("触发时机", selection: $rule.triggerOn) {
                         Text("手动执行").tag("manual")
-                        Text("打分完成后").tag("score")
+                        Text("AI 评分完成后").tag("score")
                         Text("翻译完成后").tag("translate")
                         Text("转录完成后").tag("transcribe")
                     }
@@ -353,7 +346,7 @@ public struct ExportRuleEditor: View {
 
                 Section("筛选条件（全部满足才导出）") {
                     HStack {
-                        Text("最低评分")
+                        Text("最低 AI 评分")
                         TextField("不限", text: $minScoreText)
                             .frame(width: 60)
                             .onChange(of: minScoreText) { _, v in
@@ -636,6 +629,11 @@ public struct ExportRuleEditor: View {
                     .keyboardShortcut(.cancelAction)
                     .buttonStyle(.quiet)
                 Spacer()
+                Button("清除") { clearForm() }
+                    .controlSize(.small)
+                    .buttonStyle(.quiet)
+                    .tint(Color.rbScoreLow)
+                    .disabled(!isRuleFilled)
                 Button("保存") {
                     onSave(rule)
                 }
@@ -679,5 +677,31 @@ public struct ExportRuleEditor: View {
         case "webhook": return webhookURL.hasPrefix("http")
         default: return false
         }
+    }
+
+    /// 规则是否已填过内容（用于启用「清除」按钮）
+    private var isRuleFilled: Bool {
+        !rule.name.isEmpty || !dir.isEmpty || targetValid ||
+        !(rule.criteria.keywords ?? []).isEmpty || rule.criteria.minScore != nil
+    }
+
+    /// 清空表单配置（保留 id：实为「清空配置」而非删除规则）
+    private func clearForm() {
+        let keepId = rule.id
+        rule = ExportRule(
+            id: keepId, name: "", enabled: true,
+            criteria: ExportRule.Criteria(), triggerOn: rule.triggerOn,
+            target: "mddir", targetConfig: [:], lastRunAt: nil
+        )
+        dir = ""
+        minScoreText = ""
+        bySource = false
+        webhookURL = ""
+        selectedSourceIds = []
+        selectedFolderIds = []
+        keywordsText = ""
+        selectedContentTypes = []
+        selectedLanguages = []
+        selectedFrontmatterFields = []
     }
 }

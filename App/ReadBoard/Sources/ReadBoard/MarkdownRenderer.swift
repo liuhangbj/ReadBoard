@@ -6,6 +6,12 @@ import SwiftUI
 // 引用块 / 代码块 / 行内代码 / 分割线 / 图片（占位）。
 
 /// 一个 markdown 块
+/// 值类型、实现 Hashable。渲染时用 `ForEach(blocks.indices, id: \.self)`（基于数据源自身
+/// 的下标身份），**千万不要**用 `ForEach(Array(enumerated()), id: \.offset)`——
+/// 那种写法每次 body 重建都 new 一个临时 Array 实例、用 offset 做身份，与数据内容脱节，
+/// SwiftUI 在布局期 makeChildren 时把新旧临时 buffer 混用/释放 →
+/// StackLayout.makeChildren → _ArrayBuffer._consumeAndCreateNew → 指针认证失败（use-after-free）。
+/// 全代码库同类写法已统一根除，新增渲染列表务必避开。
 enum MdBlock: Identifiable {
     case heading(level: Int, text: String)
     case paragraph(text: String)
@@ -25,6 +31,11 @@ struct MarkdownRenderer {
 
     /// 把 markdown 文本解析成块序列
     static func parse(_ md: String) -> [MdBlock] {
+        let t0 = Date()
+        let inLen = md.count
+        if inLen > 200_000 {
+            Trace.w("parse 输入异常大：\(inLen) 字符（约 \(inLen/1024)KB）可能拖垮渲染", category: "md")
+        }
         var blocks: [MdBlock] = []
         var lines = md.components(separatedBy: "\n")
 
@@ -106,6 +117,7 @@ struct MarkdownRenderer {
         if inCode, !codeBuf.isEmpty {
             blocks.append(.codeBlock(lang: codeLang, code: codeBuf.joined(separator: "\n")))
         }
+        Trace.perf("markdown.parse", start: t0, category: "md", extra: "输入=\(inLen) 块数=\(blocks.count) mem=\(Trace.mb())MB")
         return blocks
     }
 

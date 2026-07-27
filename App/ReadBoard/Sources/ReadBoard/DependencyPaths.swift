@@ -8,6 +8,7 @@ public enum DependencyPaths {
 
     enum Kind: String, CaseIterable, Identifiable {
         case whisperCLI, ffmpeg, ytdlp, node, whisperModel
+        case defuddleEngine
         var id: String { rawValue }
 
         var displayName: String {
@@ -17,10 +18,11 @@ public enum DependencyPaths {
             case .ytdlp: return "yt-dlp"
             case .node: return "node"
             case .whisperModel: return "whisper 模型文件"
+            case .defuddleEngine: return "defuddle 引擎（fetch_engine.js）"
             }
         }
 
-        /// PATH 探测用的可执行名（模型文件不探测 PATH）
+        /// PATH 探测用的可执行名（模型文件 / 引擎文件不探测 PATH）
         var executableName: String? {
             switch self {
             case .whisperCLI: return "whisper-cli"
@@ -28,7 +30,13 @@ public enum DependencyPaths {
             case .ytdlp: return "yt-dlp"
             case .node: return "node"
             case .whisperModel: return nil
+            case .defuddleEngine: return nil
             }
+        }
+
+        /// 是否「随 App 打包的资源文件」（不探测 PATH，优先从 Bundle 定位）
+        var isEngineFile: Bool {
+            switch self { case .defuddleEngine: return true; default: return false }
         }
 
         /// 常见安装位置（PATH 探测不到时的兜底候选）
@@ -47,6 +55,13 @@ public enum DependencyPaths {
                 return [home + "/tools/whisper/models/ggml-medium.bin",
                         home + "/models/ggml-medium.bin",
                         home + "/.cache/whisper/ggml-medium.bin"]
+            case .defuddleEngine:
+                // Bundle 优先：App 部署在 .app/Contents/Resources/engine/fetch_engine.js
+                let bundlePath = (Bundle.main.resourceURL?
+                    .appendingPathComponent("engine")
+                    .appendingPathComponent("fetch_engine.js").path) ?? ""
+                return [bundlePath,
+                        home + "/readboard/App/ReadBoard/Resources/engine/fetch_engine.js"]
             }
         }
 

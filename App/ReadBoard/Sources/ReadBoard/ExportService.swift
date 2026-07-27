@@ -145,7 +145,7 @@ public struct ExportRule: Identifiable {
 
     var triggerDisplay: String {
         switch triggerOn {
-        case "score": return "打分后"
+        case "score": return "AI 评分后"
         case "translate": return "翻译后"
         case "transcribe": return "转录后"
         default: return "手动"

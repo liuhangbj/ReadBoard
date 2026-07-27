@@ -293,16 +293,27 @@ enum ReadingFont: Hashable {
         }
     }
 
+    /// 预置字体的实际族名解析结果（进程内一次）——原实现每次调用都
+    /// NSFontManager.shared.availableFontFamilies 全量构建再 contains，
+    /// 而正文每个 Text 每次求值都调 font(size:)（百段正文 × N 次求值 = 上千次全量枚举）。
+    /// nonisolated(unsafe)：读多写极少，最坏并发各解析一次（与 Tracer 同模式）。
+    private nonisolated(unsafe) static var resolvedPresetFamilies: [ReadingFont: String] = [:]
+
     func font(size: CGFloat) -> Font {
         switch self {
         case .system:
             return .system(size: size)
         case .heiti, .kaiti, .fangsong:
-            // 预置中文字体：按候选名找系统里实际装的，找不到回退系统默认
+            if let cached = Self.resolvedPresetFamilies[self] {
+                return cached.isEmpty ? .system(size: size) : .custom(cached, size: size)
+            }
+            // 预置中文字体：按候选名找系统里实际装的，找不到回退系统默认（负缓存同键）
             let available = Set(NSFontManager.shared.availableFontFamilies)
             for candidate in presetFamilyCandidates where available.contains(candidate) {
+                Self.resolvedPresetFamilies[self] = candidate
                 return .custom(candidate, size: size)
             }
+            Self.resolvedPresetFamilies[self] = ""
             return .system(size: size)
         case .custom(let name):
             return .custom(name, size: size)
@@ -364,8 +375,12 @@ struct MarkdownBodyView: View {
                 blockView(block)
             }
         }
-        // 后台解析——长文（>50KB）主线程同步 parse 掉帧（修 P1-6）。
-        // Task.detached 解析后 MainActor.run 写回，不阻塞首帧。
+        // ⚠️ 恢复 f269c64 稳定设计（13:45 对照 git 历史定案）：
+        // 后台解析 + @State 写回——这是 07-26 全天不崩的版本。
+        // 07-26 深夜改为「init 主线程同步 parse + eager 全量排版」后，
+        // 每次视图重建都主线程全量解析+全量排版，渲染风暴升级成 07-27 的崩溃潮。
+        // 切标签卡顿的真根因是通知回调"视图更新中发布"（已在 ContentViewModel 修复），
+        // 不是这里的异步占位——切勿再走回同步 init 老路。
         .task(id: markdown) {
             let parsed = await Task.detached(priority: .userInitiated) {
                 MarkdownRenderer.parse(markdown)
@@ -430,21 +445,11 @@ struct MarkdownBodyView: View {
             Rectangle().fill(p.divider).frame(height: RB.Line.hair)
 
         case .image(let alt, let url):
-            VStack(alignment: .leading, spacing: 4) {
-                AsyncImage(url: URL(string: url)) { phase in
-                    switch phase {
-                    case .success(let img): img.resizable().aspectRatio(contentMode: .fit)
-                    case .failure: Label("图片加载失败", systemImage: "photo").foregroundStyle(p.textFaint)
-                    case .empty: ProgressView()
-                    @unknown default: EmptyView()
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                if !alt.isEmpty {
-                    Text(alt).font(.caption).foregroundStyle(p.textFaint)
-                }
-            }
+            // 惰性 + 失败降级为链接。原因（实测定位 09:06）：SwiftUI AsyncImage 每次 phase 变化
+            // （empty→success/failure）都更新自身 @State → 触发父 body 重算 → 重建一个新的
+            // MarkdownBodyView。文章 N 张图 = N 次正文自我重建风暴，这才是「切标签卡、再点秒切」
+            // 的真凶——init 实测 0ms、命中缓存，慢的是 AsyncImage 反复触发的视图重建。
+            RBRemoteImage(url: url, alt: alt, palette: p)
 
         case .frontmatter(let text):
             FrontmatterBlock(text: text, palette: p)
@@ -478,6 +483,83 @@ struct MarkdownBodyView: View {
     }
 }
 
+// MARK: - 惰性远程图片（手动 URLSession，加载一次，失败降级为链接）
+// 替代 SwiftUI AsyncImage：AsyncImage 每次 phase 变化都更新自身 @State → 触发父 body 重算
+// → 重建 MarkdownBodyView（实测：无点击时 1 分钟内 20+ 次 init 风暴）。本组件只加载一次，
+// 结果存 @State，URL 不变不重复加载；失败显示可点链接而非报错图标（修复图片不显示问题）。
+
+struct RBRemoteImage: View {
+    let url: String
+    let alt: String
+    let palette: ThemePalette
+
+    @State private var nsImage: NSImage? = nil
+    @State private var failed = false
+    @State private var started = false
+
+    var body: some View {
+        Group {
+            if let img = nsImage {
+                // 成功：显示图片
+                VStack(alignment: .leading, spacing: 4) {
+                    Image(nsImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    caption
+                }
+            } else if failed {
+                // 失败降级：可点链接（不再用 AsyncImage 报错图标）
+                Link(destination: URL(string: url) ?? URL(string: "about:blank")!) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "photo")
+                        Text(alt.isEmpty ? "查看图片" : alt)
+                        Image(systemName: "arrow.up.right").font(.caption2)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(palette.link)
+                }
+            } else {
+                // 加载中占位（固定高度，不占位反复重建）
+                HStack(spacing: 6) {
+                    ProgressView().scaleEffect(0.6)
+                    Text("图片加载中…").font(.caption).foregroundStyle(palette.textFaint)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .task(id: url) {
+            guard !started else { return }
+            started = true
+            await load()
+        }
+    }
+
+    @ViewBuilder private var caption: some View {
+        if !alt.isEmpty {
+            Text(alt).font(.caption).foregroundStyle(palette.textFaint)
+        }
+    }
+
+    private func load() async {
+        guard let u = URL(string: url), let scheme = u.scheme, scheme.hasPrefix("http") else {
+            failed = true; return
+        }
+        do {
+            var req = URLRequest(url: u)
+            req.timeoutInterval = 15
+            req.setValue("Mozilla/5.0 (Macintosh) ReadBoard", forHTTPHeaderField: "User-Agent")
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, http.statusCode != 200 { failed = true; return }
+            guard let img = NSImage(data: data) else { failed = true; return }
+            nsImage = img
+        } catch {
+            failed = true
+        }
+    }
+}
+
 // MARK: - 双语逐段对照视图（Follo 核心交互）
 // 原文/译文按段落对齐交替：原文普通字、译文色块背景突出。
 // 段落按双换行切分，一一对应（LLM 翻译保持段数一致时对齐最好）。
@@ -490,28 +572,31 @@ struct BilingualBodyView: View {
     let fontChoice: ReadingFont
     let fontSize: Double
     let lineSpacing: Double
-    /// 内容 ID——读归档 md 文件直接渲染（已配对的双语版本，不再实时合成）
+    /// 内容 ID——读归档 Markdown 文件直接渲染（已配对的双语版本，不再实时合成）
     var contentId: Int64? = nil
 
     private var p: ThemePalette { theme.palette(for: mode) }
 
-    /// 归档 md 文件内容（已配对的双语版本）——@State 缓存
+    /// 归档 Markdown 文件内容（已配对的双语版本）——@State 缓存
     @State private var archivedMd: String? = nil
 
-    /// 读归档 md 文件——ArchiveService.renderBilingual 已配对（译文 + --- + ## 原文 + 原文）
+    /// 读归档 Markdown 文件——ArchiveService.renderBilingual 已配对（译文 + --- + ## 原文 + 原文）
     private func loadArchivedMd() {
         guard let cid = contentId, archivedMd == nil else { return }
         if let path = ArchiveService.shared.archiveFilePath(contentId: cid),
            FileManager.default.fileExists(atPath: path),
            let content = try? String(contentsOfFile: path, encoding: .utf8) {
+            Trace.i("读归档 md 完成 id=\(cid) 大小=\(content.count)字符（约 \(content.count/1024)KB）mem=\(Trace.mb())MB", category: "read")
             archivedMd = content
+        } else if let cid = contentId {
+            Trace.d("无归档文件，回退实时合成 id=\(cid) mem=\(Trace.mb())MB", category: "read")
         }
     }
 
     var body: some View {
         Group {
             if let md = archivedMd {
-                // 直接渲染归档 md 文件（已配对的双语版本）
+                // 直接渲染归档 Markdown 文件（已配对的双语版本）
                 MarkdownBodyView(markdown: md, theme: theme, mode: mode,
                                  fontChoice: fontChoice, fontSize: fontSize, lineSpacing: lineSpacing)
             } else {
@@ -651,7 +736,8 @@ struct FrontmatterBlock: View {
 
             if expanded {
                 VStack(alignment: .leading, spacing: 5) {
-                    ForEach(Array(fields.enumerated()), id: \.offset) { _, f in
+                    ForEach(fields.indices, id: \.self) { idx in
+                        let f = fields[idx]
                         HStack(alignment: .top, spacing: 8) {
                             Text(f.key)
                                 .font(.system(size: 11, design: .monospaced))

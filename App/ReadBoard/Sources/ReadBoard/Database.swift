@@ -543,21 +543,36 @@ public final class Database: @unchecked Sendable {
     /// 这是订阅源视角的组织方式（你的文件夹结构），不是按内容类型分。
     func fetchSidebarTree() -> [SidebarNode] {
         guard open() else { return [] }
-        // 文件夹 + 其下源 + 内容数/未读数
+        // 文件夹 + 其下源 + 内容数/未读数。
+        // ⚠️ 聚合 CTE 版（17:18 实测：1.693s → 21ms）：
+        // 原版每个源两条相关子查询 COUNT(*)（302 源 × 2 = 604 次全表扫）；
+        // 改为 content 单次分组聚合 + LEFT JOIN，配合迁移 017 覆盖索引只扫索引页。
         let folderRows = queryRows("""
+            WITH agg AS (
+                SELECT source_id,
+                       SUM(CASE WHEN is_duplicate = 0 AND is_archived = 0 THEN 1 ELSE 0 END) AS n,
+                       SUM(CASE WHEN is_duplicate = 0 AND is_archived = 0 AND read_at IS NULL THEN 1 ELSE 0 END) AS unread
+                FROM content GROUP BY source_id
+            )
             SELECT f.id AS fid, f.name AS fname, s.id AS sid, s.name AS sname,
-                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0 AND c.is_archived = 0) AS n,
-                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0 AND c.is_archived = 0 AND c.read_at IS NULL) AS unread
+                   COALESCE(agg.n, 0) AS n, COALESCE(agg.unread, 0) AS unread
             FROM folder f
             JOIN content_source s ON s.folder_id = f.id AND s.enabled = 1
+            LEFT JOIN agg ON agg.source_id = s.id
             ORDER BY f.name, n DESC;
             """)
         // 无文件夹的独立源
         let orphanRows = queryRows("""
+            WITH agg AS (
+                SELECT source_id,
+                       SUM(CASE WHEN is_duplicate = 0 AND is_archived = 0 THEN 1 ELSE 0 END) AS n,
+                       SUM(CASE WHEN is_duplicate = 0 AND is_archived = 0 AND read_at IS NULL THEN 1 ELSE 0 END) AS unread
+                FROM content GROUP BY source_id
+            )
             SELECT s.id AS sid, s.name AS sname,
-                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0 AND c.is_archived = 0) AS n,
-                   (SELECT COUNT(*) FROM content c WHERE c.source_id = s.id AND c.is_duplicate = 0 AND c.is_archived = 0 AND c.read_at IS NULL) AS unread
+                   COALESCE(agg.n, 0) AS n, COALESCE(agg.unread, 0) AS unread
             FROM content_source s
+            LEFT JOIN agg ON agg.source_id = s.id
             WHERE s.folder_id IS NULL AND s.enabled = 1
             ORDER BY n DESC;
             """)
@@ -677,7 +692,7 @@ public final class Database: @unchecked Sendable {
             conds.append("\(col)id IN (SELECT content_id FROM content_tag WHERE tag_id = ?)")
         }
         // 处理状态筛选（多选，「或」关系——满足任一即纳入）：
-        // 已打分/已摘要/已翻译/已转录
+        // 已 AI 评分/已摘要/已翻译/已转录
         if !processedFilters.isEmpty {
             var orConds: [String] = []
             if processedFilters.contains("score") { orConds.append("\(col)llm_score IS NOT NULL") }
@@ -742,7 +757,7 @@ public final class Database: @unchecked Sendable {
     }
 
     /// 某内容的有效管线开关（源 OR 文件夹）。source_id 为 NULL（存量/异常）→ 全关。
-    /// 供手动 AI 按钮做开关判定：手动触发也尊重源级配置（用户关掉打分就是不想被打分）。
+    /// 供手动 AI 按钮做开关判定：手动触发也尊重源级配置（用户关掉 AI 评分就是不想被评分）。
     func effectivePolicyFor(contentId: Int64) -> PipelinePolicy {
         // 管线纯按源处理——只读源自己的 config，不看文件夹
         guard let row = queryRows("""
@@ -755,12 +770,26 @@ public final class Database: @unchecked Sendable {
 
     /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl, contentHtml, excerptTranslated, titleTranslated)
     func fetchContentBody(id: Int64) -> (contentMd: String?, llmTranslatedMd: String?, audioUrl: String?, contentHtml: String?, excerptTranslated: String?, titleTranslated: String?)? {
+        let _tAll = Date()
+        let isMain = Thread.isMainThread
+        let _tOpen = Date()
         guard open() else { return nil }
+        let openMs = Int(Date().timeIntervalSince(_tOpen) * 1000)
         var stmt: OpaquePointer?
         var result: (String?, String?, String?, String?, String?, String?)?
-        if sqlite3_prepare_v2(db, "SELECT content_md, llm_translated_md, meta, content_html, llm_excerpt_translated, llm_title_translated FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
+        let _tPrep = Date()
+        let prepOK = sqlite3_prepare_v2(db, "SELECT content_md, llm_translated_md, meta, content_html, llm_excerpt_translated, llm_title_translated FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK
+        let prepMs = Int(Date().timeIntervalSince(_tPrep) * 1000)
+        if prepOK {
             sqlite3_bind_int64(stmt, 1, id)
-            if sqlite3_step(stmt) == SQLITE_ROW {
+            let _tStep = Date()
+            let stepped = sqlite3_step(stmt)
+            let stepMs = Int(Date().timeIntervalSince(_tStep) * 1000)
+            let totalMs = Int(Date().timeIntervalSince(_tAll) * 1000)
+            if totalMs > 50 || isMain {
+                Trace.w("fetchContentBody 慢/主线程 id=\(id) open=\(openMs)ms prepare=\(prepMs)ms step=\(stepMs)ms total=\(totalMs)ms 主线程=\(isMain)", category: "dblock")
+            }
+            if stepped == SQLITE_ROW {
                 func text(_ i: Int32) -> String? {
                     guard let p = sqlite3_column_text(stmt, i) else { return nil }
                     return String(cString: p)
@@ -771,6 +800,25 @@ public final class Database: @unchecked Sendable {
                     audioUrl = (obj["audio_url"] as? String) ?? (obj["video_url"] as? String)
                 }
                 result = (text(0), text(1), audioUrl, text(3), text(4), text(5))
+            }
+        }
+        sqlite3_finalize(stmt)
+        return result
+    }
+
+    /// LLM 轻量字段（score/summary）——ReadingView 完成后刷新镜像用。
+    /// （selectedItem 实例刻意不替换，item 里的这两字段会陈旧；单独小查询避免动 fetchContentBody 的元组签名。）
+    func fetchLLMExtras(id: Int64) -> (score: Int?, summary: String?)? {
+        guard open() else { return nil }
+        var stmt: OpaquePointer?
+        var result: (Int?, String?)?
+        if sqlite3_prepare_v2(db, "SELECT llm_score, llm_summary FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_int64(stmt, 1, id)
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                let score = sqlite3_column_type(stmt, 0) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, 0))
+                var summary: String? = nil
+                if let p = sqlite3_column_text(stmt, 1) { summary = String(cString: p) }
+                result = (score, summary)
             }
         }
         sqlite3_finalize(stmt)

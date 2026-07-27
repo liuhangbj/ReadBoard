@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import QuartzCore
 
 public struct ContentView: View {
     @StateObject private var vm = ContentViewModel()
@@ -76,6 +77,8 @@ public struct ContentView: View {
     // MARK: 左栏（文件夹→源 两级树，订阅源视角）
     @StateObject private var sourceStore = SourceStore.shared
     @State private var showAddSource = false
+    @State private var showImportSummary = false   // OPML 解析后弹汇总确认页（与订阅管理页同源）
+    @State private var importPlan: OPMLImportPlan? = nil
     @State private var showAddFolder = false
     @State private var newFolderName = ""
     /// 重命名目标（source: 源 id / folder: 文件夹 id）+ 输入名 + 弹窗状态
@@ -118,11 +121,25 @@ public struct ContentView: View {
                 }
                 .buttonStyle(.quiet)
                 .help("新建文件夹")
-                Button { showAddSource = true } label: {
+                // 「+」改为下拉菜单：选择「添加订阅源」或「导入 OPML」，
+                // 与订阅管理页入口行为一致（opml 解析后弹同源汇总确认页）
+                Menu {
+                    Button {
+                        showAddSource = true
+                    } label: {
+                        Label("添加订阅源", systemImage: "plus")
+                    }
+                    Button {
+                        importOPML()
+                    } label: {
+                        Label("导入 OPML", systemImage: "square.and.arrow.down")
+                    }
+                } label: {
                     Image(systemName: "plus").font(.system(size: 13))
                 }
+                .menuStyle(.borderlessButton)
                 .buttonStyle(.quiet)
-                .help("添加订阅源")
+                .help("添加订阅源 / 导入 OPML")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -178,6 +195,12 @@ public struct ContentView: View {
             AddSourceSheet(store: sourceStore)
                 .onDisappear { vm.loadAll() }
         }
+        .sheet(isPresented: $showImportSummary) {
+            if let plan = importPlan {
+                OPMLImportSummary(store: sourceStore, plan: plan)
+                    .onDisappear { vm.loadAll() }
+            }
+        }
         .alert("新建文件夹", isPresented: $showAddFolder) {
             TextField("文件夹名称", text: $newFolderName)
             Button("创建") {
@@ -215,7 +238,7 @@ public struct ContentView: View {
             set: { if !$0 { pendingBackfill = nil } }
         )) {
             // action=pipeline（LLM 管线回填）：按钮文案带 md；action=fulltext（全文重抓）：文案带全文
-            Button(pendingBackfill?.action == "fulltext" ? "重抓所有历史全文" : "处理所有历史并重新生成 md") {
+            Button(pendingBackfill?.action == "fulltext" ? "重抓所有历史全文" : "处理所有历史并重新生成 Markdown") {
                 if let p = pendingBackfill {
                     if p.action == "fulltext" {
                         // detached 后台跑——fetchAndStore spawn node 进程 + 超时轮询 Thread.sleep，
@@ -241,7 +264,7 @@ public struct ContentView: View {
                 if p.action == "fulltext" {
                     Text("「\(p.name)」的全文抓取模式已切换为\(p.pipelineLabel)。\n\n• 重抓历史：存量文章按新模式重新抓取全文（耗时较长）\n• 只处理新增：历史不动，新抓的按新模式抓")
                 } else {
-                    Text("「\(p.name)」的\(p.pipelineLabel)已开启。\n\n• 处理历史：存量文章补跑管线并刷新已生成的 md 文件（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+                    Text("「\(p.name)」的\(p.pipelineLabel)已开启。\n\n• 处理历史：存量文章补跑管线并刷新已生成的 Markdown 文件（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
                 }
             }
         }
@@ -273,6 +296,49 @@ public struct ContentView: View {
         }
         .buttonStyle(.rowHover)
         .help("打开「\(label)」页面")
+    }
+
+    // MARK: OPML 导入（主界面入口，与订阅管理页同源）
+
+    /// 主界面「导入 OPML」：NSOpenPanel 挂 mainWindow（fileImporter 在 NavigationSplitView
+    /// 里不弹，实锤按钮触发但面板不出，故用 NSOpenPanel）。
+    private func importOPML() {
+        let panel = NSOpenPanel()
+        // 不过滤文件类型——opml 是未注册动态 UTI，用 .xml 过滤会把它排除（灰掉选不了）。
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "选择要导入的 OPML 文件（.opml 或 .xml）"
+        NSApp.activate(ignoringOtherApps: true)
+        guard let window = NSApp.mainWindow else {
+            vm.toastMessage = "无法打开文件选择器（无活动窗口）"
+            return
+        }
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url else { return }
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            guard let xml = try? String(contentsOf: url, encoding: .utf8) else {
+                DispatchQueue.main.async { vm.toastMessage = "读取文件失败：\(url.lastPathComponent)" }
+                return
+            }
+            DispatchQueue.main.async { vm.toastMessage = "解析中…" }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let plan = OPMLService.shared.parseOPML(xml)
+                DispatchQueue.main.async {
+                    if let err = plan.parseError {
+                        vm.toastMessage = "导入失败：\(err)"
+                        return
+                    }
+                    if plan.outlines.isEmpty {
+                        vm.toastMessage = "未从文件中解析到任何订阅源"
+                        return
+                    }
+                    vm.toastMessage = nil
+                    showImportSummary = true
+                    importPlan = plan
+                }
+            }
+        }
     }
 
     /// 左栏顶部「全部文章」行（清空过滤，显示所有内容）
@@ -529,7 +595,7 @@ public struct ContentView: View {
     /// 源级管线开关菜单（打勾状态实时反映）
     @ViewBuilder
     private func pipelineToggleMenu(src: FeedSource) -> some View {
-        pipelineMenuItem("AI 打分", key: "auto_score", on: src.policy.autoScore, src: src)
+        pipelineMenuItem("AI 评分", key: "auto_score", on: src.policy.autoScore, src: src)
         pipelineMenuItem("AI 翻译", key: "auto_translate", on: src.policy.autoTranslate, src: src)
         pipelineMenuItem("AI 摘要", key: "auto_summarize", on: src.policy.autoSummarize, src: src)
         if src.transcribable {
@@ -668,7 +734,7 @@ public struct ContentView: View {
     /// 文件夹级管线菜单（打钩显示组内一致性：全开=钩，全关=不钩，不一致=「按订阅源设置」不钩）
     @ViewBuilder
     private func folderPipelineMenu(folder: Folder) -> some View {
-        folderPipelineItem("AI 打分", key: "auto_score", folder: folder)
+        folderPipelineItem("AI 评分", key: "auto_score", folder: folder)
         folderPipelineItem("AI 翻译", key: "auto_translate", folder: folder)
         folderPipelineItem("AI 摘要", key: "auto_summarize", folder: folder)
         folderPipelineItem("AI 转录", key: "auto_transcribe", folder: folder)
@@ -868,12 +934,12 @@ public struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 
-            // 筛选条行2：处理状态平铺多选按钮（打分/摘要/翻译/转录，可多选）
+            // 筛选条行2：处理状态平铺多选按钮（AI 评分/AI 摘要/AI 翻译/AI 转录，可多选）
             HStack(spacing: 6) {
                 Text("处理")
                     .font(.system(size: 11))
                     .foregroundStyle(Color.rbText3)
-                processedToggle(key: "score", label: "已打分")
+                processedToggle(key: "score", label: "已 AI 评分")
                 processedToggle(key: "summary", label: "已摘要")
                 processedToggle(key: "translate", label: "已翻译")
                 processedToggle(key: "transcribe", label: "已转录")
@@ -903,10 +969,13 @@ public struct ContentView: View {
 
             List(selection: Binding(
                 get: { vm.selectedItem },
+                // 点击触发的 set 在事件处理上下文（非视图更新周期），同步写 @Published 安全；
+                // 曾改为 GCD 延迟——反而让 open() 落进表格布局中段，触发 reentrant + AG cycle 闪退
                 set: { if let it = $0 { vm.open(it) } }
             )) {
                 ForEach(vm.items) { item in
-                    ArticleRow(item: item, isSelected: vm.selectedItem?.id == item.id)
+                    ArticleRow(item: item, isSelected: vm.selectedItem?.id == item.id,
+                               isReadOverride: vm.readMarks[item.id] == true)
                         .tag(item)
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
@@ -983,9 +1052,9 @@ public struct ContentView: View {
                             Button {
                                 ArchiveService.shared.rearchive(contentId: item.id)
                             } label: {
-                                Label("重新生成 md 文件", systemImage: "doc.arrow.clockwise")
+                                Label("重新生成 Markdown 文件", systemImage: "doc.arrow.clockwise")
                             }
-                            // 在 Finder 中打开 md 文件（已归档的显示，未归档的禁用）
+                            // 在 Finder 中打开 Markdown 文件（已归档的显示，未归档的禁用）
                             if let archivePath = ArchiveService.shared.archiveFilePath(contentId: item.id),
                                FileManager.default.fileExists(atPath: archivePath) {
                                 Button {
@@ -1074,6 +1143,10 @@ public struct ContentView: View {
 public struct ArticleRow: View {
     let item: ContentItem
     let isSelected: Bool
+    /// 乐观已读覆盖（open() 点未读后由 vm.readMarks 传入——不碰 items 数据源）
+    var isReadOverride: Bool = false
+    /// 有效已读态（覆盖优先，其次 item 字段）
+    private var isRead: Bool { isReadOverride || item.isRead }
     /// @AppStorage 让设置变化时行自动重建（静态 ReadingLayout 读取不触发刷新）
     @AppStorage("reading.uiFontScale") private var scale: Double = 1.0
     @AppStorage("list.showThumbnails") private var showThumbnails: Bool = true
@@ -1128,8 +1201,8 @@ public struct ArticleRow: View {
                 HStack(alignment: .top, spacing: 6) {
                     // 有译文时显示中文标题（llm_translated_md 第一行），否则原标题
                     Text(displayTitle)
-                        .font(.system(size: RB.F.rowTitle * scale, weight: (unreadBold && !item.isRead) ? .semibold : .regular))
-                        .foregroundStyle(item.isRead ? Color.rbText2 : Color.rbText)
+                        .font(.system(size: RB.F.rowTitle * scale, weight: (unreadBold && !isRead) ? .semibold : .regular))
+                        .foregroundStyle(isRead ? Color.rbText2 : Color.rbText)
                         .lineLimit(isCompact ? 1 : 2)
                         .fixedSize(horizontal: false, vertical: true)
                     if item.starred {
@@ -1206,7 +1279,7 @@ public struct ArticleRow: View {
                     }
                     Spacer()
                     // 未读点：6pt 墨蓝（选中态不隐藏——浅底下保持可见）
-                    if !item.isRead {
+                    if !isRead {
                         Circle().fill(Color.rbAccent).frame(width: 6, height: 6)
                     }
                 }
@@ -1420,6 +1493,10 @@ public struct ReadingView: View {
     }
 
     public var body: some View {
+        fullBody
+    }
+
+    private var fullBody: some View {
         VStack(spacing: 0) {
             // ── 顶部操作条：左快捷操作 / 中双语切换 / 右版面设置（三段分组式）──
             HStack(spacing: 2) {
@@ -1430,7 +1507,7 @@ public struct ReadingView: View {
                         .frame(width: 24, height: 24)
                         .foregroundStyle(isStarred ? Color.rbStar : Color.rbText2)
                 }
-                .buttonStyle(.quiet)
+                .buttonStyle(.staticQuiet)
                 .help(isStarred ? "取消星标" : "加星标")
 
                 Button { toggleRead() } label: {
@@ -1439,7 +1516,7 @@ public struct ReadingView: View {
                         .frame(width: 24, height: 24)
                         .foregroundStyle(Color.rbText2)
                 }
-                .buttonStyle(.quiet)
+                .buttonStyle(.staticQuiet)
                 .help(isRead ? "标为未读" : "标为已读")
 
                 Button { toggleArchive() } label: {
@@ -1448,7 +1525,7 @@ public struct ReadingView: View {
                         .frame(width: 24, height: 24)
                         .foregroundStyle(Color.rbText2)
                 }
-                .buttonStyle(.quiet)
+                .buttonStyle(.staticQuiet)
                 .help(item.archived ? "取消归档" : "归档")
 
                 Button { showShareSheet = true } label: {
@@ -1457,7 +1534,7 @@ public struct ReadingView: View {
                         .frame(width: 24, height: 24)
                         .foregroundStyle(Color.rbText2)
                 }
-                .buttonStyle(.quiet)
+                .buttonStyle(.staticQuiet)
                 .help("分享 / 后处理")
 
                 Spacer()
@@ -1465,7 +1542,8 @@ public struct ReadingView: View {
                 // 视图切换：非媒体项「译文/原文」两段；媒体项「原文/译文/转录」三段（同一组件同一位置）
                 if isMediaItem {
                     // 媒体项三标签：有转录对照稿才显示「转录」段
-                    if let t = item.llmTranslatedMd, !t.isEmpty {
+                    // （用 translatedText 判定——DB 兜底，不依赖 item 轻列字段的新鲜度）
+                    if translatedText != nil {
                         RBSegmented(
                             items: [(0, "原文"), (1, "译文"), (2, "转录")],
                             selection: $mediaTab
@@ -1480,7 +1558,12 @@ public struct ReadingView: View {
                             )
                         )
                     }
-                } else if item.llmTranslatedMd != nil {
+                // ⚠️ 切标签"点了没反应"根治（09:21 用户直觉定位：在等通知但通知没给到，是个低级问题）：
+                // 原判断 `!= nil` —— llm_translated_md=0KB 的文章 loadedTranslatedMd 是**空字符串 ""（非 nil）**，
+                // `!= nil` 通过 → 标签显示"译文/原文"；但正文 hasTranslated 判断是 `!$0.isEmpty`，
+                // 空串 → false → 正文只渲染原文 → 点"译文"画面不变（你以为没识别，其实是没内容可切）。
+                // 修复：标签显示条件与正文一致——译文**非空**才显示切换标签。
+                } else if translatedText != nil {
                     RBSegmented(
                         items: [(0, "译文"), (1, "原文")],
                         selection: $viewMode
@@ -1496,7 +1579,7 @@ public struct ReadingView: View {
                         .frame(width: 24, height: 24)
                         .foregroundStyle(Color.rbText2)
                 }
-                .buttonStyle(.quiet)
+                .buttonStyle(.staticQuiet)
                 .help("版面设置")
                 .popover(isPresented: $showLayoutPopover, arrowEdge: .bottom) {
                     layoutPanel
@@ -1509,6 +1592,9 @@ public struct ReadingView: View {
             Hairline()
 
             // ── 正文滚动区 ──
+            // ⚠️ 切标签「不上屏」的稳定兜底：标签键挂 ScrollView，切标签 = 重建滚动区。
+            // （上游「视图更新中发布」根因已修——见 ContentViewModel.init；但重建路径已被
+            // 多轮实测确认可靠，先保留。后续验证就地更新稳定后可移除以保留滚动位置。）
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     // 标题（独立字号设置；标题字体跟用户字体选择走，不被主题强制）
@@ -1551,7 +1637,7 @@ public struct ReadingView: View {
                     // 所有按钮都是单篇手动操作/重操作，不受文件夹/订阅源自动开关限制。
                     HStack(spacing: 8) {
                         // 获取全文：不需 LLM，任何项都可点（抓正文/重抓）
-                        CapsuleButton(title: "获取全文", icon: "doc.text", disabled: busy) { runFulltext() }
+                        StaticCapsuleButton(title: "获取全文", icon: "doc.text", disabled: busy) { runFulltext() }
                         if !pipeline.isAvailable {
                             if !isMediaItem {
                                 Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
@@ -1560,9 +1646,9 @@ public struct ReadingView: View {
                             }
                         } else {
                             // 评分/摘要/翻译按钮：均始终显示，已有结果也可重新执行
-                            CapsuleButton(title: "AI 评分", icon: "star", disabled: busy) { runScore() }
-                            CapsuleButton(title: "AI 摘要", icon: "text.quote", disabled: busy) { runSummarize() }
-                            CapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
+                            StaticCapsuleButton(title: "AI 评分", icon: "star", disabled: busy) { runScore() }
+                            StaticCapsuleButton(title: "AI 摘要", icon: "text.quote", disabled: busy) { runSummarize() }
+                            StaticCapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
                             if busy {
                                 ProgressView().scaleEffect(0.6).frame(width: 16, height: 16)
                             }
@@ -1575,7 +1661,7 @@ public struct ReadingView: View {
                         }
                         // AI 转录：媒体项始终显示（放最后）；已有转录稿也显示（可重新转录）
                         if isMediaItem {
-                            CapsuleButton(title: "AI 转录", icon: "waveform", disabled: busy) { runTranscribe() }
+                            StaticCapsuleButton(title: "AI 转录", icon: "waveform", disabled: busy) { runTranscribe() }
                         }
                         Spacer()
                     }
@@ -1583,8 +1669,8 @@ public struct ReadingView: View {
 
                     Hairline()
 
-                    // 摘要（灰紫缘引用卡：独立字号设置）
-                    if let sum = item.llmSummary, !sum.isEmpty {
+                    // 摘要（灰紫缘引用卡：独立字号设置；effectiveSummary 镜像优先——AI 完成后即刻上屏）
+                    if let sum = effectiveSummary, !sum.isEmpty {
                         Text(sum)
                             .font(.system(size: summaryFontSize))
                             .foregroundStyle(p.textSecondary)
@@ -1601,32 +1687,25 @@ public struct ReadingView: View {
                             .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
                     }
 
-                    // 正文：媒体项按三标签渲染（原文/译文/转录），非媒体项按译文/原文两标签
+                    // 正文：媒体项按三标签渲染，非媒体项统一用 MarkdownBodyView。
+                    // ⚠️ 关键修复：原代码用三分支（if isMediaItem / else if viewMode==0 let translated / else），
+                    // 当 loadBodyIfNeeded 异步填回 item.llmTranslatedMd（nil→有值）时，
+                    // 条件分支从"原文"切换到"译文" → VStack 子视图结构在布局期间变化 →
+                    // StackLayout.makeChildren → use-after-free 崩溃。
+                    // 修复：非媒体项统一渲染 MarkdownBodyView(displayMd)，用计算属性选择译文/原文内容。
+                    // item 字段异步变化只改 markdown 参数值，不改子视图类型/数量，布局安全。
                     if isMediaItem {
                         mediaBodyView
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                    } else if viewMode == 0, let translated = item.llmTranslatedMd, !translated.isEmpty {
-                        // viewMode 0=译文（llm_translated_md 保留原格式）
-                        MarkdownBodyView(
-                            markdown: translated,
-                            theme: theme,
-                            mode: themeMode,
-                            fontChoice: fontChoice,
-                            fontSize: fontSize,
-                            lineSpacing: lineSpacing
-                        )
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        // viewMode 1=原文（contentMd ?? excerpt）
+                        // 正文渲染：f269c64 稳定设计（后台解析 + @State 写回，详见 ReadingTheme.swift 注释）。
+                        // 切标签秒切由两层保证：① 通知回调改 GCD（视图更新中发布根因已除）；
+                        // ② ScrollView 随标签重建（实测确认的稳定路径，代价是滚动位置回顶）。
                         MarkdownBodyView(
-                            markdown: bodyText,
-                            theme: theme,
-                            mode: themeMode,
-                            fontChoice: fontChoice,
-                            fontSize: fontSize,
-                            lineSpacing: lineSpacing
+                            markdown: displayMd,
+                            theme: theme, mode: themeMode, fontChoice: fontChoice,
+                            fontSize: fontSize, lineSpacing: lineSpacing
                         )
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1637,14 +1716,22 @@ public struct ReadingView: View {
                 .frame(maxWidth: contentWidth)
                 .frame(maxWidth: .infinity)   // 内容限宽后居中
             }
+            // 切标签连同 ScrollView 一起重建（实测确认的稳定路径，代价是滚动位置回顶）
+            .id("reading-body-\(viewMode)-\(mediaTab)")
             .background(p.background)   // 主题底色
         }
         // 视图随 .id(item.id) 重建，onAppear 即切文章——刷新有效开关与本地状态
         .onAppear {
+            Trace.i("ReadingView.onAppear id=\(item.id) ctype=\(item.ctype) 已有contentMd=\(item.contentMd != nil) llmTranslatedMd非空=\(item.llmTranslatedMd != nil) mem=\(Trace.mb())MB [\(buildTag)]", category: "read")
+            Trace.startMemorySampler(category: "read.mem")
             policy = Database.shared.effectivePolicyFor(contentId: item.id)
             isStarred = item.starred
             isRead = item.isRead
             loadContentMd()   // 按 id 查 content_md（列表查询不取，点开再查防闪烁）
+        }
+        .onDisappear {
+            Trace.i("ReadingView.onDisappear id=\(item.id) mem=\(Trace.mb())MB", category: "read")
+            Trace.stopMemorySampler(category: "read.mem")
         }
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(item: item)
@@ -1656,7 +1743,7 @@ public struct ReadingView: View {
         var parts: [String] = []
         if let a = item.author, !a.isEmpty { parts.append(a) }
         if let pd = item.publishedAt { parts.append(String(pd.prefix(10))) }
-        if let s = item.llmScore { parts.append("评分 \(s)") }
+        if let s = effectiveScore { parts.append("评分 \(s)") }
         return parts
     }
 
@@ -1793,7 +1880,13 @@ public struct ReadingView: View {
 
     /// 正文视图模式：0=双语对照 / 1=仅原文 / 2=仅译文。
     /// @AppStorage 持久化——你的选择记住，切文章/重启不重置。默认双语对照（Follo 风格）。
-    @AppStorage("reading.viewMode") private var viewMode = 0
+    /// ⚠️ 09:23 实测：@State 和 @AppStorage 都复现"点两次才切"，证明延迟不在存储层。
+    /// 真正机制：自定义 Binding 的 set 在 onTapGesture 回调里改 @State，若同一 runloop body 已求值过，
+    /// 这次变更被合并到下一次 body 求值 → 第一次点击没立即重绘，第二次点击又触发 body 才带出。
+    /// 改回 @AppStorage 直绑（系统保证读写同步、立即触发 body），去掉自定义 Binding 中间层。
+    @AppStorage("reading.viewMode") private var viewMode: Int = 0
+    /// 构建标记——验证部署版本用（启动 onAppear 打日志，确认跑的是不是含此标记的新二进制）
+    private let buildTag = "BUILD_1637_crypto_fix"
 
     /// 双语对照模式（viewMode=0 且有译文）
     private var bilingualMode: Bool {
@@ -1805,6 +1898,32 @@ public struct ReadingView: View {
         if let md = loadedContentMd, !md.isEmpty { return md }
         if let md = item.contentMd, !md.isEmpty { return md }
         return item.excerpt ?? "(无内容)"
+    }
+
+    /// 正文渲染用 markdown：viewMode 0 优先译文，viewMode 1 或无译文用原文。
+    /// ⚠️ 09:36 用户定位「点原文秒切、点译文要等；播客切换不卡」→ 根因是译文走 @State 依赖链。
+    /// 播客译文直接读 item.llmTranslatedMd（let 属性，同步确定）→ 秒切；
+    /// RSS 译文走 loadedTranslatedMd(@State) → 与刚变的 viewMode 同帧快照错位 → 第一次求值不一致。
+    /// 对齐播客：译文**优先读 item.llmTranslatedMd**（读 let 属性安全，崩溃是"异步替换 selectedItem"
+    /// 导致的，读属性不触发），@State loadedTranslatedMd 仅作 item 无译文时的兜底。
+    /// 译文文本——同步、确定，与播客读 item 字段等价。
+    /// 不走 @State（@State 写入有"延迟一帧提交"语义，与 viewMode 变更同帧快照错位 → 点译文要等）。
+    /// 改为 body 求值时同步查 DB（fetchContentBody 实测 0ms），随取随用，与 viewMode 变更同帧一致。
+    /// 列表是轻列 item.llmTranslatedMd=nil，译文只能查 DB；用 memo 字典按 id 缓存避免重复查。
+    private var translatedText: String? {
+        // ⚠️ 只读 @State 镜像，绝不在 body 求值里查 DB（16:03 定案）：
+        // 09:36 加的「body 求值时同步 fetchContentBody 兜底」让每次求值都跑 1~3 次 SQL
+        // （标签条件/displayMd/chineseTitle），每开一篇文章 ~10 次求值 = 几十次主线程查询
+        // + 几十条 dblock 日志——渲染成本爆炸，快速连点时 AG 更新相互踩踏 → cycle → 闪退。
+        // 「@State 延迟一帧」当年看似要等，根因是通知回调"视图更新中发布"丢帧（已根治），
+        // 现在镜像写入后一帧即上屏，不需要 DB 兜底。
+        if let t = loadedTranslatedMd, !t.isEmpty { return t }
+        return nil
+    }
+
+    private var displayMd: String {
+        if viewMode == 0, let t = translatedText { return t }
+        return bodyText
     }
 
     /// 是否媒体项（播客/视频，可转录）
@@ -1826,57 +1945,46 @@ public struct ReadingView: View {
     }
 
     /// 媒体项正文（按 mediaTab 渲染对应内容；无转录稿时 mediaTab=2 钳制回原文）
-    @ViewBuilder
-    private var mediaBodyView: some View {
+    /// ⚠️ 与 RSS 正文同一根治：原实现 @ViewBuilder switch 三分支（Text / MarkdownBodyView 混用），
+    /// 切标签 = 换分支 = 子树换类型重建 → 与 .id 相同的「首次渲染被推迟」隐患。
+    /// 改为计算属性出 markdown + 单一 MarkdownBodyView（身份稳定，就地更新，同事务上屏）。
+    private var mediaBodyMarkdown: String {
         // 无转录对照稿时，mediaTab=2（上次记住的转录）无内容，钳制回原文
-        let hasTranscript = !(item.llmTranslatedMd ?? "").isEmpty
+        let hasTranscript = translatedText != nil
         let tab = (mediaTab == 2 && !hasTranscript) ? 0 : mediaTab
         switch tab {
         case 0:
             // 原文：feed 简介（剥标签纯文本）
-            Text(excerptPlainText)
-                .font(.system(size: fontSize))
-                .foregroundStyle(theme.palette(for: themeMode).text)
-                .lineSpacing(lineSpacing)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            return excerptPlainText
         case 1:
             // 译文：简介的中文翻译（llm_excerpt_translated）；没有则提示点「AI 翻译」
-            if let t = item.excerptTranslated, !t.isEmpty {
-                MarkdownBodyView(markdown: t, theme: theme, mode: themeMode, fontChoice: fontChoice,
-                                 fontSize: fontSize, lineSpacing: lineSpacing)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Text("尚无译文——点右上角「翻译」生成简介的中文翻译")
-                    .font(.system(size: fontSize))
-                    .foregroundStyle(theme.palette(for: themeMode).textSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            if let t = effectiveExcerptTranslated, !t.isEmpty { return t }
+            return "尚无译文——点右上角「翻译」生成简介的中文翻译"
         default:
             // 转录：中英对照转录稿（llm_translated_md）
-            if let t = item.llmTranslatedMd, !t.isEmpty {
-                MarkdownBodyView(markdown: t, theme: theme, mode: themeMode, fontChoice: fontChoice,
-                                 fontSize: fontSize, lineSpacing: lineSpacing)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Text("尚无转录稿——点「转录」生成中英文对照稿")
-                    .font(.system(size: fontSize))
-                    .foregroundStyle(theme.palette(for: themeMode).textSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            if let t = translatedText { return t }
+            return "尚无转录稿——点「转录」生成中英文对照稿"
         }
+    }
+
+    @ViewBuilder
+    private var mediaBodyView: some View {
+        MarkdownBodyView(markdown: mediaBodyMarkdown, theme: theme, mode: themeMode, fontChoice: fontChoice,
+                         fontSize: fontSize, lineSpacing: lineSpacing)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// 中文标题（媒体项取标题译文 titleTranslated；非媒体项从正文译文 translatedHead 第一行取）
     private var chineseTitle: String? {
-        // 媒体项：独立的标题译文（llm_title_translated）
+        // 媒体项：独立的标题译文（llm_title_translated）——镜像优先（item 轻列可能陈旧）
         if isMediaItem {
-            guard let t = item.titleTranslated, !t.isEmpty else { return nil }
+            guard let t = effectiveTitleTranslated, !t.isEmpty else { return nil }
             return t
         }
-        let head = item.translatedHead ?? ""
-        guard !head.isEmpty else { return nil }
-        // 跳过空行，取第一个非空行（译文开头常是空行，第二行才是标题）
-        let firstNonEmpty = head.components(separatedBy: "\n")
+        // 非媒体：从译文正文取首个非空行（translatedText 自带 DB 兜底——
+        // 翻译完成后 item.translatedHead 是旧实例字段、可能为 nil，走 DB 才新鲜）
+        guard let translated = translatedText else { return nil }
+        let firstNonEmpty = translated.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty } ?? ""
         // 剥「标题：」前缀（LLM 输出格式标记）+ markdown 标题标记（##）
@@ -1890,10 +1998,29 @@ public struct ReadingView: View {
 
     // MARK: - LLM 操作
 
-    /// 评分/翻译用的正文：优先 markdown，退回 excerpt
+    /// AI 评分/翻译用的正文：优先 Markdown，退回 excerpt
     /// 正文内容——@State 缓存，打开时按 id 查 content_md（列表查询不取 content_md，
     /// selectedItem.contentMd 为 nil 导致 contentBody 用 excerpt 闪烁）
     @State private var loadedContentMd: String? = nil
+    /// 译文（@State 缓存）——从 loadContentMd 同步加载（onAppear 时查 DB，<1ms）。
+    /// 原来由 ContentViewModel.loadBodyIfNeeded 异步填回 selectedItem，但替换 selectedItem 实例
+    /// 会导致 ReadingView 条件分支在布局期间切换 → use-after-free 崩溃。
+    /// 改为 @State 后：onAppear 同步查 DB 填回 → displayMd 值变（但子视图结构不变）→ 安全。
+    @State private var loadedTranslatedMd: String? = nil
+    /// 简介译文/标题译文镜像（媒体项三标签与中文标题用）——item 是轻列实例，
+    /// 这两字段列表查询不取/可能陈旧，镜像从 fetchContentBody 补齐。
+    @State private var loadedExcerptTranslated: String? = nil
+    @State private var loadedTitleTranslated: String? = nil
+    /// 评分/摘要镜像（AI 完成后自动上屏用）——selectedItem 实例刻意不替换（会诱发
+    /// AttributeGraph 无限重绘循环，12:10 hang 实锤），item 里的这两字段永远是打开时的旧值。
+    @State private var loadedScore: Int? = nil
+    @State private var loadedSummary: String? = nil
+
+    /// 镜像优先的有效值（镜像未就绪时回退 item 字段）
+    private var effectiveExcerptTranslated: String? { loadedExcerptTranslated ?? item.excerptTranslated }
+    private var effectiveTitleTranslated: String? { loadedTitleTranslated ?? item.titleTranslated }
+    private var effectiveScore: Int? { loadedScore ?? item.llmScore }
+    private var effectiveSummary: String? { loadedSummary ?? item.llmSummary }
 
     private var contentBody: String {
         if let md = loadedContentMd, !md.isEmpty { return md }
@@ -1904,10 +2031,38 @@ public struct ReadingView: View {
     /// 打开时按 id 查 content_md（列表查询不取大字段，点开再查）
     private func loadContentMd() {
         guard loadedContentMd == nil else { return }
+        let t0 = Date()
         if let body = Database.shared.fetchContentBody(id: item.id) {
+            let mdKb = (body.contentMd ?? "").count / 1024
+            let htmlKb = (body.contentHtml ?? "").count / 1024
+            let transKb = (body.llmTranslatedMd ?? "").count / 1024
+            Trace.i("loadContentMd 完成 id=\(item.id) content_md=\(mdKb)KB content_html=\(htmlKb)KB llm_translated_md=\(transKb)KB 用时=\(Int(t0.timeIntervalSinceNow * -1000))ms mem=\(Trace.mb())MB", category: "read")
             loadedContentMd = body.contentMd
-            // contentHtml 也加载（原网页视图用）——但 item 是 let 不可变，用 @State 存
             loadedContentHtml = body.contentHtml
+            loadedTranslatedMd = body.llmTranslatedMd
+            loadedExcerptTranslated = body.excerptTranslated
+            loadedTitleTranslated = body.titleTranslated
+            if let ex = Database.shared.fetchLLMExtras(id: item.id) {
+                loadedScore = ex.score
+                loadedSummary = ex.summary
+            }
+        } else {
+            Trace.w("loadContentMd 返回 nil id=\(item.id)", category: "read")
+        }
+    }
+
+    /// LLM 任务完成后重查全部镜像（item 实例刻意不替换，新鲜度全走镜像/DB 兜底——
+    /// 翻译/摘要/评分/转录完成后 译文标题、摘要卡、评分标、标签入口 即刻自动上屏）
+    private func refreshLoadedBody() {
+        guard let body = Database.shared.fetchContentBody(id: item.id) else { return }
+        loadedContentMd = body.contentMd
+        loadedContentHtml = body.contentHtml
+        loadedTranslatedMd = body.llmTranslatedMd
+        loadedExcerptTranslated = body.excerptTranslated
+        loadedTitleTranslated = body.titleTranslated
+        if let ex = Database.shared.fetchLLMExtras(id: item.id) {
+            loadedScore = ex.score
+            loadedSummary = ex.summary
         }
     }
 
@@ -1941,7 +2096,10 @@ public struct ReadingView: View {
                 guard busyForId == cid else { return }
                 busy = false
                 statusMsg = ok ? "✅ 全文获取完成" : "❌ 全文获取失败"
-                if ok { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
+                if ok {
+                    refreshLoadedBody()
+                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
+                }
             }
         }
     }
@@ -1955,7 +2113,7 @@ public struct ReadingView: View {
         }
         busy = true
         busyForId = cid
-        statusMsg = "评分中…"
+        statusMsg = "AI 评分中…"
         Task {
             let ok = await pipeline.score(contentId: cid, title: item.title, body: contentBody)
             if ok { ArchiveService.shared.rearchive(contentId: cid) }   // 手动重处理 → 刷新归档文件
@@ -1963,8 +2121,11 @@ public struct ReadingView: View {
                 PipelineWorker.shared.unlockContent(cid)
                 guard busyForId == cid else { return }   // 已切走，不覆盖新文章状态
                 busy = false
-                statusMsg = ok ? "✅ 评分完成" : "❌ 评分失败"
-                if ok { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
+                statusMsg = ok ? "✅ AI 评分完成" : "❌ AI 评分失败"
+                if ok {
+                    refreshLoadedBody()
+                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
+                }
             }
         }
     }
@@ -1994,6 +2155,7 @@ public struct ReadingView: View {
                 busy = false
                 statusMsg = ok ? "✅ 翻译完成" : "❌ 翻译失败"
                 if ok {
+                    refreshLoadedBody()
                     // 非媒体：仅原文→双语对照；媒体：切到「译文」标签立刻看到
                     if isMediaItem { mediaTab = 1 }
                     else if viewMode == 1 { viewMode = 0 }
@@ -2020,7 +2182,10 @@ public struct ReadingView: View {
                 guard busyForId == cid else { return }
                 busy = false
                 statusMsg = ok ? "✅ 摘要完成" : "❌ 摘要失败"
-                if ok { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
+                if ok {
+                    refreshLoadedBody()
+                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
+                }
             }
         }
     }
@@ -2044,6 +2209,7 @@ public struct ReadingView: View {
                 busy = false
                 statusMsg = ok ? "✅ 转录完成" : "❌ 转录失败"
                 if ok {
+                    refreshLoadedBody()
                     // 翻译完成：若当前是仅原文，切到双语对照让用户立刻看到译文
                     if viewMode == 1 { viewMode = 0 }
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)
@@ -2108,9 +2274,9 @@ public struct ShareSheet: View {
             Hairline()
 
             VStack(alignment: .leading, spacing: 2) {
-                shareActionRow("重新生成 md 文件", icon: "arrow.clockwise.doc") {
+                shareActionRow("重新生成 Markdown 文件", icon: "arrow.clockwise.doc") {
                     ArchiveService.shared.rearchive(contentId: item.id)
-                    message = "✅ 已重新生成 md 文件"
+                    message = "✅ 已重新生成 Markdown 文件"
                 }
                 shareActionRow("触发导出规则（Obsidian / webhook）", icon: "square.and.arrow.up.on.square") {
                     Task {

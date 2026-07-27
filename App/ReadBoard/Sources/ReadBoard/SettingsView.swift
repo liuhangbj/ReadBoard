@@ -1,34 +1,39 @@
 import SwiftUI
 import AppKit
 
-// MARK: - 独立设置窗口（⌘, 打开，NavigationSplitView 分页）
-// 七页：通用 / 阅读器 / 功能板块 / AI 与 LLM / 依赖 / 导出规则 / 缓存清理
+// MARK: - 独立设置窗口（⌘, 打开，手写侧栏+详情分页）
 
 public enum SettingsPage: String, CaseIterable, Identifiable {
-    case general, reader, boards, ai, deps, export, cleanup
+    case general, reader, llm, deps, boards, sources, fetch, content, pipeline, cleanup
     public var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .general: return "通用"
-        case .reader: return "阅读器"
-        case .ai: return "AI 与 LLM"
-        case .deps: return "依赖"
-        case .boards: return "功能板块"
-        case .export: return "导出规则"
-        case .cleanup: return "缓存清理"
+        case .general:  return "通用"
+        case .reader:   return "阅读器"
+        case .llm:      return "LLM模型"
+        case .deps:     return "依赖"
+        case .boards:   return "功能总开关"
+        case .sources:  return "多类型源"
+        case .fetch:    return "全文抓取"
+        case .content:  return "内容处理"
+        case .pipeline: return "导出规则"
+        case .cleanup:  return "缓存清理"
         }
     }
 
     var icon: String {
         switch self {
-        case .general: return "gearshape"
-        case .reader: return "doc.text"
-        case .ai: return "brain.head.profile"
-        case .deps: return "shippingbox"
-        case .boards: return "square.grid.2x2"
-        case .export: return "square.and.arrow.up"
-        case .cleanup: return "trash"
+        case .general:  return "gearshape"
+        case .reader:   return "doc.text"
+        case .llm:      return "brain.head.profile"
+        case .deps:     return "shippingbox"
+        case .boards:   return "square.grid.2x2"
+        case .sources:  return "antenna.radiowaves.left.and.right"
+        case .fetch:    return "doc.viewfinder"
+        case .content:  return "text.badge.plus"
+        case .pipeline: return "arrow.triangle.branch"
+        case .cleanup:  return "trash"
         }
     }
 }
@@ -37,71 +42,99 @@ public struct SettingsView: View {
     @State private var selection: SettingsPage? = .general
 
     public var body: some View {
-        NavigationSplitView {
+        // 手动 HStack 布局替代 NavigationSplitView——后者在 Settings 场景下
+        // 会硬塞一个「收起左栏」切换按钮，且 .toolbar(removing:.sidebarToggle) 对它无效。
+        // 改手写侧栏+详情，按钮从源头不存在。
+        HStack(spacing: 0) {
             List(SettingsPage.allCases, selection: $selection) { page in
                 Label(page.title, systemImage: page.icon)
                     .tag(page)
             }
             .listStyle(.sidebar)
             .tint(Color.rbAccent)   // 选中项墨蓝 tint（统一纸墨留白）
-            .navigationSplitViewColumnWidth(min: 160, ideal: 180)
-        } detail: {
-            switch selection ?? .general {
-            case .general: GeneralPane()
-            case .reader: ReaderPane()
-            case .boards: BoardsPane()
-            case .ai: AILLMPane()
-            case .deps: DepsPane()
-            case .export: ExportRulePane()
-            case .cleanup: CleanupPane()
+            .frame(width: 180)
+
+            Divider()
+
+            Group {
+                switch selection ?? .general {
+                case .general:  GeneralPane()
+                case .reader:   ReaderPane()
+                case .llm:      LLMPane()
+                case .deps:     DepsPane()
+                case .boards:   BoardsPane()
+                case .sources:  TypeSwitchPane()
+                case .fetch:    FetchPane()
+                case .content:  ContentPane()
+                case .pipeline: ExportRulePane()
+                case .cleanup:  CleanupPane()
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding()
         }
-        // 去掉左上角「隐藏左栏」切换按钮——设置页 sidebar 固定显示，不需用户收起
-        // .toolbar(removing: .sidebarToggle) 在 macOS 14+ 对 NavigationSplitView 不生效，
-        // 用 .navigationSplitViewStyle(.balanced) + 隐藏 toolbar 背景更可靠
-        .navigationSplitViewStyle(.balanced)
-        .toolbarBackground(.hidden, for: .windowToolbar)
         .frame(minWidth: 720, minHeight: 500)
+        // 把 Settings 窗口标题栏设为透明 + 隐藏标题文字，消除场景默认大标题栏留白
+        // （系统「设置」风格：保留红绿灯/关闭按钮，内容贴顶）。各 pane 的
+        // .toolbar(placement: .principal) 标题会显示在透明栏里，不再空一大截。
+        .overlay(SettingsWindowAccessor().frame(width: 0, height: 0))
     }
+}
+
+/// 零尺寸 overlay，仅用于在视图加入窗口后拿到 Settings 窗口句柄，
+/// 将其标题栏设为透明 + 隐藏标题文字（不碰红绿灯按钮）。
+private struct SettingsWindowAccessor: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async {
+            guard let win = v.window else { return }
+            win.titleVisibility = .hidden
+            win.titlebarAppearsTransparent = true
+        }
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 // MARK: - 通用
 
 public struct GeneralPane: View {
+    @State private var autoSyncOn: Bool = SourceStore.shared.autoSyncEnabled
+    @State private var proxyEnabled: Bool = FeedFetcher.globalProxy != nil
     @State private var proxyInput: String = FeedFetcher.globalProxy ?? ""
     @State private var archiveDirInput: String = ""
     @State private var archivedCount = 0
 
     public var body: some View {
         Form {
-            Section("feed 自动抓取") {
-                Toggle("自动周期抓取", isOn: Binding(
-                    get: { SourceStore.shared.autoSyncEnabled },
-                    set: { SourceStore.shared.autoSyncEnabled = $0 }
-                ))
-                .tint(Color.rbAccent)
-                // 抓取周期间隔下拉（15/30/60/120/360 分钟）
-                HStack {
-                    Text("抓取间隔")
-                    Picker("", selection: Binding(
-                        get: { Int(SourceStore.shared.syncInterval / 60) },
-                        set: { SourceStore.shared.setSyncInterval(minutes: $0) }
-                    )) {
-                        Text("15 分钟").tag(15)
-                        Text("30 分钟").tag(30)
-                        Text("60 分钟").tag(60)
-                        Text("120 分钟").tag(120)
-                        Text("360 分钟").tag(360)
-                    }
-                    .pickerStyle(.menu)
+            Section("订阅源自动刷新") {
+                Toggle("自动周期抓取", isOn: $autoSyncOn.animation())
                     .tint(Color.rbAccent)
-                    .frame(width: 110)
+                    .onChange(of: autoSyncOn) { _, v in
+                        SourceStore.shared.autoSyncEnabled = v
+                    }
+                if autoSyncOn {
+                    HStack {
+                        Text("抓取间隔")
+                            .foregroundStyle(Color.rbText2)
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { Int(SourceStore.shared.syncInterval / 60) },
+                            set: { SourceStore.shared.setSyncInterval(minutes: $0) }
+                        )) {
+                            Text("15 分钟").tag(15)
+                            Text("30 分钟").tag(30)
+                            Text("60 分钟").tag(60)
+                            Text("120 分钟").tag(120)
+                            Text("360 分钟").tag(360)
+                        }
+                        .pickerStyle(.menu)
+                        .tint(Color.rbAccent)
+                        .frame(width: 110)
+                    }
                 }
-                Text("关闭后只能手动点「全部刷新」抓 feed")
-                    .font(.caption).foregroundStyle(Color.rbText3)
             }
-            Section("md 文件生成（管线完成后落盘）") {
-                // 目录用系统文件夹选择器（NSOpenPanel），不手填路径
+            Section("Markdown 文件存储位置") {
                 HStack {
                     Text(archiveDirInput.isEmpty ? "默认：~/readboard/archive" : archiveDirInput)
                         .font(.callout)
@@ -121,45 +154,52 @@ public struct GeneralPane: View {
                         .buttonStyle(.quiet)
                     }
                 }
-                Text("管线全部跑完的内容自动落成双语 md 存到这里，按源名分子目录。数据库记录保留（可检索），只清 HTML 中间产物。")
-                    .font(.caption).foregroundStyle(Color.rbText3)
                 Text("已生成 \(archivedCount) 个文件")
                     .font(.caption.monospacedDigit()).foregroundStyle(Color.rbText3)
             }
             Section("网络代理") {
-                TextField("代理地址（如 http://127.0.0.1:7890，留空直连）", text: $proxyInput)
-                    .textFieldStyle(.roundedBorder)
+                Toggle("启用网络代理", isOn: $proxyEnabled.animation())
+                    .tint(Color.rbAccent)
+                    .onChange(of: proxyEnabled) { _, v in
+                        if !v {
+                            proxyInput = ""
+                            FeedFetcher.globalProxy = nil
+                            proxyEnabled = false
+                        }
+                    }
+                if proxyEnabled {
+                    HStack {
+                        Text("代理地址")
+                            .frame(width: 96, alignment: .leading)
+                        Spacer()
+                        TextField("", text: $proxyInput)
+                            .textFieldStyle(.roundedBorder)
+                    }
                     .onSubmit {
-                        let v = proxyInput.trimmingCharacters(in: .whitespaces)
-                        FeedFetcher.globalProxy = v.isEmpty ? nil : v
+                            let v = proxyInput.trimmingCharacters(in: .whitespaces)
+                            FeedFetcher.globalProxy = v.isEmpty ? nil : v
+                        }
+                    HStack {
+                        Spacer()
+                        Button("清除") {
+                            proxyInput = ""
+                            FeedFetcher.globalProxy = nil
+                            proxyEnabled = false
+                        }
+                        .controlSize(.small)
+                        .buttonStyle(.quiet)
+                        .tint(Color.rbScoreLow)
+                        Button("保存") {
+                            let v = proxyInput.trimmingCharacters(in: .whitespaces)
+                            FeedFetcher.globalProxy = v.isEmpty ? nil : v
+                        }
+                        .controlSize(.small)
+                        .buttonStyle(.primaryCapsule)
                     }
-                HStack {
-                    Button("保存") {
-                        let v = proxyInput.trimmingCharacters(in: .whitespaces)
-                        FeedFetcher.globalProxy = v.isEmpty ? nil : v
-                    }
-                    .controlSize(.small)
-                    .buttonStyle(.primaryCapsule)
-                    Button("清除") {
-                        proxyInput = ""
-                        FeedFetcher.globalProxy = nil
-                    }
-                    .controlSize(.small)
-                    .buttonStyle(.quiet)
                 }
-                Text("所有 feed 抓取 / 全文回填 / YouTube 解析统一走此代理")
-                    .font(.caption).foregroundStyle(Color.rbText3)
             }
         }
         .formStyle(.grouped)
-        // 标题居中（navigationTitle 默认左对齐，用 toolbar 自定义 title view 居中）
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text("通用")
-                    .font(.headline)
-                    .foregroundStyle(Color.rbText)
-            }
-        }
         .onAppear {
             archiveDirInput = UserDefaults.standard.string(forKey: "archive.dir") ?? ""
             refreshArchiveStats()
@@ -170,7 +210,7 @@ public struct GeneralPane: View {
         archivedCount = ArchiveService.shared.archivedFileCount()
     }
 
-    /// 系统文件夹选择器选 md 保存目录（不手填路径）
+    /// 系统文件夹选择器选 md 保存目录
     private func pickArchiveDir() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -178,7 +218,7 @@ public struct GeneralPane: View {
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
         panel.prompt = "选择"
-        panel.message = "选择 md 文件保存目录"
+        panel.message = "选择 Markdown 文件保存目录"
         if panel.runModal() == .OK, let url = panel.url {
             archiveDirInput = url.path
             UserDefaults.standard.set(url.path, forKey: "archive.dir")
@@ -187,9 +227,82 @@ public struct GeneralPane: View {
     }
 }
 
-// MARK: - AI 与 LLM
+// MARK: - LLM 模型
 
-public struct AILLMPane: View {
+public struct LLMPane: View {
+    /// slotCount 是 static 存储值，SwiftUI 不会自动重绘；用本地 @State 镜像以驱动 ForEach 刷新
+    @State private var count: Int = LLMSettings.slotCount
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            // 标题 + 单一「+」按钮（点 + 添加一个模型）
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("LLM 模型配置")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.rbText)
+                    Text("上面的模型优先，失败自动换下一个。空模型跳过。可添加多个、拖拽排序。")
+                        .font(.caption).foregroundStyle(Color.rbText3)
+                }
+                Spacer()
+                Button {
+                    LLMSettings.addSlot()
+                    count = LLMSettings.slotCount
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .controlSize(.small)
+                .buttonStyle(.primaryCapsule)
+                .help("添加一个模型")
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
+
+            Divider()
+
+            if count == 0 {
+                VStack(spacing: 10) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 28))
+                        .foregroundStyle(Color.rbText3)
+                    Text("还没有配置任何 LLM 模型")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.rbText)
+                    Text("点击右上角 + 添加，支持 DeepSeek / Kimi / OpenRouter / OpenAI 等。")
+                        .font(.caption)
+                        .foregroundStyle(Color.rbText3)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.top, 60)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        ForEach(0..<count, id: \.self) { i in
+                            LLMModelCard(slotIndex: i, onMove: { from, to in
+                                LLMSettings.moveSlot(from: from, to: to)
+                                count = LLMSettings.slotCount
+                            }, onRemove: {
+                                LLMSettings.removeSlot(at: i)
+                                count = LLMSettings.slotCount
+                            })
+                        }
+                    }
+                    .padding(16)
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            // 兜底：外部（迁移等）改了 slotCount 时也同步
+            count = LLMSettings.slotCount
+        }
+    }
+}
+
+// MARK: - 全文抓取
+
+public struct FetchPane: View {
     @State private var jinaApiKey = UserDefaults.standard.string(forKey: "jina.apiKey") ?? ""
     @State private var jinaTesting = false
     @State private var jinaTestResult: String? = nil
@@ -199,18 +312,9 @@ public struct AILLMPane: View {
 
     public var body: some View {
         Form {
-            Section("LLM 服务（三槽按序 fallback，允许留空）") {
-                Text("槽1 失败自动换槽2，再失败换槽3，最后 .env 兜底。空槽跳过。")
-                    .font(.caption).foregroundStyle(Color.rbText3)
-            }
-            ForEach(0..<LLMSettings.slotCount, id: \.self) { i in
-                LLMSlotView(slotIndex: i)
-            }
-
-            Section("全文提取服务") {
+            Section("全文提取服务（defuddle / Jina Reader）") {
                 Text("defuddle 本地提取失败时，自动 fallback 到 Jina Reader 云端渲染。先走免费档（20 RPM），失败再走付费档。注册送 1000 万 token，按量充值。")
                     .font(.caption).foregroundStyle(Color.rbText3)
-                // defuddle 开关——打开时检测依赖，缺失弹窗（是/自定义/否）
                 Toggle("defuddle 本地提取", isOn: Binding(
                     get: { UserDefaults.standard.bool(forKey: "defuddle.enabled") },
                     set: { newValue in
@@ -236,11 +340,16 @@ public struct AILLMPane: View {
                 ))
                 .tint(Color.rbAccent)
                 if jinaProEnabled {
-                    SecureField("Jina API Key", text: $jinaApiKey)
-                        .textFieldStyle(.roundedBorder)
-                        .onChange(of: jinaApiKey) { _, v in
-                            UserDefaults.standard.set(v, forKey: "jina.apiKey")
-                        }
+                    HStack {
+                        Text("Jina API Key")
+                            .frame(width: 96, alignment: .leading)
+                        Spacer()
+                        SecureField("", text: $jinaApiKey)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    .onChange(of: jinaApiKey) { _, v in
+                        UserDefaults.standard.set(v, forKey: "jina.apiKey")
+                    }
                 }
                 HStack {
                     Button("测试 Jina") {
@@ -257,27 +366,8 @@ public struct AILLMPane: View {
                     }
                 }
             }
-
-            Section("AI 子管线开关（需 AI 板块总开关开启）") {
-                ForEach(AIPipeline.allCases) { p in
-                    Toggle(p.displayName, isOn: Binding(
-                        get: { p.enabled },
-                        set: { AIPipeline.setEnabled(p, $0) }
-                    ))
-                    .tint(Color.rbAccent)
-                }
-                Text("这些开关与「功能板块」页的 AI 总开关叠加生效；源/文件夹级还有第三层开关。")
-                    .font(.caption).foregroundStyle(Color.rbText3)
-            }
         }
         .formStyle(.grouped)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text("AI 与 LLM")
-                    .font(.headline)
-                    .foregroundStyle(Color.rbText)
-            }
-        }
         .alert("defuddle 依赖缺失", isPresented: $showDefuddleAlert) {
             Button("自动下载") {
                 installDefuddle()
@@ -320,18 +410,17 @@ public struct AILLMPane: View {
         }
     }
 
-    /// 检测 defuddle 依赖（node + 项目内 engine 的 defuddle npm 包）
+    /// 检测 defuddle 依赖（node + 引擎 fetch_engine.js）
+    /// 路径走 DependencyPaths：用户自定义 > Bundle 资源 > ~/readboard 兜底（与 FullTextFetcher 一致）。
     private func checkDefuddleDeps() {
         var missing: [String] = []
         // node
-        let nodePath = DependencyPaths.resolve(.node) ?? ""
-        if !FileManager.default.fileExists(atPath: nodePath) {
+        if DependencyPaths.resolve(.node) == nil {
             missing.append("node")
         }
-        // defuddle-cli（项目内 engine/node_modules，自包含）
-        let defuddlePath = NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/engine/node_modules/defuddle/dist/cli.js"
-        if !FileManager.default.fileExists(atPath: defuddlePath) {
-            missing.append("defuddle-cli")
+        // defuddle 引擎（fetch_engine.js，随 App 打包在 Contents/Resources/engine）
+        if DependencyPaths.resolve(.defuddleEngine) == nil {
+            missing.append("defuddle 引擎")
         }
         if missing.isEmpty {
             // 依赖齐全——直接开启
@@ -342,11 +431,19 @@ public struct AILLMPane: View {
         }
     }
 
-    /// 自动安装 defuddle 依赖（项目内 engine 目录 npm install）
+    /// 自动安装 defuddle 依赖（引擎目录 npm install）
+    /// 引擎目录同样走 Bundle 优先解析，避免硬编码 ~/readboard 在打包形态下失效。
     private func installDefuddle() {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
-        let engineDir = NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/engine"
+        let engineDir: String
+        if let resolved = DependencyPaths.resolve(.defuddleEngine) {
+            engineDir = (resolved as NSString).deletingLastPathComponent
+        } else if let bundle = Bundle.main.resourceURL?.appendingPathComponent("engine").path {
+            engineDir = bundle
+        } else {
+            engineDir = NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/engine"
+        }
         let nodeBin = DependencyPaths.resolve(.node) ?? "node"
         let npmBin = nodeBin.replacingOccurrences(of: "/node", with: "/npm")
         task.arguments = ["-c", "cd '\(engineDir)' && '\(npmBin)' install"]
@@ -359,69 +456,270 @@ public struct AILLMPane: View {
     }
 }
 
-/// 单个 LLM 配置槽（baseURL + apiKey + model + 预设 + 测试），允许留空（空槽跳过）
-public struct LLMSlotView: View {
+// MARK: - 内容处理
+
+public struct ContentPane: View {
+    public var body: some View {
+        Form {
+            Section("AI 子管线开关（需 AI 板块总开关开启）") {
+                ForEach(AIPipeline.allCases) { p in
+                    Toggle(p.displayName, isOn: Binding(
+                        get: { p.enabled },
+                        set: { AIPipeline.setEnabled(p, $0) }
+                    ))
+                    .tint(Color.rbAccent)
+                }
+                Text("这些开关与「功能总开关」页的 AI 总开关叠加生效；源/文件夹级还有第三层开关。")
+                    .font(.caption).foregroundStyle(Color.rbText3)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// 单个 LLM 模型卡片（baseURL + apiKey + model + 预设 + 测试），允许留空（空模型跳过）
+/// 可拖拽排序（.onDrag / .dropDestination），名称随下标为「模型 N」。
+/// 布局：标题行 = 拖拽手柄 + 「模型 N」+ 预设下拉（右对齐、紧贴删除）+ 删除；
+/// 底部一行 = 测试连接（左）+ 清除/保存（右，清除永远在保存左侧）；预设带 modelListURL 时模型字段改下拉选。
+public struct LLMModelCard: View {
     let slotIndex: Int
 
     @State private var baseURL = ""
     @State private var apiKey = ""
     @State private var model = ""
+    @State private var temperature: Double = 0.3
     @State private var presetId = "deepseek"
     @State private var testing = false
     @State private var testResult: String? = nil
     @State private var testOK = false
     @State private var savedHint = false
+    @State private var saveError: String? = nil
+    /// 显示/隐藏 API Key 明文（默认隐藏；已配置且未改动时点击可临时回读明文）
+    @State private var showKey = false
+    /// 预设有 modelListURL 时，下拉的可用模型（实时拉取合并；最小保底 = 已存的 model 本身）
+    @State private var modelOptions: [String] = []
+    /// 实时拉取模型列表的状态：idle / loading / 成功(数量) / 失败(原因)
+    @State private var modelLoadState: ModelLoadState = .idle
+    enum ModelLoadState: Equatable {
+        case idle, loading
+        case ok(Int)
+        case failed(String)
+    }
+    /// 是否切到「手动输入」文本框（用户选下拉里的「手动输入…」）
+    @State private var modelManual = false
 
-    private var slotLabel: String { "槽 \(slotIndex + 1)" }
+    /// 由父级（LLMPane）注入，用于统一处理拖拽交换下标 / 删除后刷新
+    var onMove: ((Int, Int) -> Void)? = nil
+    var onRemove: (() -> Void)? = nil
+
+    private var modelLabel: String { "模型 \(slotIndex + 1)" }
     private var filled: Bool { !baseURL.isEmpty || !apiKey.isEmpty || !model.isEmpty }
+    private var currentPreset: LLMSettings.Preset? {
+        LLMSettings.presets.first(where: { $0.id == presetId })
+    }
+    /// 套用预设模板（仅用户主动从下拉选择时调用）。
+    /// 把 baseURL/temperature 填成预设默认值并**实时拉取**模型列表；model 由用户从下拉选（保留已填值）。
+    /// onAppear 不会调用本函数——否则会把已存的自定义 model 顶回默认值。
+    private func applyPreset(_ newId: String) {
+        guard let p = LLMSettings.presets.first(where: { $0.id == newId }),
+              !p.baseURL.isEmpty else { return }
+        baseURL = p.baseURL
+        temperature = p.temperature
+        modelManual = false
+        // 选预设即触发实时拉取（纯实时，无硬编码清单）；拉到前用已存的 model 做最小保底选项
+        var base: [String] = []
+        if !model.isEmpty { base.append(model) }
+        modelOptions = base
+        if !p.modelListURL.isEmpty { Task { await loadModels(from: p.modelListURL) } }
+    }
+
+    /// 合并下拉选项：已存 model（最小保底）+ 实时拉到的列表，去重，并把已存 model 置顶
+    private func mergeModelOptions(_ fetched: [String], base: [String]) {
+        var set = base
+        for m in fetched where !set.contains(m) { set.append(m) }
+        if !model.isEmpty, let idx = set.firstIndex(of: model) { set.remove(at: idx); set.insert(model, at: 0) }
+        modelOptions = set
+    }
+    /// 解析真实 Key：展示态占位是 "••••••••"（表示已配置但 UI 不回显）。
+    /// 用户未改动该字段 → 回读 SecretStore 还原真实 Key（写库时通常不会清空）。
+    /// 用户手动清空/填入 → 直接用输入框的值。
+    private func resolvedKey() -> String {
+        if apiKey == "••••••••" {
+            return SecretStore.load(forKey: "llm.slot\(slotIndex).apiKey") ?? ""
+        }
+        return apiKey
+    }
 
     public var body: some View {
-        Section("\(slotLabel)\(filled ? "" : "（空）")") {
-            Picker("预设", selection: $presetId) {
-                ForEach(LLMSettings.presets) { p in
-                    Text(p.name).tag(p.id)
+        VStack(alignment: .leading, spacing: 12) {
+            // 标题行：拖拽手柄 + 名称 + 预设下拉（右对齐，紧贴删除）+ 删除
+            HStack(spacing: 10) {
+                Image(systemName: "line.3.horizontal")
+                    .foregroundStyle(Color.rbText3)
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 18)
+                    .contentShape(Rectangle())
+                    .onDrag { NSItemProvider(object: NSString(string: "\(slotIndex)")) }
+                Text(modelLabel)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.rbText)
+                Spacer()
+                // 预设下拉（靠右、紧贴删除）
+                // ⚠️ 关键修复：预设「应用模板」只在【用户主动选择】时触发。
+                // 之前用 .onChange(of: presetId)，会在 onAppear 程序化赋值 presetId 时也触发，
+                // 把你手填的自定义 model 重新顶回预设默认值（切回页面即变回 k2）。
+                Picker("", selection: Binding(
+                    get: { presetId },
+                    set: { newId in
+                        presetId = newId
+                        applyPreset(newId)   // 仅用户手动选择才套用模板
+                    }
+                )) {
+                    ForEach(LLMSettings.presets) { p in
+                        Text(p.name).tag(p.id)
+                    }
                 }
-            }
-            .tint(Color.rbAccent)
-            .onChange(of: presetId) { _, v in
-                if let p = LLMSettings.presets.first(where: { $0.id == v }), !p.baseURL.isEmpty {
-                    baseURL = p.baseURL
-                    model = p.defaultModel
+                .labelsHidden()
+                .tint(Color.rbAccent)
+                .controlSize(.small)
+                .frame(width: 180)
+                Button {
+                    onRemove?()
+                } label: {
+                    Image(systemName: "trash")
+                        .foregroundStyle(Color.rbScoreLow)
                 }
+                .buttonStyle(.plain)
+                .help("删除该模型")
             }
+
+            // 字段（Placeholder 即 label，保持 label 左/输入右 的整齐感）
             TextField("Base URL", text: $baseURL)
                 .textFieldStyle(.roundedBorder)
-            SecureField("API Key（存 Keychain，不落明文）", text: $apiKey)
-                .textFieldStyle(.roundedBorder)
-            TextField("模型", text: $model)
-                .textFieldStyle(.roundedBorder)
+            // API Key 字段：默认掩码；点击右侧眼睛图标切换明文（已配置时临时回读真实 Key）
+            HStack(spacing: 6) {
+                if showKey {
+                    TextField("API Key（明文）", text: $apiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .textSelection(.enabled)
+                } else {
+                    SecureField(apiKey == "••••••••" ? "已配置 · 留空则保持不变" : "API Key", text: $apiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+                Button {
+                    showKey.toggle()
+                    // 进入显示态且当前是占位符 → 回读真实明文填入，方便核对
+                    if showKey && apiKey == "••••••••" {
+                        apiKey = SecretStore.load(forKey: "llm.slot\(slotIndex).apiKey") ?? ""
+                    }
+                } label: {
+                    Image(systemName: showKey ? "eye.slash" : "eye")
+                        .foregroundStyle(Color.rbAccent)
+                }
+                .buttonStyle(.plain)
+                .help(showKey ? "隐藏 Key" : "显示 Key")
+            }
+            // 模型字段：带实时列表的预设【永远渲染下拉选单】，组件类型不依赖拉取是否成功——
+            // 下拉里没有的自定义模型（如 k2p6）用右侧「✎」切文本框手填，再点「📋」回到下拉。
+            if modelManual {
+                HStack(spacing: 6) {
+                    TextField("模型（如 k2p6 / 任意自定义 id）", text: $model)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        if let p = currentPreset, !p.modelListURL.isEmpty {
+                            var opts: [String] = []
+                            if !model.isEmpty { opts.append(model) }
+                            modelOptions = opts
+                            modelManual = false
+                            Task { await loadModels(from: p.modelListURL) }
+                        } else {
+                            modelManual = false
+                        }
+                    } label: {
+                        Image(systemName: "list.bullet").foregroundStyle(Color.rbAccent)
+                    }
+                    .buttonStyle(.plain).help("从列表选择")
+                }
+            } else if currentPreset?.modelListURL.isEmpty == false {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Picker("模型", selection: $model) {
+                            ForEach(modelOptions, id: \.self) { m in
+                                Text(m).tag(m)
+                            }
+                        }
+                        .labelsHidden()
+                        .tint(Color.rbAccent)
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                        .background(Color.rbSurface)
+                        .clipShape(RoundedRectangle(cornerRadius: RB.Radius.md))
+                        .overlay(RoundedRectangle(cornerRadius: RB.Radius.md).strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair))
+                        Button {
+                            if let u = currentPreset?.modelListURL, !u.isEmpty { Task { await loadModels(from: u) } }
+                        } label: {
+                            Image(systemName: "arrow.clockwise").foregroundStyle(Color.rbAccent)
+                        }
+                        .buttonStyle(.plain).help("刷新模型列表")
+                        Button {
+                            modelManual = true
+                            model = ""
+                        } label: {
+                            Image(systemName: "pencil").foregroundStyle(Color.rbAccent)
+                        }
+                        .buttonStyle(.plain).help("手动输入模型名")
+                    }
+                    // 实时拉取状态小字：让你一眼看出下拉是"拉到了"还是"没拉到、为什么"
+                    switch modelLoadState {
+                    case .idle:
+                        Text("未拉取模型列表").font(.system(size: 11)).foregroundStyle(Color.rbText3)
+                    case .loading:
+                        HStack(spacing: 4) {
+                            ProgressView().controlSize(.small)
+                            Text("正在拉取可用模型…").font(.system(size: 11)).foregroundStyle(Color.rbText3)
+                        }
+                    case .ok(let n):
+                        Text("已列出 \(n) 个可用模型（实时）").font(.system(size: 11)).foregroundStyle(Color.rbScoreHigh)
+                    case .failed(let msg):
+                        Text(msg).font(.system(size: 11)).foregroundStyle(Color.rbScoreLow).textSelection(.enabled)
+                    }
+                }
+            } else {
+                // 自定义（无实时列表）：文本框
+                TextField("模型（如 k2p6 / 任意自定义 id）", text: $model)
+                    .textFieldStyle(.roundedBorder)
+            }
 
-            HStack {
-                Button("保存") {
-                    LLMSettings(baseURL: baseURL, apiKey: apiKey, model: model)
-                        .save(toSlot: slotIndex)
-                    savedHint = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { savedHint = false }
+            // 温度（模型属性：推理模型强制 1，普通 0.3）
+            HStack(spacing: 8) {
+                Text("温度")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.rbText3)
+                    .frame(width: 36, alignment: .leading)
+                Stepper(value: $temperature, in: 0...2, step: 0.1) {
+                    Text(String(format: "%.1f", temperature))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.rbText)
+                        .frame(minWidth: 32, alignment: .leading)
                 }
                 .controlSize(.small)
-                .buttonStyle(.primaryCapsule)
-                .disabled(baseURL.isEmpty || apiKey.isEmpty || model.isEmpty)
-                Button("清空此槽") {
-                    baseURL = ""; apiKey = ""; model = ""
-                    LLMSettings.clear(slot: slotIndex)
-                }
-                .controlSize(.small)
-                .buttonStyle(.quiet)
-                .disabled(!filled)
-                if savedHint {
-                    Text("已保存").font(.caption).foregroundStyle(Color.rbScoreHigh)
-                }
                 Spacer()
+                if temperature != 1 && temperature != 0.3 {
+                    Button { temperature = 1 } label: { Text("推理").font(.system(size: 11)) }
+                        .controlSize(.small).buttonStyle(.quiet)
+                    Button { temperature = 0.3 } label: { Text("常规").font(.system(size: 11)) }
+                        .controlSize(.small).buttonStyle(.quiet)
+                }
+            }
+
+            // 底部一行：测试连接（左） + 清除/保存（右，清除永远在保存左侧）
+            HStack(spacing: 8) {
                 Button(testing ? "测试中…" : "测试连接") {
                     testing = true
                     testResult = nil
                     Task {
-                        let s = LLMSettings(baseURL: baseURL, apiKey: apiKey, model: model)
+                        let s = LLMSettings(baseURL: baseURL, apiKey: resolvedKey(), model: model, temperature: temperature)
                         let (ok, msg) = await LLMClient().testConnection(s)
                         testOK = ok
                         testResult = msg
@@ -429,21 +727,114 @@ public struct LLMSlotView: View {
                     }
                 }
                 .controlSize(.small)
-                .disabled(testing || baseURL.isEmpty || apiKey.isEmpty || model.isEmpty)
-            }
-            if let r = testResult {
-                Text(r)
-                    .font(.caption)
-                    .foregroundStyle(testOK ? Color.rbScoreHigh : Color.rbScoreLow)
-                    .textSelection(.enabled)
+                .disabled(testing || baseURL.isEmpty || model.isEmpty || resolvedKey().isEmpty)
+                if let r = testResult {
+                    Text(r)
+                        .font(.caption)
+                        .foregroundStyle(testOK ? Color.rbScoreHigh : Color.rbScoreLow)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                if savedHint {
+                    Text("已保存").font(.caption).foregroundStyle(Color.rbScoreHigh)
+                }
+                if let e = saveError {
+                    Text(e).font(.caption).foregroundStyle(Color.rbScoreLow).textSelection(.enabled)
+                }
+                Button("清除") {
+                    baseURL = ""; apiKey = ""; model = ""; temperature = 0.3
+                    modelOptions = []
+                    LLMSettings.clear(profile: slotIndex)
+                }
+                .controlSize(.small)
+                .buttonStyle(.quiet)
+                .tint(Color.rbScoreLow)
+                .disabled(!filled)
+                Button("保存") {
+                    let ok = LLMSettings(baseURL: baseURL, apiKey: resolvedKey(), model: model, temperature: temperature)
+                        .save(toProfile: slotIndex)
+                    if ok {
+                        savedHint = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { savedHint = false }
+                    } else {
+                        // 写入失败（本地加密存储异常）：明确告知，不假装成功
+                        savedHint = false
+                        saveError = "保存失败：本地密钥存储写入异常（Key 未写入）"
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { saveError = nil }
+                    }
+                }
+                .controlSize(.small)
+                .buttonStyle(.primaryCapsule)
+                .disabled(baseURL.isEmpty || model.isEmpty || resolvedKey().isEmpty)
             }
         }
+        .padding(14)
+        .background(Color.rbSurface.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
+        .overlay(
+            RoundedRectangle(cornerRadius: RB.Radius.lg)
+                .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
+        )
+        // 拖拽放置：把别的卡片放到本卡片位置 → 交换下标
+        .dropDestination(for: String.self) { items, _ in
+            guard let srcStr = items.first,
+                  let from = Int(srcStr), from != slotIndex else { return false }
+            onMove?(from, slotIndex)
+            return true
+        }
         .onAppear {
-            let s = LLMSettings.slot(slotIndex)
+            let s = LLMSettings.meta(slotIndex)
             baseURL = s.baseURL
             apiKey = s.apiKey
             model = s.model
+            temperature = s.temperature
             presetId = LLMSettings.presets.first(where: { $0.baseURL == s.baseURL })?.id ?? "custom"
+            // 进入页面立即用「已存的 model 本身」做最小保底选项（防止 Picker 在选项为空时退化/跳选），
+            // 随后后台**实时拉取**真实模型列表合并进来。不再使用任何硬编码厂商清单。
+            if let p = currentPreset {
+                var opts: [String] = []
+                if !s.model.isEmpty { opts.append(s.model) }
+                modelOptions = opts
+                modelManual = false
+                if !p.modelListURL.isEmpty { Task { await loadModels(from: p.modelListURL) } }
+            } else {
+                modelOptions = s.model.isEmpty ? [] : [s.model]
+                modelManual = !s.model.isEmpty
+            }
+        }
+    }
+
+    /// 拉取预设提供的模型列表（OpenAI / OpenRouter 的 /models 或 /v1/models，统一 {data:[{id}]} 格式）
+    /// ⚠️ 必须用真实 Key：onAppear 阶段 apiKey 是占位符 "••••••••"，须经 resolvedKey() 还原真实值，
+    /// 否则拿占位符当 Bearer 发 /models 会 401，已配置 key 的用户回页面下拉仍拉不到。
+    /// 实时拉取预设提供的模型列表（OpenAI 兼容的 /v1/models，返回 {data:[{id}]}）。
+    /// 成功即合并进下拉；失败(端点未暴露/Key无权限/网络)时保留「已存 model」作最小保底，不退回文本框。
+    private func loadModels(from urlStr: String) async {
+        await MainActor.run { modelLoadState = .loading }
+        guard let url = URL(string: urlStr) else {
+            await MainActor.run { modelLoadState = .failed("URL 无效") }; return
+        }
+        let key = resolvedKey()   // 占位态回读 SecretStore 真实 Key，未配置则空
+        let base = modelOptions   // 最小保底（onAppear/applyPreset 已填入已存 model）
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 12
+        if !key.isEmpty { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let arr = json["data"] as? [[String: Any]] else {
+                // 返回的不是 {data:[...]}（可能是 {error:{...}} 或 401）
+                await MainActor.run { modelLoadState = .failed("HTTP \(status)：端点未返回模型列表（多半 Key 无效或该端点不暴露）") }
+                return
+            }
+            let ids = arr.compactMap { $0["id"] as? String }.filter { !$0.isEmpty }
+            await MainActor.run {
+                mergeModelOptions(ids, base: base)   // 合并实时 + 已存 model 保底
+                modelLoadState = .ok(ids.count)
+            }
+        } catch {
+            await MainActor.run { modelLoadState = .failed("请求失败：\(error.localizedDescription)") }
         }
     }
 }
@@ -451,138 +842,184 @@ public struct LLMSlotView: View {
 // MARK: - 依赖
 
 public struct DepsPane: View {
-    @State private var deps: [TranscribeDependency] = []
+    @State private var groups: [DependencyGroup] = []
     @ObservedObject private var downloader = ModelDownloader.shared
     @State private var copiedId: String? = nil
     @State private var customPaths: [String: String] = [:]
 
     public var body: some View {
         Form {
-            Section("转录依赖（播客 / 视频转写）") {
-                ForEach(deps) { dep in
+            // 按功能分组
+            ForEach($groups) { $group in
+                Section {
+                    // 组头：功能名 + 可用状态徽标
                     HStack(spacing: 10) {
-                        Image(systemName: dep.installed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                            .foregroundStyle(dep.installed ? Color.rbScoreHigh : Color.rbScoreMid)
+                        Image(systemName: group.ready ? "checkmark.seal.fill" : "exclamationmark.octagon.fill")
+                            .foregroundStyle(group.ready ? Color.rbScoreHigh : Color.rbScoreMid)
+                            .font(.system(size: 18))
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(dep.displayName)
-                                .font(.system(size: 13, weight: .semibold))
+                            Text(group.title)
+                                .font(.system(size: 15, weight: .semibold))
                                 .foregroundStyle(Color.rbText)
-                            Text(dep.installed ? dep.path : dep.installHint)
+                            Text(group.ready ? "✅ 该功能可用" : "⛔ 该功能不可用——完成上方缺失依赖")
                                 .font(.caption)
-                                .foregroundStyle(Color.rbText3)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                                .foregroundStyle(group.ready ? Color.rbScoreHigh : Color.rbScoreMid)
                         }
                         Spacer()
-                        if !dep.installed {
-                            if let cmd = dep.installCommand {
-                                Button(copiedId == dep.id ? "已复制" : "复制命令") {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(cmd, forType: .string)
-                                    copiedId = dep.id
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                                        if copiedId == dep.id { copiedId = nil }
+                    }
+                    .padding(.vertical, 4)
+
+                    Text(group.description)
+                        .font(.caption)
+                        .foregroundStyle(Color.rbText3)
+                        .padding(.bottom, 4)
+
+                    // 组内每个依赖：状态 + 自动检测 + 自定义
+                    ForEach($group.items) { $item in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 10) {
+                                Image(systemName: item.installed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                    .foregroundStyle(item.installed ? Color.rbScoreHigh : Color.rbScoreLow)
+                                    .font(.system(size: 16))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.displayName)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(Color.rbText)
+                                    Text(item.installed ? item.path : item.installHint)
+                                        .font(.caption)
+                                        .foregroundStyle(item.installed ? Color.rbText2 : Color.rbText3)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Spacer()
+                                // 未找到时：复制安装命令 / 自动下载
+                                if !item.installed {
+                                    if let cmd = item.installCommand {
+                                        Button(copiedId == item.id ? "已复制" : "复制命令") {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(cmd, forType: .string)
+                                            copiedId = item.id
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                                if copiedId == item.id { copiedId = nil }
+                                            }
+                                        }
+                                        .controlSize(.small)
+                                    } else if item.id == DependencyPaths.Kind.whisperModel.rawValue {
+                                        Button(downloader.isDownloading ? "下载中…" : "自动下载") {
+                                            Task { await downloader.download() }
+                                        }
+                                        .controlSize(.small)
+                                        .disabled(downloader.isDownloading)
                                     }
                                 }
+                            }
+
+                            // 该依赖的两个操作按钮：自动检测 / 自定义
+                            HStack(spacing: 8) {
+                                Button {
+                                    // 自动检测：清掉自定义回到自动探测，再刷新该组
+                                    DependencyPaths.setCustom(DependencyPaths.Kind(rawValue: item.id) ?? .node, "")
+                                    customPaths[item.id] = ""
+                                    redetect()
+                                } label: {
+                                    Label("自动检测", systemImage: "magnifyingglass")
+                                }
                                 .controlSize(.small)
-                            } else {
-                                Button("自动下载") { Task { await downloader.download() } }
-                                    .controlSize(.small)
-                                    .disabled(downloader.isDownloading)
+
+                                Button {
+                                    pickDependencyPath(DependencyPaths.Kind(rawValue: item.id) ?? .node)
+                                } label: {
+                                    Label("自定义", systemImage: "slider.horizontal.3")
+                                }
+                                .controlSize(.small)
+
+                                Spacer()
+                                Text(item.installed ? "通过" : "未找到")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(item.installed ? Color.rbScoreHigh : Color.rbScoreLow)
                             }
                         }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 3)
-                }
 
-                if downloader.isDownloading || !downloader.statusText.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if downloader.progress >= 0 {
-                            ProgressView(value: downloader.progress)
-                                .tint(Color.rbAccent)
-                        } else {
-                            ProgressView()
+                    // 模型下载进度（转录组）
+                    if group.id == "transcribe",
+                       downloader.isDownloading || !downloader.statusText.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            if downloader.progress >= 0 {
+                                ProgressView(value: downloader.progress).tint(Color.rbAccent)
+                            } else {
+                                ProgressView()
+                            }
+                            Text(downloader.statusText)
+                                .font(.caption).foregroundStyle(Color.rbText3)
+                            if let err = downloader.errorMessage {
+                                Text(err).font(.caption).foregroundStyle(Color.rbScoreLow)
+                            }
                         }
-                        Text(downloader.statusText)
-                            .font(.caption).foregroundStyle(Color.rbText3)
-                        if let err = downloader.errorMessage {
-                            Text(err).font(.caption).foregroundStyle(Color.rbScoreLow)
-                        }
+                        .padding(.vertical, 3)
                     }
-                    .padding(.vertical, 3)
-                }
-
-                HStack {
-                    let ready = DependencyChecker.shared.transcribeReady
-                    Image(systemName: ready ? "checkmark.seal.fill" : "exclamationmark.octagon.fill")
-                        .foregroundStyle(ready ? Color.rbScoreHigh : Color.rbScoreMid)
-                    Text(ready ? "转录功能可用" : "转录功能不可用——请先安装上方缺失依赖")
-                        .font(.callout)
-                        .foregroundStyle(ready ? Color.rbScoreHigh : Color.rbScoreMid)
                 }
             }
 
-            Section("自定义路径（留空 = 自动探测 PATH 和常见位置）") {
+            // 自定义路径汇总（留空 = 自动探测）
+            Section("自定义路径（留空 = 自动探测 PATH / Bundle 资源 / 常见位置）") {
                 ForEach(DependencyPaths.Kind.allCases) { kind in
                     HStack {
                         Text(kind.displayName)
-                            .frame(width: 150, alignment: .leading)
+                            .frame(width: 200, alignment: .leading)
                         Text(customPaths[kind.rawValue].isNilOrEmpty ? "自动探测" : (customPaths[kind.rawValue] ?? ""))
                             .font(.caption)
                             .foregroundStyle(customPaths[kind.rawValue].isNilOrEmpty ? Color.rbText3 : Color.rbText)
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        // 系统文件选择器选路径（不手填）
-                        Button("选择…") { pickDependencyPath(kind) }
-                            .controlSize(.small)
-                        // 路径失效告警：配了但文件不在（brew 升级/卸载后）
                         if DependencyPaths.isCustomStale(kind) {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .foregroundStyle(Color.rbScoreMid)
                                 .help("该路径已失效（文件不存在），请修正或清除回自动探测")
                         }
+                        Button("选择…") { pickDependencyPath(kind) }
+                            .controlSize(.small)
                         if !customPaths[kind.rawValue].isNilOrEmpty {
                             Button("清除") {
                                 customPaths[kind.rawValue] = ""
                                 DependencyPaths.setCustom(kind, "")
+                                redetect()
                             }
                             .controlSize(.small)
                             .buttonStyle(.quiet)
                         }
                     }
                 }
-                Text("全文抓取的 node 也在此配置。改动即时生效。")
+                Text("改动即时生效，点击上方功能的「自动检测」或本段「清除」即重新探测。")
                     .font(.caption).foregroundStyle(Color.rbText3)
             }
         }
         .formStyle(.grouped)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text("依赖")
-                    .font(.headline)
-                    .foregroundStyle(Color.rbText)
-            }
-        }
-        .onAppear {
-            deps = DependencyChecker.shared.checkAll()
-            for kind in DependencyPaths.Kind.allCases {
-                customPaths[kind.rawValue] = UserDefaults.standard.string(forKey: kind.defaultsKey) ?? ""
-            }
+        .onAppear { redetect() }
+    }
+
+    /// 重新探测所有依赖并刷新各组
+    private func redetect() {
+        groups = DependencyChecker.shared.checkAllGroups()
+        for kind in DependencyPaths.Kind.allCases {
+            customPaths[kind.rawValue] = UserDefaults.standard.string(forKey: kind.defaultsKey) ?? ""
         }
     }
 
-    /// 系统文件选择器选依赖路径（whisper-cli/ffmpeg/yt-dlp/node 可执行、whisper 模型文件）
+    /// 系统文件选择器选依赖路径（whisper-cli/ffmpeg/yt-dlp/node/模型/defuddle 引擎）
     private func pickDependencyPath(_ kind: DependencyPaths.Kind) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = (kind == .defuddleEngine)  // 引擎允许选整个 engine 目录？保持选文件更稳
         panel.allowsMultipleSelection = false
         panel.prompt = "选择"
-        panel.message = "选择 \(kind.displayName) 的路径"
+        panel.message = "选择 \(kind.displayName)（留空则自动探测）"
         if panel.runModal() == .OK, let url = panel.url {
             customPaths[kind.rawValue] = url.path
             DependencyPaths.setCustom(kind, url.path)
+            redetect()
         }
     }
 }
@@ -627,18 +1064,11 @@ public struct BoardsPane: View {
             } header: {
                 Text("板块总开关")
             } footer: {
-                Text("关掉板块 = 该板块下所有功能全停（无论源级/文件夹级开关怎么开）。AI 子管线细开关在「AI 与 LLM」页。")
+                Text("关掉板块 = 该板块下所有功能全停（无论源级/文件夹级开关怎么开）。AI 子管线细开关在「内容处理」页。")
                     .font(.caption)
             }
         }
         .formStyle(.grouped)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text("功能板块")
-                    .font(.headline)
-                    .foregroundStyle(Color.rbText)
-            }
-        }
         .onAppear {
             for b in FeatureBoard.allCases { states[b.rawValue] = b.enabled }
         }
@@ -786,13 +1216,6 @@ public struct CleanupPane: View {
             }
         }
         .formStyle(.grouped)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text("缓存清理")
-                    .font(.headline)
-                    .foregroundStyle(Color.rbText)
-            }
-        }
         .onAppear {
             archiveDays = cleanup.archiveAfterDays
             deleteDays = cleanup.deleteAfterDays
@@ -972,7 +1395,8 @@ public struct DeadLetterView: View {
                 Text("无死信任务——连续失败 3 次的管线任务会出现在这里。")
                     .font(.caption).foregroundStyle(Color.rbText3)
             } else {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, it in
+                ForEach(items.indices, id: \.self) { idx in
+                    let it = items[idx]
                     HStack {
                         Text("内容 #\(it.contentId) · \(it.jtype)")
                             .font(.callout)
@@ -1029,7 +1453,6 @@ public struct ReaderPane: View {
     @AppStorage("reading.lineSpacing") private var lineSpacing: Double = 6
     @AppStorage("reading.contentWidth") private var contentWidth: Double = 720
     @AppStorage("reading.uiFontScale") private var uiFontScale: Double = 1.0
-    @AppStorage("reading.viewMode") private var viewMode: Int = 0
 
     // 文章列表外观
     @AppStorage("list.showThumbnails") private var showThumbnails: Bool = true
@@ -1068,45 +1491,46 @@ public struct ReaderPane: View {
                 .tint(Color.rbAccent)
                 HStack {
                     Text("正文字号 \(Int(fontSize))")
-                    Slider(value: $fontSize, in: 12...28, step: 1)
+                        .frame(width: 96, alignment: .leading)
+                    Slider(value: $fontSize, in: 12...32, step: 1)
                         .tint(Color.rbAccent)
                 }
                 HStack {
                     Text("标题字号 \(Int(titleFontSize))")
-                    Slider(value: $titleFontSize, in: 16...40, step: 1)
+                        .frame(width: 96, alignment: .leading)
+                    Slider(value: $titleFontSize, in: 16...36, step: 1)
                         .tint(Color.rbAccent)
                 }
                 HStack {
                     Text("信息字号 \(Int(metaFontSize))")
-                    Slider(value: $metaFontSize, in: 9...18, step: 1)
+                        .frame(width: 96, alignment: .leading)
+                    Slider(value: $metaFontSize, in: 8...28, step: 1)
                         .tint(Color.rbAccent)
                 }
                 HStack {
                     Text("摘要字号 \(Int(summaryFontSize))")
-                    Slider(value: $summaryFontSize, in: 10...22, step: 1)
+                        .frame(width: 96, alignment: .leading)
+                    Slider(value: $summaryFontSize, in: 8...28, step: 1)
                         .tint(Color.rbAccent)
                 }
                 HStack {
                     Text("行距 \(Int(lineSpacing))")
-                    Slider(value: $lineSpacing, in: 0...16, step: 1)
+                        .frame(width: 96, alignment: .leading)
+                    Slider(value: $lineSpacing, in: 0...24, step: 1)
                         .tint(Color.rbAccent)
                 }
                 HStack {
                     Text("内容宽度 \(Int(contentWidth))")
-                    Slider(value: $contentWidth, in: 560...1200, step: 20)
+                        .frame(width: 96, alignment: .leading)
+                    Slider(value: $contentWidth, in: 600...1200, step: 20)
                         .tint(Color.rbAccent)
                 }
                 HStack {
                     Text("界面缩放 \(Int(uiFontScale * 100))%")
-                    Slider(value: $uiFontScale, in: 0.8...1.5, step: 0.05)
+                        .frame(width: 96, alignment: .leading)
+                    Slider(value: $uiFontScale, in: 0.8...1.6, step: 0.05)
                         .tint(Color.rbAccent)
                 }
-                Picker("默认正文视图", selection: $viewMode) {
-                    Text("双语对照").tag(0)
-                    Text("仅原文").tag(1)
-                    Text("仅译文").tag(2)
-                }
-                .tint(Color.rbAccent)
             }
 
             // ── 文章列表外观 ──
@@ -1141,13 +1565,6 @@ public struct ReaderPane: View {
             }
         }
         .formStyle(.grouped)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text("阅读器")
-                    .font(.headline)
-                    .foregroundStyle(Color.rbText)
-            }
-        }
     }
 
     /// ReadingFont → 持久化 key（和 ReadingFont.current 的存储格式一致）
@@ -1159,5 +1576,114 @@ public struct ReaderPane: View {
         case .fangsong: return "fangsong"
         case .custom(let name): return "custom:\(name)"
         }
+    }
+}
+
+// MARK: - 多类型源（类型总开关）
+
+/// 设置「多类型源」页：四大内容类型的总开关（文章/RSS、播客、视频、微信）。
+/// 当前仅 UI 与计数，开关持久化于 UserDefaults；拦截接入见下方 footer 说明。
+public struct TypeSwitchPane: View {
+    @State private var counts: [ContentType: Int] = [:]
+    @State private var enabled: [ContentType: Bool] = [:]
+
+    public var body: some View {
+        Form {
+            Section {
+                ForEach(ContentType.allCases) { t in
+                    HStack(spacing: 12) {
+                        Image(systemName: t.icon)
+                            .font(.system(size: 16))
+                            .frame(width: 24)
+                            .foregroundStyle(Color.rbAccent)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(t.displayName)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Color.rbText)
+                            Text(t.subtitle)
+                                .font(.caption)
+                                .foregroundStyle(Color.rbText2)
+                            Text("当前 \(counts[t] ?? 0) 个源")
+                                .font(.caption2)
+                                .foregroundStyle(Color.rbText3)
+                        }
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { enabled[t] ?? true },
+                            set: { enabled[t] = $0; ContentType.setEnabled(t, $0) }
+                        ))
+                        .labelsHidden()
+                        .tint(Color.rbAccent)
+                    }
+                    .padding(.vertical, 4)
+                }
+            } header: {
+                Text("内容类型总开关")
+            } footer: {
+                Text("关闭某类型 = readboard 不再抓取/识别该类型的内容（文章/RSS 关掉则只收媒体，反之只收文章）。拦截逻辑后续接入抓取管线，本期仅做开关 UI 与各类型源计数。")
+                    .font(.caption)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            let srcs = SourceStore.shared.sources
+            for t in ContentType.allCases {
+                enabled[t] = t.enabled
+                counts[t] = srcs.filter { $0.stype == t.sourceStype }.count
+            }
+        }
+    }
+}
+
+/// 内容类型：设置页类型总开关枚举（与 content_source.stype 映射）。
+public enum ContentType: String, CaseIterable, Identifiable {
+    case article, podcast, youtube, wechat
+    public var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .article: return "文章 / RSS"
+        case .podcast: return "播客"
+        case .youtube: return "视频 / YouTube"
+        case .wechat:  return "微信公众号"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .article: return "常规 RSS 文章订阅"
+        case .podcast: return "音频节目（可转录）"
+        case .youtube: return "视频 / 视频播客（可转录）"
+        case .wechat:  return "公众号转 RSS"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .article: return "doc.text"
+        case .podcast: return "waveform"
+        case .youtube: return "play.rectangle"
+        case .wechat:  return "message.fill"
+        }
+    }
+
+    /// content_source.stype 字段值（wechat 当前与 rss 同走普通抓取，待 #21 换引擎）
+    var sourceStype: String {
+        switch self {
+        case .article: return "rss"
+        case .podcast: return "podcast"
+        case .youtube: return "youtube"
+        case .wechat:  return "wechat"
+        }
+    }
+
+    private var defaultsKey: String { "type.\(rawValue).enabled" }
+
+    var enabled: Bool {
+        UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true
+    }
+
+    static func setEnabled(_ t: ContentType, _ on: Bool) {
+        UserDefaults.standard.set(on, forKey: "type.\(t.rawValue).enabled")
     }
 }

@@ -1,16 +1,16 @@
 import Foundation
 
-// MARK: - 入库（最终 md 落盘）
-// 核心定位：所有管线（打分/翻译/摘要/转录）是"中间环节"，
-// 全部跑完后才把这篇落成最终 md 文件长期保存——这个过程叫"入库"，
-// 完成生成 md 文件 = 入库成功。
+// MARK: - 入库（最终 Markdown 落盘）
+// 核心定位：所有管线（AI 评分/翻译/摘要/转录）是"中间环节"，
+// 全部跑完后才把这篇落成最终 Markdown 文件长期保存——这个过程叫"入库"，
+// 完成生成 Markdown 文件 = 入库成功。
 //
-// 数据策略（用户拍板）：入库后数据库记录保留（标题/md/LLM 产出/元数据都在，
+// 数据策略（用户拍板）：入库后数据库记录保留（标题/Markdown/LLM 产出/元数据都在，
 // 仍是可检索统一视图），只清 content_html 这类抓取中间产物（retention cleanHtml A 路径
 // 对已入库的立即清 html，不等天数）。retention 物理 DELETE 跳过已入库记录。
 //
 // 完成判定（按该源开启的管线）：
-//   文章：开了打分要 llm_score、开了摘要要 llm_summary、开了翻译要 llm_translated_md
+//   文章：开了 AI 评分要 llm_score、开了 AI 摘要要 llm_summary、开了 AI 翻译要 llm_translated_md
 //   媒体：开了转录要 llm_translated_md（转录稿写这里）+ 开了摘要要 llm_summary
 //   开关没开的不算缺——源没开翻译，文章打完分+摘要就算完成。
 //
@@ -108,7 +108,7 @@ public final class ArchiveService: @unchecked Sendable {
         if isMedia {
             if autoTranscribe && !hasTranslated { return false }
             if autoSummarize && !hasSummary { return false }
-            // 媒体不打分/翻译原文（转录稿才是内容主体），开了转录+摘要就够
+            // 媒体不做 AI 评分/翻译原文（转录稿才是内容主体），开了转录+摘要就够
             return autoTranscribe || autoSummarize ? (hasTranslated || !autoTranscribe) : hasBody
         }
 
@@ -154,7 +154,7 @@ public final class ArchiveService: @unchecked Sendable {
                 UPDATE content SET meta = json_set(COALESCE(meta,'{}'), '$.archived_at', datetime('now'))
                 WHERE id = ?;
                 """, params: [contentId])
-            // 入库成功（含重入库）触发自动导出规则——用户要求每次 md 文件生成都重新执行导出
+            // 入库成功（含重入库）触发自动导出规则——用户要求每次 Markdown 文件生成都重新执行导出
             Task { await ExportService.shared.runPending(trigger: "archive", contentId: contentId) }
         }
         return ok
@@ -175,16 +175,31 @@ public final class ArchiveService: @unchecked Sendable {
     }
 
     /// 归档文件路径（归档目录/源名/标题-contentId.md）
+    /// ⚠️ 渲染风暴实锤（13:20 采样：articleList 求值内 300 次 queryRows）：
+    /// 列表每行的右键菜单条件都会调本函数——原来每行一次 SQL + sanitize，
+    /// 300 行 × 每次列表渲染 = 每次渲染 300 条查询，内存与 AG 压力爆炸。
+    /// 源名/标题按 contentId 记忆化（一次查询终身命中），fs 检查保留在调用方。
+    private var pathCache: [Int64: String?] = [:]
+    private let pathCacheLock = NSLock()
+
     func archiveFilePath(contentId: Int64) -> String? {
+        pathCacheLock.lock()
+        if let cached = pathCache[contentId] { pathCacheLock.unlock(); return cached }
+        pathCacheLock.unlock()
         guard let row = db.queryRows("""
             SELECT c.title, c.source, s.name AS source_name
             FROM content c LEFT JOIN content_source s ON c.source_id = s.id
             WHERE c.id = ?;
-            """, params: [contentId]).first else { return nil }
+            """, params: [contentId]).first else {
+            pathCacheLock.lock(); pathCache[contentId] = nil; pathCacheLock.unlock()
+            return nil
+        }
         let sourceName = row["source_name"] ?? row["source"] ?? "unknown"
         let title = row["title"] ?? "untitled"
-        return archiveDir + "/" + ExportService.sanitizeFilename(sourceName)
-             + "/" + ExportService.sanitizeFilename(title) + "-\(contentId).md"
+        let path = archiveDir + "/" + ExportService.sanitizeFilename(sourceName)
+                 + "/" + ExportService.sanitizeFilename(title) + "-\(contentId).md"
+        pathCacheLock.lock(); pathCache[contentId] = path; pathCacheLock.unlock()
+        return path
     }
 
     /// 手动重处理后刷新归档：清标记 + 立即重新落盘（文件更新到最新产出）。

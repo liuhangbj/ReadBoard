@@ -84,8 +84,13 @@ struct QuietButtonStyle: ButtonStyle {
                         .fill(hovering || configuration.isPressed
                               ? Color.rbSurface : Color.clear)
                 )
-                .onHover { hovering = $0 }
-                .animation(.easeOut(duration: 0.12), value: hovering)
+                // ⚠️ hover 状态链收敛（17:35 B3 对照实验实锤为 AG cycle 触发器）：
+                // 原实现 onHover 无去重 + 每个变化都开 .animation 事务——ReadingView 每篇
+                // 销毁重建时，指针下追踪区反复 enter/exit，拆解窗口内连写 @State → cycle → 闪退。
+                // 改为只在值真变时才写 + 不开动画事务（视觉瞬切，交互一致）。
+                .onHover { h in
+                    if h != hovering { hovering = h }
+                }
         }
     }
 }
@@ -111,8 +116,9 @@ struct RowHoverButtonStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .rbRowHover(hovering || configuration.isPressed, radius: radius)
-                .onHover { hovering = $0 }
-                .animation(.easeOut(duration: 0.10), value: hovering)
+                .onHover { h in
+                    if h != hovering { hovering = h }
+                }
         }
     }
 }
@@ -145,8 +151,9 @@ struct PrimaryCapsuleButtonStyle: ButtonStyle {
                         .fill(Color.rbAccent
                             .opacity(isEnabled ? (hovering ? 0.85 : 1.0) : 0.45))
                 )
-                .onHover { hovering = $0 }
-                .animation(.easeOut(duration: 0.10), value: hovering)
+                .onHover { h in
+                    if h != hovering { hovering = h }
+                }
         }
     }
 }
@@ -185,8 +192,10 @@ struct CapsuleButton: View {
         }
         .buttonStyle(.plain)
         .disabled(disabled)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        // hover 状态链收敛（同 QuietButtonStyle，17:35 实锤为 AG cycle 触发器）
+        .onHover { h in
+            if h != hovering { hovering = h }
+        }
     }
 }
 
@@ -230,6 +239,55 @@ extension View {
     }
 }
 
+/// 安静按钮样式的**无状态机版**（17:48 定案）：
+/// 仅 ReadingView 使用——阅读区每篇文章销毁重建时，hover 追踪区 enter/exit 会
+/// 在拆解窗口写 @State → AG cycle → 闪退（B3 静态按钮对照实验实锤稳定）。
+/// 外观一致（无 hover 变色反馈，换来零状态机）。左栏/设置页保留带 hover 的 .quiet。
+struct StaticQuietButtonStyle: ButtonStyle {
+    var radius: CGFloat = RB.Radius.md
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(Color.rbText2)
+            .padding(RB.Space.xs)
+            .background(
+                RoundedRectangle(cornerRadius: radius)
+                    .fill(configuration.isPressed ? Color.rbSurface : Color.clear)
+            )
+    }
+}
+
+extension ButtonStyle where Self == StaticQuietButtonStyle {
+    static var staticQuiet: StaticQuietButtonStyle { StaticQuietButtonStyle() }
+}
+
+/// 胶囊操作按钮的**无状态机版**（ReadingView 专用，理由同上——B3 对照实验实锤稳定）。
+struct StaticCapsuleButton: View {
+    let title: String
+    let icon: String
+    var disabled: Bool = false
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(disabled ? Color.rbText3 : Color.rbText2)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule()
+                        .fill(disabled ? Color.rbSurface.opacity(0.5) : Color.rbSurface)
+                )
+                .overlay(
+                    Capsule().strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+    }
+}
+
 /// 纸墨分段选择器（替代原生 segmented control）：
 /// surface 胶囊容器 + hairline 描边；选中段墨蓝浅底 + 墨蓝字 medium。
 /// 原生 segmented 带系统蓝、视觉重，与纸墨系不搭——中栏筛选/阅读区视图切换统一用这个。
@@ -240,9 +298,13 @@ struct RBSegmented<Item: Hashable>: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            ForEach(Array(items.enumerated()), id: \.offset) { _, entry in
-                let (item, label) = entry
+            ForEach(items.indices, id: \.self) { idx in
+                let (item, label) = items[idx]
                 let active = selection == item
+                // ⚠️ 10:04 最终根因：onTapGesture 改状态但不触发 AppKit「渲染提交」——
+                // 日志实证 body 点击后 0.008s 立即重算、viewMode 也变，但屏幕不上屏，
+                // 要等用户在任意位置（含程序外）点鼠标产生新事件循环，才把积压的渲染事务冲出来。
+                // Button 的 action 有完整「点击→状态变更→立即渲染提交」链路，改回 Button 即根治。
                 Button {
                     selection = item
                 } label: {
@@ -357,14 +419,17 @@ struct AudioPlayerView: View {
         .padding(12)
         .background(Color.rbSurface)
         .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
-        .onAppear { setupPlayer() }
+        // ⚠️ 绝不 onAppear 创建 AVPlayer（16:49 定案）：打开播客文章即建播放器
+        // 会立刻开始缓冲远程音频流（网络+解码管线），叠加 0.5s 主 runloop 定时器
+        // 驱动 @State 每半秒重渲染——打开即渲染炸弹，连点时直接炸（08:49 播客闪退实锤）。
+        // 改为首次点播放才创建/启动；不点播放零成本。
         .onDisappear { cleanup() }
     }
 
-    private func setupPlayer() {
-        guard let url = URL(string: audioUrl) else { return }
+    /// 首次点播放：惰性创建播放器 + 启动进度定时器
+    private func ensurePlayer() {
+        guard player == nil, let url = URL(string: audioUrl) else { return }
         player = AVPlayer(url: url)
-        // 监听播放进度
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             guard let player = player else { return }
             currentTime = player.currentTime().seconds
@@ -376,6 +441,7 @@ struct AudioPlayerView: View {
     }
 
     private func togglePlay() {
+        ensurePlayer()
         guard let player = player else { return }
         if isPlaying {
             player.pause()

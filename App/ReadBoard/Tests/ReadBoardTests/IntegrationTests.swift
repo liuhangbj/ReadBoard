@@ -18,7 +18,7 @@ final class LLMIntegrationTests: XCTestCase {
             给这段内容打分，返回 JSON：{"depth":0-40,"quality":0-35,"readability":0-25,"total":0-100,"summary":"一句话"}
             内容：黄金价格创历史新高，央行连续 18 个月增持，去美元化趋势加速。
             """)
-        ], temperature: 0, maxTokens: 200)
+        ], maxTokens: 200)
         print("LLM 返回(\(model)): \(text.prefix(200))")
         // 验证能被 parseScoreJSON 解析（这是管线的真实契约）
         let parsed = LLMPipeline.parseScoreJSON(text)

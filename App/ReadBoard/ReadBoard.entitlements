@@ -8,5 +8,13 @@
 	<true/>
 	<key>com.apple.security.files.downloads.read-write</key>
 	<true/>
+	<!-- 关键：无沙盒 ad-hoc 签名进程访问钥匙串必须声明 keychain 访问组，
+	     否则 SecItemAdd 返回 -34018 (errSecMissingEntitlement)，Key 静默写不进去。
+	     $(AppIdentifierPrefix) 在无 team 的 ad-hoc 签名下解析为空串，
+	     故访问组即为 com.readboard（与 KeychainHelper.service 一致）。 -->
+	<key>com.apple.security.keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.readboard</string>
+	</array>
 </dict>
 </plist>

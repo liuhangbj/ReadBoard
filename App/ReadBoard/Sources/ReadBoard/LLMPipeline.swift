@@ -87,7 +87,7 @@ public final class LLMPipeline: @unchecked Sendable {
     {"depth": 0-40, "quality": 0-35, "readability": 0-25, "total": 0-100, "summary": "150字以内中文摘要，提炼核心观点和数据"}
     """
 
-    /// 对单条内容打分并写库。返回是否成功。
+    /// 对单条内容做 AI 评分并写库。返回是否成功。
     @discardableResult
     func score(contentId: Int64, title: String, body: String) async -> Bool {
         guard isAvailable else { return false }
@@ -99,7 +99,7 @@ public final class LLMPipeline: @unchecked Sendable {
         do {
             let (text, model) = try await client.chat(
                 messages: [ChatMessage(role: "user", content: prompt)],
-                temperature: 0.3, maxTokens: 1024)
+                maxTokens: 1024)
             guard let result = Self.parseScoreJSON(text) else {
                 setError("评分结果解析失败（LLM 输出非预期 JSON）")
                 return false
@@ -117,7 +117,7 @@ public final class LLMPipeline: @unchecked Sendable {
     static func describeError(_ error: Error) -> String {
         if let e = error as? LLMError {
             switch e {
-            case .noProvider: return "无可用 LLM 配置（三槽全空且 .env 无 key）"
+            case .noProvider: return "无可用 LLM 配置（模型配置页未填写任何有效模型）"
             case .httpError(let code, let body):
                 if code == 401 || code == 403 { return "LLM 鉴权失败（\(code)，key 失效或未充值）" }
                 if code == 429 { return "LLM 限流（429，可稍后重试）" }
@@ -215,7 +215,7 @@ public final class LLMPipeline: @unchecked Sendable {
         do {
             let (out, _) = try await client.chat(
                 messages: [ChatMessage(role: "user", content: prompt)],
-                temperature: 0.3, maxTokens: 512)
+                maxTokens: 512)
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { setError("摘要返回空"); return nil }
             setError(nil)
@@ -248,10 +248,10 @@ public final class LLMPipeline: @unchecked Sendable {
         内容：
         \(text)
         """
-        do {
-            let (out, _) = try await client.chat(
-                messages: [ChatMessage(role: "user", content: prompt)],
-                temperature: 0.3, maxTokens: 4096)
+            do {
+                let (out, _) = try await client.chat(
+                    messages: [ChatMessage(role: "user", content: prompt)],
+                    maxTokens: 16384)
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         } catch {
@@ -302,7 +302,7 @@ public final class LLMPipeline: @unchecked Sendable {
         do {
             let (out, _) = try await client.chat(
                 messages: [ChatMessage(role: "user", content: prompt)],
-                temperature: 0.3, maxTokens: 16384)
+                maxTokens: 16384)
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         } catch {
@@ -386,7 +386,7 @@ public final class LLMPipeline: @unchecked Sendable {
             do {
                 let (text, model) = try await client.chat(
                     messages: [ChatMessage(role: "user", content: prompt)],
-                    temperature: 0.3, maxTokens: 4096)
+                    maxTokens: 16384)
                 let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 translated = t.isEmpty ? nil : t
                 usedModel = model
@@ -441,7 +441,7 @@ public final class LLMPipeline: @unchecked Sendable {
         do {
             let (out, _) = try await client.chat(
                 messages: [ChatMessage(role: "user", content: prompt)],
-                temperature: 0.3, maxTokens: 4096)
+                maxTokens: 4096)
             let t = out.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty else { return false }
             // 按 ==== 分隔符拆标题/简介

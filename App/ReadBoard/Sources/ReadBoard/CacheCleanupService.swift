@@ -217,7 +217,7 @@ public final class CacheCleanupService: ObservableObject {
         // 「归档 N 天后自动删除」可关闭——关闭则归档内容永不自动删除
         var deleted = 0
         if deleteEnabled && deleteAfterDays > 0 {
-            // 软删除：guid 留底防重抓，删 html + 删 md 文件，列表不显示
+            // 软删除：guid 留底防重抓，删 html + 删 Markdown 文件，列表不显示
             let toDelete = db.queryRows("""
                 SELECT id FROM content
                 WHERE is_archived = 1 AND starred = 0
@@ -228,7 +228,7 @@ public final class CacheCleanupService: ObservableObject {
                 """)
             for row in toDelete {
                 guard let cid = Int64(row["id"] ?? "") else { continue }
-                // 1. 删 md 文件（archiveDir/源名/标题-id.md）
+                // 1. 删 Markdown 文件（archiveDir/源名/标题-id.md）
                 if let archivePath = ArchiveService.shared.archiveFilePath(contentId: cid),
                    FileManager.default.fileExists(atPath: archivePath) {
                     try? FileManager.default.removeItem(atPath: archivePath)
@@ -297,9 +297,9 @@ public final class CacheCleanupService: ObservableObject {
         try? lines.joined(separator: "\n").write(toFile: file, atomically: true, encoding: .utf8)
     }
 
-    /// 清全文 HTML（md 才是长期阅读格式，HTML 只是抓取中间产物，67k 条的 HTML 是 DB 膨胀大头）。
+    /// 清全文 HTML（Markdown 才是长期阅读格式，HTML 只是抓取中间产物，67k 条的 HTML 是 DB 膨胀大头）。
     /// 两路清理：
-    ///   A. 已落盘归档的（meta.archived_at）：html 立刻可删——md 文件已落盘长期保存，
+    ///   A. 已落盘归档的（meta.archived_at）：html 立刻可删——Markdown 文件已落盘长期保存，
     ///      数据库记录保留（标题/md/LLM 产出/元数据都在），html 纯冗余。不等天数、不看已读。
     ///   B. 未归档但已转 md 且未读未标未归档、超过 cleanHtmlAfterDays 天的（原保守路径）。
     @discardableResult

@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Feed 抓取与解析（自研，脱离 FreshRSS）
 // 收编原 FeedParser.php 逻辑：RSS 2.0 <item> / Atom <entry>，识别 podcast enclosure / YouTube 扩展
 
-public struct ParsedEntry {
+public struct ParsedEntry: Sendable {
     let guid: String
     let title: String
     let url: String
@@ -13,14 +13,14 @@ public struct ParsedEntry {
     var meta: [String: String] = [:]   // audio_url / video_id / duration 等
 }
 
-public enum FeedKind: String {
+public enum FeedKind: String, Sendable {
     case article, podcast, video
 }
 
-public struct ParsedFeed {
+public struct ParsedFeed: Sendable {
     let title: String
     let siteURL: String?
-    var entries: [ParsedEntry]
+    let entries: [ParsedEntry]
     /// 按内容特征判定类型（收编 detectType 逻辑）
     var kind: FeedKind {
         if entries.contains(where: { $0.meta["video_id"] != nil }) { return .video }

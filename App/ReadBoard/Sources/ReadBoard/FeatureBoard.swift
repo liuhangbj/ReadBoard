@@ -7,7 +7,7 @@ import Foundation
 // 板块划分（对应用户定义）：
 //   media     多类型资源获取（podcast / video / social media 的抓取与入队）
 //   fulltext  全文抓取（probe + fetch + 回填）
-//   ai        AI 板块（打分 / 摘要 / 翻译 / 转录 四条 LLM/whisper 管线）
+//   ai        AI 板块（AI 评分 / AI 摘要 / AI 翻译 / AI 转录 四条 LLM/whisper 管线）
 //   export    后处理板块（按条件导出到 Obsidian / readitlater / webhook）
 
 public enum FeatureBoard: String, CaseIterable, Identifiable {
@@ -28,7 +28,7 @@ public enum FeatureBoard: String, CaseIterable, Identifiable {
         switch self {
         case .media: return "podcast · video · social media 的抓取与入队"
         case .fulltext: return "defuddle / CDP 全文抓取与回填"
-        case .ai: return "打分 · 摘要 · 翻译 · 转录"
+        case .ai: return "AI 评分 · AI 摘要 · AI 翻译 · AI 转录"
         case .export: return "按条件导出到 Obsidian / readitlater / webhook"
         }
     }
@@ -45,7 +45,7 @@ public enum FeatureBoard: String, CaseIterable, Identifiable {
     /// 子功能项（设置页展示用，仅 AI 板块有可见子开关）
     var subFeatures: [String] {
         switch self {
-        case .ai: return ["打分", "摘要", "翻译", "转录"]
+        case .ai: return ["AI 评分", "AI 摘要", "AI 翻译", "AI 转录"]
         case .media: return ["podcast", "video", "social media"]
         case .fulltext: return ["自动探测 fetch_mode", "失败回填"]
         case .export: return ["Obsidian", "Markdown 目录", "Webhook"]
@@ -74,10 +74,10 @@ public enum AIPipeline: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .score: return "打分"
-        case .summarize: return "摘要"
-        case .translate: return "翻译"
-        case .transcribe: return "转录"
+        case .score: return "AI 评分"
+        case .summarize: return "AI 摘要"
+        case .translate: return "AI 翻译"
+        case .transcribe: return "AI 转录"
         }
     }
 
@@ -96,43 +96,78 @@ public enum AIPipeline: String, CaseIterable, Identifiable {
     var effective: Bool { FeatureBoard.ai.enabled && enabled }
 }
 
-// MARK: - LLM 配置（三槽 fallback）
-// 三个配置槽按次序 fallback：槽1 失败换槽2，再失败换槽3，最后 .env 兜底。
-// 每槽允许为空（空槽跳过）。baseURL/model 存 UserDefaults；apiKey 按槽存 Keychain。
-// 保留单槽时代的旧 key 做一次性迁移（旧配置 → 槽1）。
+// MARK: - LLM 配置（多模型，列表 fallback）
+// 配置以「槽位」(slot) 为单位：可按需添加/移除/拖拽排序；按列表从上到下 fallback，空模型跳过。不读 .env。
+// 每槽允许为空（空槽跳过）。baseURL/model 存 UserDefaults；apiKey 按槽存 SecretStore（本地 AES-GCM 加密文件，替代 Keychain）。
+// 保留单档时代的旧 key 做一次性迁移（旧配置 → 第 1 槽）。
+// 注意：UserDefaults/Keychain 存储键（llm.slotN.*）保持不动，避免老用户配置丢失（槽位下标即存储下标）。
 
 public struct LLMSettings {
     var baseURL: String
     var apiKey: String
     var model: String
+    /// 温度：模型属性。推理模型（kimi-k2 等）强制 1，普通模型 0.3 即可
+    var temperature: Double = 0.3
 
     /// 常用 provider 预设（baseURL + 默认 model），设置页选中自动填
+    /// modelListURL 非空时，选该预设即**实时拉取**可用模型做成下拉（纯实时，无硬编码清单）。
+    /// 下拉的「最小保底选项」= 用户已存的 model 本身（不是厂商清单），仅用于防止 SwiftUI Picker
+    /// 在选项为空时退化/跳选；真实模型列表拉到后合并进来。
     struct Preset: Identifiable, Hashable {
         let id: String
         let name: String
         let baseURL: String
         let defaultModel: String
+        let modelListURL: String
+        let temperature: Double
+
+        init(id: String, name: String, baseURL: String, defaultModel: String,
+             modelListURL: String = "", temperature: Double = 0.3) {
+            self.id = id; self.name = name; self.baseURL = baseURL; self.defaultModel = defaultModel
+            self.modelListURL = modelListURL; self.temperature = temperature
+        }
     }
 
     static let presets: [Preset] = [
         Preset(id: "deepseek", name: "DeepSeek",
-               baseURL: "https://api.deepseek.com/v1/chat/completions", defaultModel: "deepseek-v4-flash"),
-        Preset(id: "kimi", name: "Kimi (Moonshot)",
-               baseURL: "https://api.moonshot.cn/v1/chat/completions", defaultModel: "kimi-k2-0905-preview"),
+               baseURL: "https://api.deepseek.com/v1/chat/completions", defaultModel: "deepseek-chat",
+               modelListURL: "https://api.deepseek.com/v1/models"),
+        Preset(id: "kimi", name: "Moonshot 开发者 API",
+               baseURL: "https://api.moonshot.cn/v1/chat/completions", defaultModel: "kimi-k2",
+               modelListURL: "https://api.moonshot.cn/v1/models",
+               temperature: 1),
+        Preset(id: "kimicoding", name: "Kimi Coding Plan",
+               baseURL: "https://api.kimi.com/coding/v1/chat/completions", defaultModel: "kimi-k2",
+               modelListURL: "https://api.kimi.com/coding/v1/models",
+               temperature: 1),
+        Preset(id: "openrouter", name: "OpenRouter",
+               baseURL: "https://openrouter.ai/api/v1/chat/completions", defaultModel: "",
+               modelListURL: "https://openrouter.ai/api/v1/models"),
         Preset(id: "openai", name: "OpenAI",
-               baseURL: "https://api.openai.com/v1/chat/completions", defaultModel: "gpt-4o-mini"),
+               baseURL: "https://api.openai.com/v1/chat/completions", defaultModel: "gpt-4o-mini",
+               modelListURL: "https://api.openai.com/v1/models"),
         Preset(id: "custom", name: "自定义 (OpenAI 兼容)", baseURL: "", defaultModel: ""),
     ]
 
-    /// 槽位数（三槽按序 fallback）
-    static let slotCount = 3
+    /// 配置槽位数量（key 持久化；最小 0 个——全新安装无预设模型，点 + 才添加）
+    /// 无记录（全新安装）→ 默认 0；老版本迁移过或已手动存过的值原样保留
+    static var slotCount: Int {
+        get {
+            UserDefaults.standard.integer(forKey: K.slotCount)
+        }
+        set { UserDefaults.standard.set(max(0, newValue), forKey: K.slotCount) }
+    }
 
     private enum K {
-        // 槽位键（i = 0/1/2）
+        static let slotCount = "llm.slotCount"
+        // 配置槽键（i = 下标）——沿用旧 llm.slotN.* 键名，保持兼容不丢配置
+        // （用户若拖拽重排，只是把 N 个槽的值写到不同下标；老配置在对应下标的值原样保留）
         static func baseURL(_ i: Int) -> String { "llm.slot\(i).baseURL" }
         static func model(_ i: Int) -> String { "llm.slot\(i).model" }
+        static func temperature(_ i: Int) -> String { "llm.slot\(i).temperature" }
         static func keychainKey(_ i: Int) -> String { "llm.slot\(i).apiKey" }
-        // 旧单槽键（仅迁移用）
+        static func keySet(_ i: Int) -> String { "llm.slot\(i).keySet" }
+        // 旧单档键（仅迁移用）
         static let legacyBaseURL = "llm.baseURL"
         static let legacyApiKey = "llm.apiKey"
         static let legacyModel = "llm.model"
@@ -140,74 +175,165 @@ public struct LLMSettings {
         static let migrated = "llm.slotsMigrated"
     }
 
-    /// 读某槽配置（可能为空槽）
-    static func slot(_ i: Int) -> LLMSettings {
+    /// 读某档配置（可能为空档）。会读 SecretStore 取真实 Key。
+    static func profile(_ i: Int) -> LLMSettings {
         migrateLegacyIfNeeded()
         let d = UserDefaults.standard
+        let temp = d.object(forKey: K.temperature(i)) == nil ? 0.3 : d.double(forKey: K.temperature(i))
         return LLMSettings(
             baseURL: d.string(forKey: K.baseURL(i)) ?? "",
-            apiKey: KeychainHelper.load(forKey: K.keychainKey(i)) ?? "",
-            model: d.string(forKey: K.model(i)) ?? "")
+            apiKey: SecretStore.load(forKey: K.keychainKey(i)) ?? "",
+            model: d.string(forKey: K.model(i)) ?? "",
+            temperature: temp)
     }
 
-    /// 所有非空槽按序组成 fallback 链（空槽跳过）
-    static func slots() -> [LLMSettings] {
-        (0..<slotCount).map { slot($0) }.filter { $0.isValid }
+    /// 渲染用元数据：只读 UserDefaults，绝不碰 Keychain。
+    /// hasKey 由 keySet 位推断（保存 Key 时置位、清空时复位），避免读钥匙串。
+    static func meta(_ i: Int) -> LLMSettings {
+        migrateLegacyIfNeeded()
+        let d = UserDefaults.standard
+        let temp = d.object(forKey: K.temperature(i)) == nil ? 0.3 : d.double(forKey: K.temperature(i))
+        return LLMSettings(
+            baseURL: d.string(forKey: K.baseURL(i)) ?? "",
+            apiKey: d.bool(forKey: K.keySet(i)) ? "••••••••" : "",
+            model: d.string(forKey: K.model(i)) ?? "",
+            temperature: temp)
     }
 
-    /// 旧单槽配置一次性迁到槽1（老用户升级不丢配置）
+    /// 所有非空档按序组成 fallback 链（空档跳过）
+    /// 全部非空档按序组成 fallback 链（空档跳过）。
+    /// ⚠️ 缓存版（16:37 定案）：原实现每次调用都 3× SecretStore.load（读加密文件+AES 解密），
+    /// 而阅读区操作条每次 body 求值都调 isAvailable → profiles()——每篇 ~10 次求值 = 几十次
+    /// 文件+解密，叠加重算派生密钥（已修）曾是压垮主线程的组合拳。
+    /// 配置只在 save/clear/migrate 时变化，缓存命中即可；变更点已全部失效处理。
+    /// nonisolated(unsafe)：读多写极少，引用赋值原子，最坏情况并发各算一次（与 Tracer 同模式）。
+    private nonisolated(unsafe) static var profilesCache: [LLMSettings]?
+
+    static func profiles() -> [LLMSettings] {
+        if let c = profilesCache { return c }
+        let v = (0..<slotCount).map { profile($0) }.filter { $0.isValid }
+        profilesCache = v
+        return v
+    }
+
+    /// 配置变更后调用——让 profiles() 缓存失效
+    private static func invalidateProfilesCache() { profilesCache = nil }
+
+    /// 旧单档配置一次性迁到第 1 档（老用户升级不丢配置）
     private static func migrateLegacyIfNeeded() {
         let d = UserDefaults.standard
         guard !d.bool(forKey: K.migrated) else { return }
         defer { d.set(true, forKey: K.migrated) }
         // 老版本明文 apiKey 也在 UserDefaults 的，一并收
-        let legacyKey = KeychainHelper.load(forKey: "llm.apiKey")
+        let legacyKey = SecretStore.load(forKey: "llm.apiKey")
             ?? d.string(forKey: K.legacyApiKey) ?? ""
         let legacy = LLMSettings(
             baseURL: d.string(forKey: K.legacyBaseURL) ?? "",
             apiKey: legacyKey,
             model: d.string(forKey: K.legacyModel) ?? "")
         guard legacy.isValid else { return }
-        // 写入槽1
+        // 写入第 1 档
         d.set(legacy.baseURL, forKey: K.baseURL(0))
         d.set(legacy.model, forKey: K.model(0))
-        _ = KeychainHelper.save(legacy.apiKey, forKey: K.keychainKey(0))
-        // 清旧 key（含 Keychain 旧 account 和 UserDefaults 明文）
+        _ = SecretStore.save(legacy.apiKey, forKey: K.keychainKey(0))
+        // 初始化槽数量（否则老用户只有 1 槽显得少，但旧三档其实全空无意义）
+        slotCount = 3
+        // 清旧 key（含 SecretStore 旧 account 和 UserDefaults 明文）
         d.removeObject(forKey: K.legacyBaseURL)
         d.removeObject(forKey: K.legacyModel)
         d.removeObject(forKey: K.legacyApiKey)
-        KeychainHelper.delete(forKey: "llm.apiKey")
+        SecretStore.delete(forKey: "llm.apiKey")
+        invalidateProfilesCache()
     }
 
-    /// 当前生效配置：首个非空槽（兼容旧调用方——testConnection 测单条用）
+    /// 当前生效配置：首个非空档（兼容旧调用方——testConnection 测单条用）。
+    /// 仅来自 App 内模型配置，不读 .env。
     static func current() -> LLMSettings {
-        if let first = slots().first { return first }
-        // 全空：回退 .env 探测（旧行为，给设置页填默认值）
-        let p = LLMConfig.defaultProviders().first
-        return LLMSettings(
-            baseURL: p?.endpoint ?? presets[0].baseURL,
-            apiKey: p?.apiKey ?? "",
-            model: p?.model ?? presets[0].defaultModel)
+        profiles().first ?? LLMSettings(
+            baseURL: presets[0].baseURL,
+            apiKey: "",
+            model: presets[0].defaultModel)
     }
 
-    /// 保存到指定槽：baseURL/model 进 UserDefaults，apiKey 进 Keychain；全空 = 清槽
-    func save(toSlot i: Int) {
+    /// 保存到指定档：baseURL/model 进 UserDefaults，apiKey 进 Keychain；全空 = 清档
+    /// 返回 true=全部落盘成功；false=Keychain 写入失败（Key 没存进去）。
+    /// ⚠️ 关键：Keychain 写入失败时【绝不】置位 keySet，
+    /// 否则 UI 会显示「已配置」但真实 Key 缺失，误导用户以为存好了。
+    @discardableResult
+    func save(toProfile i: Int) -> Bool {
+        defer { Self.invalidateProfilesCache() }
         let d = UserDefaults.standard
         d.set(baseURL, forKey: K.baseURL(i))
         d.set(model, forKey: K.model(i))
+        d.set(temperature, forKey: K.temperature(i))
         if apiKey.isEmpty {
-            KeychainHelper.delete(forKey: K.keychainKey(i))
+            SecretStore.delete(forKey: K.keychainKey(i))
+            d.set(false, forKey: K.keySet(i))
+            return true
         } else {
-            _ = KeychainHelper.save(apiKey, forKey: K.keychainKey(i))
+            let ok = SecretStore.save(apiKey, forKey: K.keychainKey(i))
+            if ok {
+                d.set(true, forKey: K.keySet(i))
+            } else {
+                // 写入失败：回滚 keySet，避免 UI 假显示「已配置」
+                d.set(false, forKey: K.keySet(i))
+            }
+            return ok
         }
     }
 
-    /// 清空某槽
-    static func clear(slot i: Int) {
+    /// 清空某档
+    static func clear(profile i: Int) {
+        defer { invalidateProfilesCache() }
         let d = UserDefaults.standard
         d.removeObject(forKey: K.baseURL(i))
         d.removeObject(forKey: K.model(i))
-        KeychainHelper.delete(forKey: K.keychainKey(i))
+        SecretStore.delete(forKey: K.keychainKey(i))
+        d.set(false, forKey: K.keySet(i))
+    }
+
+    /// 追加一个空槽（存储键按下标，新增槽天然为空）
+    static func addSlot() {
+        slotCount += 1
+    }
+
+    /// 删除某槽（0 基下标），其后各槽整体前移，保持下标连续不空洞
+    static func removeSlot(at index: Int) {
+        let n = slotCount
+        guard index >= 0, index < n else { return }
+        clear(profile: index)
+        for i in (index + 1)..<n {
+            let s = profile(i)
+            if s.isEmpty {
+                clear(profile: i - 1)
+            } else {
+                s.save(toProfile: i - 1)
+            }
+        }
+        clear(profile: n - 1)
+        slotCount = n - 1
+    }
+
+    /// 移动槽（拖拽排序），from/to 为 0 基下标
+    static func moveSlot(from: Int, to: Int) {
+        let n = slotCount
+        guard from >= 0, from < n, to >= 0, to < n, from != to else { return }
+        let snap = (0..<n).map { i -> (String, String, Double, String) in
+            (UserDefaults.standard.string(forKey: K.baseURL(i)) ?? "",
+             UserDefaults.standard.string(forKey: K.model(i)) ?? "",
+             UserDefaults.standard.double(forKey: K.temperature(i)),
+             SecretStore.load(forKey: K.keychainKey(i)) ?? "")
+        }
+        var arr = Array(snap)
+        let item = arr.remove(at: from)
+        arr.insert(item, at: to)
+        for (i, v) in arr.enumerated() {
+            UserDefaults.standard.set(v.0, forKey: K.baseURL(i))
+            UserDefaults.standard.set(v.1, forKey: K.model(i))
+            UserDefaults.standard.set(v.2, forKey: K.temperature(i))
+            if v.3.isEmpty { SecretStore.delete(forKey: K.keychainKey(i)) }
+            else { _ = SecretStore.save(v.3, forKey: K.keychainKey(i)) }
+        }
     }
 
     var isValid: Bool { !baseURL.isEmpty && !apiKey.isEmpty && !model.isEmpty }

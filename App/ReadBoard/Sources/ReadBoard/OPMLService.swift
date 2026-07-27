@@ -4,12 +4,40 @@ import Foundation
 // 订阅资产命脉：从 FreshRSS/Follo 迁入订阅，备份导出。
 // OPML 结构: <outline text="文件夹"><outline text="源名" type="rss" xmlUrl="..."/></outline>
 
-public struct OPMLResult {
-    var foldersCreated = 0
-    var sourcesAdded = 0
-    var sourcesSkipped = 0    // 已存在(identifier 重复)
-    var errors: [String] = []
-    var newRssSourceIds: [Int64] = []   // 新导入的 RSS 源 id（导入后后台探测全文模式）
+/// 单个待导入源（解析阶段产出，尚未写库）
+public struct OPMLOutline: Identifiable, Hashable {
+    public let id = UUID()
+    var title: String
+    var url: String
+    var stypeGuess: String       // 解析阶段按 rb:stype / URL 猜（预检会按内容校正）
+    var folderName: String?      // nil = 未分组
+}
+
+/// 无副作用的导入解析结果：仅收集所有 outline + 已存在计数，不写库。
+/// 真正写库由 OPMLImportSummary 确认后调用 SourceStore 完成。
+public struct OPMLImportPlan {
+    var outlines: [OPMLOutline] = []    // 全部叶子（含文件夹关系），去重前
+    var parseError: String? = nil
+}
+
+/// 汇总确认页的一行：已检测类型 + 全文模式 + 是否已在库
+public struct OPMLImportItem: Identifiable {
+    public let id = UUID()
+    var name: String
+    var url: String
+    var stype: String            // article / podcast / youtube（内容探测结果，可改）
+    var fetchModeRaw: String     // FetchMode rawValue（检测所得，可改）
+    var folderName: String?      // nil = 未分组
+    var inLibrary: Bool          // 该 url 已在订阅源列表（确认时跳过）
+    var detecting: Bool = false  // 后台检测进行中
+    var status: ImportRowStatus = .pending   // 行内状态：正常 / 地址不通(红) / 列表内重复(黄)
+}
+
+/// OPML 导入单行状态（红=地址不通将跳过；黄=列表内重复将跳过；二者都应提示）
+public enum ImportRowStatus: Equatable {
+    case pending      // 未检测 / 正常待添加
+    case duplicate    // 与本次列表内其他项 url 重复（黄色叹号，确认时跳过）
+    case unreachable  // 地址不通（红色叹号，确认时跳过）
 }
 
 public final class OPMLService: @unchecked Sendable {
@@ -59,53 +87,29 @@ public final class OPMLService: @unchecked Sendable {
 
     // MARK: 导入
 
-    /// 从 OPML 字符串导入。outline 嵌套层 = 文件夹，叶子 = 源。
-    /// 已存在的 identifier 跳过。返回统计。
-    func importOPML(_ xml: String) -> OPMLResult {
-        var result = OPMLResult()
+    /// 无副作用解析：从 OPML 字符串读出全部 outline + 统计已存在项，不写库。
+    /// 真正导入由确认页调用 SourceStore 完成。
+    func parseOPML(_ xml: String) -> OPMLImportPlan {
+        var plan = OPMLImportPlan()
         guard let data = xml.data(using: .utf8) else {
-            result.errors.append("非 UTF-8 文本")
-            return result
+            plan.parseError = "非 UTF-8 文本"
+            return plan
         }
         let parser = OPMLXMLParser()
         guard parser.parse(data: data) else {
-            result.errors.append("OPML 解析失败（非合法 OPML）")
-            return result
+            plan.parseError = "OPML 解析失败（非合法 OPML）"
+            return plan
         }
-
-        // 建文件夹 + 源
+        // 扁平化：每个叶子成一个 OPMLOutline，带上所属文件夹名
         for group in parser.groups {
-            var folderId: Int64? = nil
-            if let fname = group.folderName, !fname.isEmpty {
-                db.execute("INSERT OR IGNORE INTO folder (name) VALUES (?)", params: [fname])
-                if let id = db.scalarInt("SELECT id FROM folder WHERE name = ?", params: [fname]) {
-                    folderId = Int64(id)
-                    result.foldersCreated += 1
-                }
-            }
             for src in group.sources {
-                // 去重：identifier 已存在跳过
-                if let _ = db.scalarInt("SELECT id FROM content_source WHERE identifier = ?", params: [src.url]) {
-                    result.sourcesSkipped += 1
-                    continue
-                }
-                let ok = db.execute(
-                    "INSERT INTO content_source (stype, name, identifier, enabled, folder_id, config) VALUES (?, ?, ?, 1, ?, '{}')",
-                    params: [src.stype, src.title, src.url, folderId.map { Int($0) }]
-                )
-                if ok {
-                    result.sourcesAdded += 1
-                    // 记录新导入的 RSS 源 id（导入后后台探测全文模式）
-                    if src.stype == "rss",
-                       let newId = db.scalarInt("SELECT id FROM content_source WHERE identifier = ?", params: [src.url]) {
-                        result.newRssSourceIds.append(Int64(newId))
-                    }
-                } else {
-                    result.errors.append("插入失败: \(src.title)")
-                }
+                plan.outlines.append(OPMLOutline(
+                    title: src.title, url: src.url,
+                    stypeGuess: src.stype, folderName: group.folderName
+                ))
             }
         }
-        return result
+        return plan
     }
 
     // MARK: 私有

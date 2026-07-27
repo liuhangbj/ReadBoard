@@ -68,7 +68,7 @@ public struct StatsPane: View {
                     statCard("归档", "\(s.archivedCount)", "archivebox", .rbText2)
                     statCard("重复", "\(s.duplicateCount)", "doc.on.doc", .rbSummary)
                     statCard("全文", "\(s.withFulltext)", "text.alignleft", .rbScoreHigh)
-                    statCard("已打分", "\(s.scored)", "number", .rbAccent)
+                    statCard("已 AI 评分", "\(s.scored)", "number", .rbAccent)
                     statCard("已翻译", "\(s.translated)", "globe", .rbTranslate)
                     statCard("DB 大小", String(format: "%.0f MB", s.dbSizeMB), "internaldrive", .rbText2)
                 }
@@ -103,7 +103,8 @@ public struct StatsPane: View {
                 VStack(alignment: .leading, spacing: 8) {
                     SectionLabel(text: "内容最多的源 Top 10")
                     VStack(spacing: 0) {
-                        ForEach(Array(topSources.enumerated()), id: \.offset) { idx, t in
+                        ForEach(topSources.indices, id: \.self) { idx in
+                            let t = topSources[idx]
                             HStack(spacing: 10) {
                                 Text("\(idx + 1)")
                                     .font(.system(size: 11, design: .monospaced))
@@ -136,7 +137,8 @@ public struct StatsPane: View {
                             .padding(.vertical, 8)
                     } else {
                         VStack(spacing: 0) {
-                            ForEach(Array(exportRecords.enumerated()), id: \.offset) { idx, r in
+                            ForEach(exportRecords.indices, id: \.self) { idx in
+                                let r = exportRecords[idx]
                                 HStack(spacing: 10) {
                                     Text(r.platform)
                                         .font(.system(size: 12))

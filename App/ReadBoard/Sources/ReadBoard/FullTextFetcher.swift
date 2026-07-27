@@ -44,7 +44,12 @@ public final class FullTextFetcher: @unchecked Sendable {
 
     /// node / CLI 脚本路径（node 走 DependencyPaths 解析，脚本在 App 资源内）
     private var nodeBin: String { DependencyPaths.resolve(.node) ?? "node" }
-    private let cliPath = NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/engine/fetch_engine.js"
+    // 引擎路径：Bundle 优先（App 打包在 Contents/Resources/engine），其次用户自定义 / ~/readboard 兜底。
+    // 注意：之前硬编码 ~/readboard/App/ReadBoard/...，在 .app 部署形态下永远命中不到，导致全文抓取引擎缺失。
+    private lazy var cliPath: String = {
+        DependencyPaths.resolve(.defuddleEngine)
+            ?? (NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/engine/fetch_engine.js")
+    }()
 
     /// 正文达到该长度视为"全文"（阈值, 与探测一致）
     private let fullTextMinChars = 800
@@ -69,8 +74,19 @@ public final class FullTextFetcher: @unchecked Sendable {
         guard let feed = try? await FeedFetcher.fetch(urlString: feedUrl) else {
             return .summary
         }
+        return probeMode(forFeed: feed)
+    }
+
+    /// 对已抓取的 feed 做全文模式探测（供批量预检复用，避免重复网络请求）。
+    func probeMode(forFeed feed: ParsedFeed) -> FetchMode {
         let samples = Array(feed.entries.prefix(2))
         guard !samples.isEmpty else { return .summary }
+
+        // 播客 / 视频：feed 不提供可读文本，只有音频/视频，不应误判为全文。
+        // 直接显示"摘要"（= 留 feed 自带的 show notes / 简介），不跑 feedFull 探测。
+        if feed.kind != .article {
+            return .summary
+        }
 
         // 第 1 级：feed 自带全文?
         let feedLongEnough = samples.contains { $0.html.count >= fullTextMinChars }

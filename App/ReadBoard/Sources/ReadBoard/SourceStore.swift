@@ -236,21 +236,78 @@ public final class SourceStore: ObservableObject {
 
     // MARK: 增删改
 
+    /// 该 identifier 是否已存在于订阅源列表（OPML 预检去重用）
+    func existsByIdentifier(_ identifier: String) -> Bool {
+        db.scalarInt("SELECT 1 FROM content_source WHERE identifier = ? LIMIT 1", params: [identifier]) != nil
+    }
+
+    /// OPML 确认后批量写库：按保留项插入（已存在项跳过）。
+    /// 一次性攒完所有 insert 再 reload（避免几百条 reload 几百次）。
+    /// - Parameters:
+    ///   - items: 汇总页保留的条目（已剔除移除 + 已存在）
+    ///   - policies: 每个 url 对应的内容管线开关（4 选）
+    /// - Returns: 新插入源的 id 列表（供添加后自动刷新）
+    func commitImport(_ items: [OPMLImportItem],
+                      policies: [String: PipelinePolicy]) -> [Int64] {
+        var insertedIds: [Int64] = []
+        // 先建文件夹并映射 name→id（保证重名文件夹只建一个）
+        var folderIdByName: [String: Int64] = [:]
+        for f in folders { folderIdByName[f.name] = f.id }
+        func folderId(for name: String?) -> Int64? {
+            guard let name, !name.isEmpty else { return nil }
+            if let id = folderIdByName[name] { return id }
+            db.execute("INSERT OR IGNORE INTO folder (name) VALUES (?)", params: [name])
+            if let row = db.scalarInt("SELECT id FROM folder WHERE name = ?", params: [name]) {
+                let id = Int64(row)
+                folderIdByName[name] = id
+                return id
+            }
+            return nil
+        }
+        for item in items {
+            guard !existsByIdentifier(item.url) else { continue }
+            let fid = folderId(for: item.folderName)
+            let p = policies[item.url] ?? PipelinePolicy()
+            let configObj: [String: Any] = [
+                "fetch_mode": item.fetchModeRaw,
+                "fetch_mode_auto": true,
+                "auto_score": p.autoScore,
+                "auto_translate": p.autoTranslate,
+                "auto_transcribe": p.autoTranscribe,
+                "auto_summarize": p.autoSummarize,
+            ]
+            guard let configStr = (try? JSONSerialization.data(withJSONObject: configObj))
+                    .flatMap({ String(data: $0, encoding: .utf8) }) else { continue }
+            let ok = db.execute(
+                "INSERT INTO content_source (stype, name, identifier, enabled, config, folder_id) VALUES (?,?,?,1,?,?)",
+                params: [item.stype, item.name, item.url, configStr, fid.map { Int($0) }]
+            )
+            if ok, let row = db.scalarInt("SELECT id FROM content_source WHERE identifier = ?", params: [item.url]) {
+                insertedIds.append(Int64(row))
+            }
+        }
+        reload()
+        return insertedIds
+    }
+
     /// 添加订阅源（RSS/播客直接用 url；YouTube 传频道 url 或 UC id）
     /// 添加时自动探测全文模式（仅 RSS 文章类需要; 播客/YouTube 不抓正文, 跳过探测）
     @discardableResult
-    func addSource(stype: String, name: String, identifier: String) async -> Bool {
+    func addSource(stype: String, name: String, identifier: String, folderId: Int64? = nil) async -> Int64? {
         var config = "{}"
         if stype == "rss" {
             let mode = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
             config = "{\"fetch_mode\":\"\(mode.rawValue)\"}"
         }
         let ok = db.execute(
-            "INSERT OR IGNORE INTO content_source (stype, name, identifier, enabled, config) VALUES (?,?,?,1,?)",
-            params: [stype, name, identifier, config]
+            "INSERT OR IGNORE INTO content_source (stype, name, identifier, enabled, config, folder_id) VALUES (?,?,?,1,?,?)",
+            params: [stype, name, identifier, config, folderId.map { Int($0) } as Any?]
         )
-        if ok { reload() }
-        return ok
+        guard ok else { return nil }
+        reload()
+        // 取回刚插入（或已存在）的源 id，供立即抓取首批使用
+        guard let row = db.scalarInt("SELECT id FROM content_source WHERE identifier = ?", params: [identifier]) else { return nil }
+        return Int64(row)
     }
 
     /// 设置某源的全文获取模式——auto=自动检测（四级优先级），off=关闭全文
@@ -292,11 +349,40 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
-    /// 批量重新检测多个源的全文模式（OPML 导入后后台调用）
+    /// 批量重新检测多个源的全文模式（OPML 导入后后台调用）。
+    /// 跳过 podcast/youtube：媒体源无可读全文，走 summary。
     func probeFetchModes(ids: [Int64]) async {
         for id in ids {
+            guard let stype = db.scalarString("SELECT stype FROM content_source WHERE id = ?", params: [id]),
+                  stype == "rss" else { continue }
             await redetectFetchMode(id: id)
         }
+    }
+
+    /// 批量用 feed 内容探测校正 stype（OPML 导入后后台调用）：
+    /// 自动发现/URL 猜 type 都可能漏判播客或 YouTube，这里统一用 FeedFetcher.kind
+    /// 重新抓取该源 feed、看 enclosure/yt:videoId 特征校正 rss→podcast/youtube。
+    func redetectStypes(ids: [Int64]) async {
+        for id in ids {
+            guard let identifier = db.scalarString("SELECT identifier FROM content_source WHERE id = ?", params: [id]) else { continue }
+            do {
+                let (_, feed) = try await FeedFetcher.discoverAndFetch(urlString: identifier)
+                let detected: String = {
+                    switch feed.kind {
+                    case .article: return "rss"
+                    case .podcast: return "podcast"
+                    case .video:   return "youtube"
+                    }
+                }()
+                // 只校正更"丰富"的方向：rss→podcast/youtube；已显式 podcast/youtube 不动
+                guard let current = db.scalarString("SELECT stype FROM content_source WHERE id = ?", params: [id]),
+                      current == "rss", detected != "rss" else { continue }
+                db.execute("UPDATE content_source SET stype = ? WHERE id = ?", params: [detected, id])
+            } catch {
+                // 抓不到就保留原 guessType 结果，不阻断
+            }
+        }
+        reload()
     }
 
     /// 文件夹级批量设全文抓取模式（对文件夹内所有源统一设置）

@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 // MARK: - 后台管线 worker
-// 周期扫描内容, 按源的"有效开关"(源 OR 文件夹)对未处理内容补跑打分/翻译/摘要/转录。
+// 周期扫描内容, 按源的"有效开关"(源 OR 文件夹)对未处理内容补跑 AI 评分/翻译/摘要/转录。
 // 直接串行执行(whisper 吃 GPU、LLM 串行防限流), 同时记 content_job 追踪。
 // App 内常驻 Timer 驱动, 自包含, 无 launchd/CLI。
 
@@ -55,7 +55,7 @@ public final class PipelineWorker: ObservableObject {
 
     /// 初始化水位线：已存则读，否则取当前最大 id 并持久化。
     /// 修 P1-7：重装/换机时 UserDefaults 没了但 DB 还在——水位线若重置为 MAX(id)，
-    /// 之前所有未处理内容被一次性当新内容涌入打分区（LLM 成本爆炸）。
+    /// 之前所有未处理内容被一次性当新内容涌入 AI 评分区（LLM 成本爆炸）。
     /// 检测：DB 已有内容但无水位线 = 重装 → 保守把水位线设为 MAX（历史不自动跑，
     /// 用户要补跑用手动回填），避免误触发全量。
     private func initWatermark() {
@@ -81,8 +81,13 @@ public final class PipelineWorker: ObservableObject {
 
     func start() {
         guard timer == nil else { return }
-        // 立即跑一轮，再周期跑
-        Task { await runOnce() }
+        // 延迟 5 秒再首次执行——避免与 app 启动阶段 List 首次渲染(300 条)竞争。
+        // 原代码「立即跑一轮」会在启动后几秒内 post contentUpdated → reload 替换 items，
+        // 此时 List 可能还在布局中，数据源替换与布局竞态 → use-after-free 崩溃。
+        Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            await self.runOnce()
+        }
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.runOnce() }
         }
@@ -128,7 +133,7 @@ public final class PipelineWorker: ObservableObject {
             // contentId 互斥：手动触发正在处理同一篇则跳过（防双倍 LLM 计费，修 P1-10）
             guard tryLockContent(t.id) else { continue }
             defer { unlockContent(t.id) }
-            // 打分（AI 板块总开关 && 打分子开关 && 源级开关，源级已在收集时判过）
+            // AI 评分（AI 板块总开关 && AI 评分子开关 && 源级开关，源级已在收集时判过）
             // R2: 每个管线调用包单任务超时——一条挂死不再拖垮整轮 worker
             if t.needScore, AIPipeline.score.effective {
                 let ok = await Self.withTimeout(seconds: 180) {
@@ -147,7 +152,7 @@ public final class PipelineWorker: ObservableObject {
                 else { markJob(contentId: t.id, jtype: "translate", ok: false, error: llm.lastError) }
                 if ok { await ExportService.shared.runPending(trigger: "translate", contentId: t.id) }
             }
-            // 摘要（独立管线；若打分已带摘要则跳过）
+            // 摘要（独立管线；若 AI 评分已带摘要则跳过）
             if t.needSummary, AIPipeline.summarize.effective {
                 let ok = await Self.withTimeout(seconds: 180) {
                     await self.llm.summarize(contentId: t.id, title: t.title, body: t.body)
@@ -290,7 +295,7 @@ public final class PipelineWorker: ObservableObject {
         var stmt: OpaquePointer?
         var out: [PendingTask] = []
         // 媒体项(podcast/video)不看 fetch_status——音频在 enclosure 里, 无正文可抓, fetch_status 恒为 0;
-        // 文章类要求 fetch_status IN (2成功, 4直入) 才有正文可打分/翻译。
+        // 文章类要求 fetch_status IN (2成功, 4直入) 才有正文可做 AI 评分/翻译。
         // 只扫水位线之后的新内容(id > watermark), 存量不动（除非 ignoreWatermark 回填）。
         var conds = ["((ctype IN ('podcast','video') OR meta LIKE '%audio_url%') OR fetch_status IN (2, 4))"]
         if !ignoreWatermark { conds.append("id > \(watermark)") }
@@ -360,7 +365,7 @@ public final class PipelineWorker: ObservableObject {
             var t = PendingTask(id: id, title: r.title, url: r.url, body: body,
                                 language: r.language, audioUrl: audioUrl)
             // R1: 各管线判定前先做失败退避/死信过滤——失败过多的不再反复调 LLM（治费用失控）
-            // 打分：开关开 且 未打分 且 有正文 且 未死信
+            // AI 评分：开关开 且 未评分 且 有正文 且 未死信
             if pol.policy.autoScore, !r.hasScore, !body.isEmpty,
                skip["score"] != true { t.needScore = true }
             // 摘要：开关开 且 未摘要 且 (有正文 或 转录后会有)；媒体等转录补摘要，跳过
@@ -528,7 +533,7 @@ public final class PipelineWorker: ObservableObject {
 
     /// body 三级兜底：content_md → content_html 剥标签 → excerpt。
     /// feed 自带全文（content_html）但 md 还没转出来的文章，正文在 html 里，
-    /// 剥标签压空白后作为正文给打分/翻译/摘要管线。
+    /// 剥标签压空白后作为正文给 AI 评分/翻译/摘要管线。
     /// nonisolated：纯函数无 MainActor 状态，供非隔离上下文（测试/worker 后台）直接调。
     nonisolated static func resolveBody(md: String?, html: String?, excerpt: String?) -> String {
         if let md, !md.isEmpty { return md }
