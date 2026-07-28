@@ -18,11 +18,11 @@ public enum DependencyPaths {
             case .ytdlp: return "yt-dlp"
             case .node: return "node"
             case .whisperModel: return "whisper 模型文件"
-            case .defuddleEngine: return "defuddle 引擎（fetch_engine.js）"
+            case .defuddleEngine: return "defuddle（正文提取引擎）"
             }
         }
 
-        /// PATH 探测用的可执行名（模型文件 / 引擎文件不探测 PATH）
+        /// PATH 探测用的可执行名
         var executableName: String? {
             switch self {
             case .whisperCLI: return "whisper-cli"
@@ -48,24 +48,40 @@ public enum DependencyPaths {
             case .ffmpeg:
                 return ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
             case .ytdlp:
-                return ["/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp"]
+                return ["/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp",
+                        home + "/.workbuddy/binaries/python/versions/3.13.12/bin/yt-dlp"]
             case .node:
                 return ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
             case .whisperModel:
-                return [home + "/tools/whisper/models/ggml-medium.bin",
-                        home + "/models/ggml-medium.bin",
-                        home + "/.cache/whisper/ggml-medium.bin"]
+                return Self.scanWhisperModels()
             case .defuddleEngine:
-                // Bundle 优先：App 部署在 .app/Contents/Resources/engine/fetch_engine.js
-                let bundlePath = (Bundle.main.resourceURL?
-                    .appendingPathComponent("engine")
-                    .appendingPathComponent("fetch_engine.js").path) ?? ""
+                // fetch_engine.js 脚本路径（非 node_modules/defuddle 目录——cliPath 需要具体的 .js 文件）
+                let bundlePath = Bundle.main.resourceURL?.appendingPathComponent("engine/fetch_engine.js").path ?? ""
                 return [bundlePath,
                         home + "/readboard/App/ReadBoard/Resources/engine/fetch_engine.js"]
             }
         }
 
         var defaultsKey: String { "dep.path.\(rawValue)" }
+
+        /// 扫描所有 whisper 模型文件（ggml-*.bin），不再硬编码模型名
+        private static func scanWhisperModels() -> [String] {
+            let home = NSHomeDirectory()
+            let searchDirs = [
+                home + "/tools/whisper/models",
+                home + "/models",
+                home + "/.cache/whisper",
+            ]
+            let fm = FileManager.default
+            var found: [String] = []
+            for dir in searchDirs {
+                guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+                for f in files where f.hasPrefix("ggml-") && f.hasSuffix(".bin") {
+                    found.append(dir + "/" + f)
+                }
+            }
+            return found.sorted()
+        }
     }
 
     /// 用户配置了路径但文件已不存在（brew 升级/卸载后路径失效）——设置页据此告警

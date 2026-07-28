@@ -10,6 +10,17 @@ public struct ScoreResult {
     let summary: String
 }
 
+/// 翻译+评分+摘要 一次 LLM 调用的完整结果
+public struct TranslateFullResult {
+    let title: String
+    let translation: String
+    let depth: Int
+    let quality: Int
+    let readability: Int
+    let total: Int
+    let summary: String
+}
+
 // MARK: - LLM 管线（评分 + 翻译）
 
 public final class LLMPipeline: @unchecked Sendable {
@@ -353,6 +364,124 @@ public final class LLMPipeline: @unchecked Sendable {
         return chunks
     }
 
+    // MARK: 翻译+评分+摘要（整合调用，一条 LLM 请求全产出，按开关回写）
+
+    /// 整合 prompt：翻译 + 三维评分 + 摘要。token 仅多 ~200 output（评分维度+摘要），
+    /// 但省掉一次独立 score 调用（~12000 token input），净省 90%+ 重复输入开销。
+    static let translateFullPromptTemplate = """
+    你是一位专业的翻译兼独立研究者。请对以下文章完成三件事：
+    1. 全文翻译成中文（保留 markdown 格式、段落结构、数据、专有名词）
+    2. 按给定维度评分
+    3. 提炼 150 字以内中文摘要
+
+    翻译要求：
+    - 保留原文 markdown 格式（## 标题、**加粗**、- 列表、> 引用等）
+    - 保留图片链接 (![alt](url))，不翻译 alt 文���
+    - 语言流畅自然，不是逐字直译
+    - 标题放在第一行（只输出译文标题，不要"标题："前缀）
+
+    评分维度（总分 100）：
+    - depth 0-40：分析框架是否清晰
+    - quality 0-35：论证逻辑是否完整
+    - readability 0-25：信息组织是否有条理
+
+    严格输出 JSON（不要 markdown 代码块，不要其他文字）：
+    {"title": "中文标题", "translation": "翻译全文(含 markdown)", "depth": 0-40, "quality": 0-35, "readability": 0-25, "total": 0-100, "summary": "150字以内中文摘要"}
+
+    标题：{title}
+
+    正文：
+    {content}
+    """
+
+    /// 整合翻译+评分+摘要，一次 LLM 调用。根据 policy 决定回写哪些字段。
+    @discardableResult
+    func translateFull(contentId: Int64, title: String, body: String, policy: PipelinePolicy) async -> Bool {
+        guard isAvailable, body.count <= 15000 else {
+            // 长文走旧路径：分块翻译 + 可选独立评分/摘要（整合 prompt 太长会炸）
+            return await translateLongWithPolicy(contentId: contentId, title: title, body: body, policy: policy)
+        }
+        let prompt = Self.translateFullPromptTemplate
+            .replacingOccurrences(of: "{title}", with: title)
+            .replacingOccurrences(of: "{content}", with: body)
+        do {
+            let (text, model) = try await client.chat(
+                messages: [ChatMessage(role: "user", content: prompt)],
+                maxTokens: 16384)
+            guard let result = Self.parseTranslateFullJSON(text) else {
+                setError("整合翻译结果解析失败（LLM 输出非预期 JSON）")
+                return false
+            }
+            return saveTranslateFull(contentId: contentId, result: result, model: model, policy: policy)
+        } catch {
+            setError(Self.describeError(error))
+            return false
+        }
+    }
+
+    /// 长文降级：分块翻译（不走整合 prompt），再按开关分开跑评分/摘要
+    private func translateLongWithPolicy(contentId: Int64, title: String, body: String, policy: PipelinePolicy) async -> Bool {
+        let translated = await translate(contentId: contentId, title: title, body: body)
+        if policy.autoScore {
+            let _ = await score(contentId: contentId, title: title, body: body)
+        }
+        if policy.autoSummarize {
+            let _ = await summarize(contentId: contentId, title: title, body: body)
+        }
+        return translated
+    }
+
+    static func parseTranslateFullJSON(_ text: String) -> TranslateFullResult? {
+        guard let start = text.firstIndex(of: "{"),
+              let end = text.lastIndex(of: "}") else { return nil }
+        let jsonStr = String(text[start...end])
+        // 翻译正文可能含未转义引号，用宽松解析 + JSONSerialization 容错
+        guard let data = jsonStr.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        func int(_ k: String) -> Int { (obj[k] as? Int) ?? (obj[k] as? Double).map { Int($0) } ?? 0 }
+        let depth = min(max(int("depth"), 0), 40)
+        let quality = min(max(int("quality"), 0), 35)
+        let readability = min(max(int("readability"), 0), 25)
+        var total = int("total")
+        let sum = depth + quality + readability
+        if total <= 0 || total > 100 || abs(total - sum) > 10 { total = sum }
+        total = min(max(total, 0), 100)
+        return TranslateFullResult(
+            title: (obj["title"] as? String) ?? "",
+            translation: (obj["translation"] as? String) ?? "",
+            depth: depth, quality: quality, readability: readability,
+            total: total, summary: (obj["summary"] as? String) ?? "")
+    }
+
+    /// 按 policy 开关条件回写：翻译/评分/摘要各自判断
+    private func saveTranslateFull(contentId: Int64, result: TranslateFullResult, model: String, policy: PipelinePolicy) -> Bool {
+        var allOK = true
+        if policy.autoTranslate {
+            let ok = db.execute(
+                "UPDATE content SET llm_translated_md = ?, llm_title_translated = ?, llm_model = ?, llm_processed_at = datetime('now') WHERE id = ?",
+                params: [result.translation, result.title.isEmpty ? nil : result.title, model, contentId])
+            if !ok { setError("译文写库失败"); allOK = false }
+        }
+        if policy.autoScore {
+            let detail: [String: Any] = ["depth": result.depth, "quality": result.quality, "readability": result.readability]
+            if let detailJson = (try? JSONSerialization.data(withJSONObject: detail)).flatMap({ String(data: $0, encoding: .utf8) }) {
+                mergeMetaScoreDetail(contentId: contentId, detailJson: detailJson)
+            }
+            let ok = db.execute(
+                "UPDATE content SET llm_score = ?, llm_model = ?, llm_processed_at = datetime('now') WHERE id = ?",
+                params: [result.total, model, contentId])
+            if !ok { setError("评分写库失败"); allOK = false }
+        }
+        if policy.autoSummarize {
+            let ok = db.execute(
+                "UPDATE content SET llm_summary = ?, llm_processed_at = datetime('now') WHERE id = ?",
+                params: [result.summary, contentId])
+            if !ok { setError("摘要写库失败"); allOK = false }
+        }
+        if allOK { setError(nil) }
+        return allOK
+    }
+
     /// 把内容全文翻译成中文，写入 llm_translated_md
     /// 长文（>15000 字）走分块翻译，不再静默截断丢尾部（此前 truncateKeepEnds(15000) 会丢超长文的后半）
     @discardableResult
@@ -399,9 +528,15 @@ public final class LLMPipeline: @unchecked Sendable {
             if lastError == nil { setError("翻译结果为空") }
             return false
         }
+        // 提取译文第一行作为标题译文（llm_title_translated），供阅读栏中文标题展示。
+        // prompt 明确要求「标题也一并翻译，放在第一行」，首行即为译文标题。
+        let titleLine = final.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespaces) ?? ""
+        let titleT = titleLine.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+                         .replacingOccurrences(of: "^标题：\\s*", with: "", options: .regularExpression)
+                         .trimmingCharacters(in: .whitespaces)
         let ok = db.execute(
-            "UPDATE content SET llm_translated_md = ?, llm_model = ?, llm_processed_at = datetime('now') WHERE id = ?",
-            params: [final, usedModel, contentId])
+            "UPDATE content SET llm_translated_md = ?, llm_title_translated = ?, llm_model = ?, llm_processed_at = datetime('now') WHERE id = ?",
+            params: [final, titleT.isEmpty ? nil : titleT, usedModel, contentId])
         if ok { setError(nil) } else { setError("译文写库失败") }
         if ok, partial {
             // 部分翻译标记：meta.translation_partial=1（不改变 hasTranslated 判定，
@@ -453,11 +588,13 @@ public final class LLMPipeline: @unchecked Sendable {
                 excerptT = parts.dropFirst().joined(separator: "\n====\n").trimmingCharacters(in: .whitespacesAndNewlines)
             }
             // 分存：标题译文 + 简介译文（一次事务两次 UPDATE）
+            // 018 迁移已将 podcast llm_translated_md ↔ llm_excerpt_translated 互换，
+            // 此后简介翻译统一写 llm_translated_md（与全文翻译合并，标签/阅读视图共用）
             var ok = true
             if !titleT.isEmpty {
                 ok = db.execute("UPDATE content SET llm_title_translated = ? WHERE id = ?", params: [titleT, contentId]) && ok
             }
-            ok = db.execute("UPDATE content SET llm_excerpt_translated = ? WHERE id = ?", params: [excerptT, contentId]) && ok
+            ok = db.execute("UPDATE content SET llm_translated_md = ? WHERE id = ?", params: [excerptT, contentId]) && ok
             return ok
         } catch {
             setError(Self.describeError(error))

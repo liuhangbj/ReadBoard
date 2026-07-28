@@ -557,6 +557,32 @@ public struct ContentView: View {
         }
     }
 
+    /// 从 DB 查某篇文章所属源的 PipelinePolicy
+    private func sourcePolicy(for contentId: Int64) -> PipelinePolicy {
+        guard let row = Database.shared.queryRows(
+            "SELECT s.config FROM content c JOIN content_source s ON s.id = c.source_id WHERE c.id = ?",
+            params: [contentId]).first,
+              let cfg = row["config"], !cfg.isEmpty else { return PipelinePolicy() }
+        return PipelinePolicy.from(configJson: cfg)
+    }
+
+    /// 重新处理（右键菜单用，fire-and-forget，无需 UI 状态）
+    private func reprocessItem(item: ContentItem) {
+        Task {
+            let body = item.contentMd ?? item.excerpt ?? ""
+            let policy = sourcePolicy(for: item.id)
+            let pipeline = LLMPipeline()
+            var any = false
+            if policy.autoScore, pipeline.isAvailable { any = true; let _ = await pipeline.score(contentId: item.id, title: item.title, body: body) }
+            if policy.autoTranslate, pipeline.isAvailable { any = true; let _ = await pipeline.translate(contentId: item.id, title: item.title, body: body) }
+            if policy.autoSummarize, pipeline.isAvailable { any = true; let _ = await pipeline.summarize(contentId: item.id, title: item.title, body: body) }
+            if policy.autoTranscribe, (item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil) {
+                any = true; let _ = await TranscribePipeline().transcribe(contentId: item.id, title: item.title, audioUrl: item.audioUrl, pageUrl: item.url, language: item.language)
+            }
+            if any { ArchiveService.shared.rearchive(contentId: item.id); NotificationCenter.default.post(name: .contentUpdated, object: nil) }
+        }
+    }
+
     /// 单篇文章跑管线（评分/摘要/翻译/转录）——右键菜单调用
     private func runPipelineForItem(item: ContentItem, type: String) {
         let pipeline = LLMPipeline()
@@ -595,6 +621,12 @@ public struct ContentView: View {
     /// 源级管线开关菜单（打勾状态实时反映）
     @ViewBuilder
     private func pipelineToggleMenu(src: FeedSource) -> some View {
+        Button {
+            Task { await PipelineWorker.shared.backfillHistory(onlySourceId: src.id) }
+        } label: {
+            Label("重新处理本源全部", systemImage: "arrow.triangle.2.circlepath")
+        }
+        Divider()
         pipelineMenuItem("AI 评分", key: "auto_score", on: src.policy.autoScore, src: src)
         pipelineMenuItem("AI 翻译", key: "auto_translate", on: src.policy.autoTranslate, src: src)
         pipelineMenuItem("AI 摘要", key: "auto_summarize", on: src.policy.autoSummarize, src: src)
@@ -621,18 +653,28 @@ public struct ContentView: View {
     @ViewBuilder
     private func fetchSettingsMenu(src: FeedSource) -> some View {
         Menu("获取全文：\(src.fetchModeAuto ? "自动（\(src.fetchMode.displayName)）" : src.fetchMode.displayName)") {
+            // ── 自动检测 ──
             Button {
                 Task { await sourceStore.setFetchMode(id: src.id, mode: "auto") }
             } label: {
-                Label("自动（\(src.fetchMode.displayName)）",
-                      systemImage: src.fetchModeAuto ? "checkmark" : "")
+                HStack {
+                    Image(systemName: src.fetchModeAuto ? "checkmark" : "arrow.triangle.2.circlepath")
+                    Text("自动（\(src.fetchMode.displayName)）")
+                }
             }
             Button("重新检测") { Task { await sourceStore.redetectFetchMode(id: src.id) } }
             Divider()
-            Button {
-                Task { await sourceStore.setFetchMode(id: src.id, mode: "off") }
-            } label: {
-                Label("仅摘要", systemImage: src.isFetchOff ? "checkmark" : "")
+            // ── 五层级手动选择 ──
+            ForEach(FetchMode.allCases, id: \.rawValue) { fm in
+                Button {
+                    Task { await sourceStore.setFetchMode(id: src.id, mode: fm.rawValue) }
+                } label: {
+                    HStack {
+                        Image(systemName: (!src.fetchModeAuto && src.fetchMode == fm) ? "checkmark" : "")
+                            .frame(width: 12)
+                        Text(fm.displayName)
+                    }
+                }
             }
         }
         Menu("抓取频率：\(src.fetchIntervalMin < 60 ? "\(src.fetchIntervalMin)分钟" : "\(src.fetchIntervalMin/60)小时")") {
@@ -655,7 +697,7 @@ public struct ContentView: View {
     }
 
     /// 文件夹内所有源的「获取全文」状态是否全一致（设置状态 + 实际模式都一致才算）。
-    /// 返回 ("auto", 模式) / ("off", nil) / nil（不一致→「按订阅源设置」）。
+    /// 返回 ("auto", 模式) / ("manual", 模式) / ("off", nil) / nil（不一致→「按订阅源设置」）。
     private func folderUniformFetchMode(_ fid: Int64) -> (kind: String, mode: FetchMode?)? {
         let srcs = sourceStore.sources(inFolder: fid)
         guard !srcs.isEmpty else { return nil }
@@ -664,6 +706,12 @@ public struct ContentView: View {
             let modes = srcs.map { $0.fetchMode }
             guard let first = modes.first, modes.allSatisfy({ $0 == first }) else { return nil }
             return ("auto", first)
+        }
+        // 全部手动（fetchModeAuto=false）+ 模式相同 = 一致的手动模式
+        if srcs.allSatisfy({ !$0.fetchModeAuto }) {
+            let modes = srcs.map { $0.fetchMode }
+            guard let first = modes.first, modes.allSatisfy({ $0 == first }) else { return nil }
+            return ("manual", first)
         }
         // 全部仅摘要（fetchMode==.summary——关闭全文获取=summary 兜底，播客显示摘要同此）
         if srcs.allSatisfy({ $0.isFetchOff }) {
@@ -684,17 +732,25 @@ public struct ContentView: View {
             Button {
                 Task { await sourceStore.setFolderFetchModeAuto(folderId: fid) }
             } label: {
-                Label("自动\(uniformMode?.kind == "auto" && uniformMode?.mode != nil ? "（\(uniformMode!.mode!.displayName)）" : "")",
-                      systemImage: uniformMode?.kind == "auto" ? "checkmark" : "")
+                HStack {
+                    Image(systemName: uniformMode?.kind == "auto" ? "checkmark" : "arrow.triangle.2.circlepath")
+                    Text("自动\(uniformMode?.kind == "auto" && uniformMode?.mode != nil ? "（\(uniformMode!.mode!.displayName)）" : "")")
+                }
             }
             // 重新检测（始终提供，对全组批量探测）
             Button("重新检测") { Task { await sourceStore.redetectFolderFetchMode(folderId: fid) } }
             Divider()
-            // 仅摘要（关闭全文获取=summary 兜底；打钩：全组都是 summary）
-            Button {
-                sourceStore.setFolderFetchModeOff(folderId: fid)
-            } label: {
-                Label("仅摘要", systemImage: uniformMode?.kind == "off" ? "checkmark" : "")
+            // 五层级手动选择（打钩：全组都是该手动模式）
+            ForEach(FetchMode.allCases, id: \.rawValue) { fm in
+                Button {
+                    sourceStore.setFolderFetchMode(folderId: fid, mode: fm)
+                } label: {
+                    HStack {
+                        Image(systemName: (uniformMode?.kind == "manual" && uniformMode?.mode == fm) ? "checkmark" : "")
+                            .frame(width: 12)
+                        Text(fm.displayName)
+                    }
+                }
             }
             Divider()
             // 不一致时：都不打钩，显示「按订阅源设置」并打钩
@@ -725,6 +781,7 @@ public struct ContentView: View {
         guard let uniform else { return "按订阅源设置" }
         switch uniform.kind {
         case "auto": return uniform.mode != nil ? "自动（\(uniform.mode!.displayName)）" : "自动"
+        case "manual": return uniform.mode != nil ? uniform.mode!.displayName : "手动"
         case "off": return "仅摘要"
         default: return "按订阅源设置"
         }
@@ -734,6 +791,12 @@ public struct ContentView: View {
     /// 文件夹级管线菜单（打钩显示组内一致性：全开=钩，全关=不钩，不一致=「按订阅源设置」不钩）
     @ViewBuilder
     private func folderPipelineMenu(folder: Folder) -> some View {
+        Button {
+            Task { await PipelineWorker.shared.backfillHistoryForFolder(folderId: folder.id) }
+        } label: {
+            Label("重新处理本夹全部", systemImage: "arrow.triangle.2.circlepath")
+        }
+        Divider()
         folderPipelineItem("AI 评分", key: "auto_score", folder: folder)
         folderPipelineItem("AI 翻译", key: "auto_translate", folder: folder)
         folderPipelineItem("AI 摘要", key: "auto_summarize", folder: folder)
@@ -813,29 +876,38 @@ public struct ContentView: View {
     // MARK: 中栏
 
     /// 筛选 chip（纸墨胶囊：激活墨蓝浅底+描边，未激活 surface+hairline）
-    private func filterChip(label: String, active: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    /// 三态筛选 chip：.none 不筛选（surface 底）/ .yes 已处理（实色）/ .no 未处理（淡粉）
+    private func filterChip(label: String, state: ContentViewModel.ProcessedState,
+                            action: @escaping () -> Void) -> some View {
+        let (bg, fg, border): (Color, Color, Color) = {
+            switch state {
+            case .yes:  return (Color.rbAccent.opacity(0.14), Color.rbAccent, Color.rbAccent.opacity(0.35))
+            case .no:   return (Color.rbPink.opacity(0.16), Color.rbPink, Color.rbPink.opacity(0.40))
+            case .none: return (Color.rbSurface, Color.rbText2, Color.rbHairline)
+            }
+        }()
+        return Button(action: action) {
             Text(label)
                 .font(.system(size: 11))
                 .padding(.horizontal, 8).padding(.vertical, 3.5)
-                .background(active ? Color.rbAccent.opacity(0.10) : Color.rbSurface)
-                .foregroundStyle(active ? Color.rbAccent : Color.rbText2)
+                .background(bg)
+                .foregroundStyle(fg)
                 .clipShape(RoundedRectangle(cornerRadius: RB.Radius.md))
                 .overlay(
                     RoundedRectangle(cornerRadius: RB.Radius.md)
-                        .strokeBorder(active ? Color.rbAccent.opacity(0.30) : Color.rbHairline,
-                                      lineWidth: RB.Line.hair)
+                        .strokeBorder(border, lineWidth: RB.Line.hair)
                 )
         }
         .buttonStyle(.plain)
     }
 
-    /// 处理状态平铺多选按钮（激活高亮，点击切换加入/移出多选集）
+    /// 处理状态三态按钮：none→已处理(实色 yes)→未处理(淡粉 no)→none
     private func processedToggle(key: String, label: String) -> some View {
-        let active = vm.processedFilters.contains(key)
-        return filterChip(label: label, active: active) {
-            if active { vm.processedFilters.remove(key) }
-            else { vm.processedFilters.insert(key) }
+        let state = vm.processedStates[key] ?? .none
+        return filterChip(label: label, state: state) {
+            let next = state.next
+            if next == .none { vm.processedStates.removeValue(forKey: key) }
+            else { vm.processedStates[key] = next }
             vm.reload()
         }
     }
@@ -887,7 +959,7 @@ public struct ContentView: View {
                     .onSubmit { vm.reload() }
                     .onChange(of: vm.minScore) { _, _ in vm.reloadDebounced() }
                 if vm.minScore > 0 {
-                    filterChip(label: "含未评分", active: vm.includeUnscored) {
+                    filterChip(label: "含未评分", state: vm.includeUnscored ? .yes : .none) {
                         vm.includeUnscored.toggle()
                         vm.reload()
                     }
@@ -934,15 +1006,16 @@ public struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 
-            // 筛选条行2：处理状态平铺多选按钮（AI 评分/AI 摘要/AI 翻译/AI 转录，可多选）
+            // 筛选条行2：处理状态平铺三态按钮（AI 评分/AI 摘要/AI 翻译/AI 转录，可多选）
+            // 三态：无底色=不筛选 → 实色=已处理 → 淡粉=未处理，点击循环切换
             HStack(spacing: 6) {
                 Text("处理")
                     .font(.system(size: 11))
                     .foregroundStyle(Color.rbText3)
-                processedToggle(key: "score", label: "已 AI 评分")
-                processedToggle(key: "summary", label: "已摘要")
-                processedToggle(key: "translate", label: "已翻译")
-                processedToggle(key: "transcribe", label: "已转录")
+                processedToggle(key: "score", label: "AI 评分")
+                processedToggle(key: "summary", label: "AI 摘要")
+                processedToggle(key: "translate", label: "AI 翻译")
+                processedToggle(key: "transcribe", label: "AI 转录")
                 Spacer()
             }
             .padding(.horizontal, 12)
@@ -1015,6 +1088,12 @@ public struct ContentView: View {
 
                             // ── 内容处理（AI 评分/摘要/翻译/转录）──
                             Menu {
+                                Button {
+                                    reprocessItem(item: item)
+                                } label: {
+                                    Label("重新处理", systemImage: "arrow.triangle.2.circlepath")
+                                }
+                                Divider()
                                 Button {
                                     runPipelineForItem(item: item, type: "score")
                                 } label: {
@@ -1165,9 +1244,17 @@ public struct ArticleRow: View {
     private var ctypeIcon: String? {
         switch item.ctype {
         case "podcast": return "mic"
-        case "video", "youtube": return nil  // 待 YouTube 订阅功能补齐品牌图标
+        case "video", "youtube": return "play.rectangle.fill"  // YouTube 品牌图标（红色 foregroundStyle）
         case "wechat", "social": return nil   // 待微信订阅功能补齐品牌图标
         default: return nil  // RSS 用自定义 RSSIcon 组件，不走 SF Symbol
+        }
+    }
+
+    /// 源类型图标的强调色（YouTube 用品牌红，其余跟随次级文字色）
+    private var ctypeIconColor: Color {
+        switch item.ctype {
+        case "video", "youtube": return Color(red: 1.0, green: 0.0, blue: 0.0)  // YouTube 红 #FF0000
+        default: return Color.rbText3
         }
     }
 
@@ -1229,7 +1316,7 @@ public struct ArticleRow: View {
                             } else if let icon = ctypeIcon {
                                 Image(systemName: icon)
                                     .font(.system(size: 11))
-                                    .foregroundStyle(Color.rbText3)
+                                    .foregroundStyle(ctypeIconColor)
                             }
                         }
                     }
@@ -1248,29 +1335,23 @@ public struct ArticleRow: View {
                                     .strokeBorder(scoreColor(s).opacity(0.22), lineWidth: RB.Line.hair)
                             )
                     }
-                    // 全文 badge（有全文绿 / 无全文红）——仅文章；媒体项没正文概念不显示（播客靠转录非全文）
-                    if !item.isMedia {
-                        if item.hasFulltext {
-                            RBadge(text: "全文", color: .rbScoreHigh, scale: scale)
-                        } else {
-                            RBadge(text: "无全文", color: .rbScoreLow, scale: scale)
-                        }
+                    // 全文 badge（有全文绿 / 无全文红）——所有项（YouTube/播客 defuddle 也能拿全文）
+                    if item.hasFulltext {
+                        RBadge(text: "全文", color: .rbScoreHigh, scale: scale)
+                    } else {
+                        RBadge(text: "无全文", color: .rbScoreLow, scale: scale)
                     }
                     // 管线已处理 badge（两字标签）
                     if let sum = item.llmSummary, !sum.isEmpty {
                         RBadge(text: "摘要", color: .rbSummary, scale: scale)
                     }
-                    // 翻译/转录 badge：文章翻译=hasTranslation(llm_translated_md)；
-                    // 媒体项分开——翻译=hasExcerptTrans(简介翻译 llm_excerpt_translated)，转录=hasTranslation(转录稿 llm_translated_md)
-                    if item.isMedia {
-                        if item.hasExcerptTrans {
-                            RBadge(text: "翻译", color: .rbTranslate, scale: scale)
-                        }
-                        if item.hasTranslation {
-                            RBadge(text: "转录", color: .rbSummary, scale: scale)
-                        }
-                    } else if item.hasTranslation {
+                    // 翻译（llm_translated_md 全文翻译，所有项统一）
+                    if item.hasTranslation {
                         RBadge(text: "翻译", color: .rbTranslate, scale: scale)
+                    }
+                    // 转录（llm_transcript_md，仅媒体项）
+                    if item.isMedia && item.hasTranscript {
+                        RBadge(text: "转录", color: .rbSummary, scale: scale)
                     }
                     if showDate, let pd = item.publishedAt, pd.count >= 10 {
                         Text(formattedDate(pd))
@@ -1430,6 +1511,7 @@ public struct ReadingView: View {
     var onNext: (() -> Void)? = nil
 
     @State private var pipeline = LLMPipeline()
+    @State private var llmAvailable = false  // 在 onAppear 中赋值，避免 body 渲染时调 isAvailable→SecretStore 递归锁崩溃
     @State private var transcriber = TranscribePipeline()
     @State private var busy = false
     @State private var statusMsg: String?
@@ -1610,6 +1692,8 @@ public struct ReadingView: View {
                             .multilineTextAlignment(.leading)
                     }
                     .buttonStyle(.plain)
+                    // 允许在标题上直接选文字（.plain 按钮配 textSelection 即可点又可选区）
+                    .textSelection(.enabled)
                     .help("点击在浏览器打开原文")
                     .textSelection(.enabled)
                     // 中文标题（有译文时显示在英文标题下方——从 translatedHead 第一行取）
@@ -1626,9 +1710,19 @@ public struct ReadingView: View {
                             .foregroundStyle(p.textSecondary)
                     }
 
-                    // ── 播客音频播放器（podcast 且有 audioUrl 时显示，固定顶部——切标签不动）──
-                    if item.ctype == "podcast", let audioUrl = item.audioUrl, !audioUrl.isEmpty {
+                    // ── 媒体播放器（固定顶部——切标签不动）──
+                    // 播客：音频播放器（loadedAudioUrl 判据，见下注释）。
+                    // YouTube/视频：视频播放器（loadedVideoId 判据，从 meta.video_id 回填）。
+                    // ⚠️ 判据用 loadedAudioUrl/loadedVideoId 而非 item.audioUrl/videoId：
+                    // 轻列查询不取媒体地址（Database.swift:993 写死"媒体地址点开再查"），
+                    // item 上这两个字段恒 nil；loaded* 在 onAppear 的 loadContentMd() 里从
+                    // fetchContentBody 同步回填（与 loadedContentMd 同构，安全不替换 item）。
+                    if item.ctype == "podcast", let audioUrl = loadedAudioUrl, !audioUrl.isEmpty {
                         AudioPlayerView(audioUrl: audioUrl, title: item.title)
+                            .padding(.vertical, 4)
+                    } else if (item.ctype == "video" || item.ctype == "youtube"),
+                              let vid = loadedVideoId, !vid.isEmpty {
+                        YouTubePlayerView(videoId: vid, title: item.title)
                             .padding(.vertical, 4)
                     }
 
@@ -1638,7 +1732,11 @@ public struct ReadingView: View {
                     HStack(spacing: 8) {
                         // 获取全文：不需 LLM，任何项都可点（抓正文/重抓）
                         StaticCapsuleButton(title: "获取全文", icon: "doc.text", disabled: busy) { runFulltext() }
-                        if !pipeline.isAvailable {
+                        // 内容处理：按源开关重新跑已开启管线（一次点击跑全部）
+                        StaticCapsuleButton(title: "内容处理", icon: "gearshape.2", disabled: busy) {
+                            reprocessFromReadingView()
+                        }
+                        if !llmAvailable {
                             if !isMediaItem {
                                 Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
                                     .font(.caption)
@@ -1724,6 +1822,7 @@ public struct ReadingView: View {
         .onAppear {
             Trace.i("ReadingView.onAppear id=\(item.id) ctype=\(item.ctype) 已有contentMd=\(item.contentMd != nil) llmTranslatedMd非空=\(item.llmTranslatedMd != nil) mem=\(Trace.mb())MB [\(buildTag)]", category: "read")
             Trace.startMemorySampler(category: "read.mem")
+            llmAvailable = pipeline.isAvailable  // 读取一次缓存，避免 body 渲染时调 SecretStore 递归锁
             policy = Database.shared.effectivePolicyFor(contentId: item.id)
             isStarred = item.starred
             isRead = item.isRead
@@ -1928,7 +2027,7 @@ public struct ReadingView: View {
 
     /// 是否媒体项（播客/视频，可转录）
     private var isMediaItem: Bool {
-        item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil
+        item.ctype == "podcast" || item.ctype == "video" || item.ctype == "youtube" || item.audioUrl != nil
     }
 
     // MARK: 媒体项三标签（原文/译文/转录）
@@ -1954,15 +2053,19 @@ public struct ReadingView: View {
         let tab = (mediaTab == 2 && !hasTranscript) ? 0 : mediaTab
         switch tab {
         case 0:
-            // 原文：feed 简介（剥标签纯文本）
+            // 原文：defuddle 抓到的全文（content_md），兜底 feed 简介
+            if let md = loadedContentMd, !md.isEmpty { return md }
             return excerptPlainText
         case 1:
-            // 译文：简介的中文翻译（llm_excerpt_translated）；没有则提示点「AI 翻译」
-            if let t = effectiveExcerptTranslated, !t.isEmpty { return t }
-            return "尚无译文——点右上角「翻译」生成简介的中文翻译"
-        default:
-            // 转录：中英对照转录稿（llm_translated_md）
+            // 译文：全文翻译的中英对照（llm_translated_md），与「转录」标签同数据源。
+            // 原用 effectiveExcerptTranslated（简介翻译 llm_excerpt_translated），
+            // 但翻译全文（translate）只写 llm_translated_md 不写 llm_excerpt_translated，
+            // 导致简介翻译永远空 → 「译文」标签永远「尚无译文」。
             if let t = translatedText { return t }
+            return "尚无译文——点「翻译」生成中英对照译稿"
+        default:
+            // 转录：Whisper 转录稿（llm_transcript_md），独立于翻译稿
+            if let t = loadedTranscriptMd, !t.isEmpty { return t }
             return "尚无转录稿——点「转录」生成中英文对照稿"
         }
     }
@@ -1974,20 +2077,18 @@ public struct ReadingView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 中文标题（媒体项取标题译文 titleTranslated；非媒体项从正文译文 translatedHead 第一行取）
+    /// 中文标题：统一优先读 llm_title_translated（所有类型），
+    /// null 时回退到译文正文首行提取（兼容旧翻译）。
+
+    /// 中文标题（统一读 llm_title_translated，null 时回退译文首行提取）
     private var chineseTitle: String? {
-        // 媒体项：独立的标题译文（llm_title_translated）——镜像优先（item 轻列可能陈旧）
-        if isMediaItem {
-            guard let t = effectiveTitleTranslated, !t.isEmpty else { return nil }
-            return t
-        }
-        // 非媒体：从译文正文取首个非空行（translatedText 自带 DB 兜底——
-        // 翻译完成后 item.translatedHead 是旧实例字段、可能为 nil，走 DB 才新鲜）
+        // 优先 llm_title_translated（所有类型统一——translate()/translateExcerpt() 都写这列）
+        if let t = effectiveTitleTranslated, !t.isEmpty { return t }
+        // 兜底：旧翻译 llm_title_translated 为空 → 从译文正文首行提取
         guard let translated = translatedText else { return nil }
         let firstNonEmpty = translated.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty } ?? ""
-        // 剥「标题：」前缀（LLM 输出格式标记）+ markdown 标题标记（##）
         var cleaned = firstNonEmpty.replacingOccurrences(of: "^标题：\\s*", with: "", options: .regularExpression)
         cleaned = cleaned.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
         return cleaned.isEmpty ? nil : cleaned
@@ -2007,17 +2108,23 @@ public struct ReadingView: View {
     /// 会导致 ReadingView 条件分支在布局期间切换 → use-after-free 崩溃。
     /// 改为 @State 后：onAppear 同步查 DB 填回 → displayMd 值变（但子视图结构不变）→ 安全。
     @State private var loadedTranslatedMd: String? = nil
-    /// 简介译文/标题译文镜像（媒体项三标签与中文标题用）——item 是轻列实例，
-    /// 这两字段列表查询不取/可能陈旧，镜像从 fetchContentBody 补齐。
-    @State private var loadedExcerptTranslated: String? = nil
+    /// 标题译文镜像（中文标题用）——item 是轻列实例，列表查询不取，镜像从 fetchContentBody 补齐。
     @State private var loadedTitleTranslated: String? = nil
     /// 评分/摘要镜像（AI 完成后自动上屏用）——selectedItem 实例刻意不替换（会诱发
     /// AttributeGraph 无限重绘循环，12:10 hang 实锤），item 里的这两字段永远是打开时的旧值。
     @State private var loadedScore: Int? = nil
     @State private var loadedSummary: String? = nil
+    /// 音频地址镜像（媒体项播放器用）——轻列查询不取 audio_url（Database.swift:993 写死
+    /// "媒体地址点开再查"），item.audioUrl 恒为 nil。此处从 fetchContentBody 同步回填，
+    /// 让 AudioPlayerView 的渲染判据成立。与 loadedContentMd 同构：onAppear 同步查、不替换 item。
+    @State private var loadedAudioUrl: String? = nil
+    /// 视频 id 镜像（YouTube 播放器用）——meta.video_id 同属"大字段点开再查"，
+    /// 轻列 item 不含。从 fetchContentBody 第 7 元组回填，让 YouTubePlayerView 渲染判据成立。
+    @State private var loadedVideoId: String? = nil
+    /// 转录稿镜像（llm_transcript_md）。独立于翻译稿，供「转录」标签使用。
+    @State private var loadedTranscriptMd: String? = nil
 
     /// 镜像优先的有效值（镜像未就绪时回退 item 字段）
-    private var effectiveExcerptTranslated: String? { loadedExcerptTranslated ?? item.excerptTranslated }
     private var effectiveTitleTranslated: String? { loadedTitleTranslated ?? item.titleTranslated }
     private var effectiveScore: Int? { loadedScore ?? item.llmScore }
     private var effectiveSummary: String? { loadedSummary ?? item.llmSummary }
@@ -2040,8 +2147,10 @@ public struct ReadingView: View {
             loadedContentMd = body.contentMd
             loadedContentHtml = body.contentHtml
             loadedTranslatedMd = body.llmTranslatedMd
-            loadedExcerptTranslated = body.excerptTranslated
             loadedTitleTranslated = body.titleTranslated
+            loadedAudioUrl = body.audioUrl   // ⬅️ 回填音频地址，媒体播放器靠它渲染
+            loadedVideoId = body.videoId     // ⬅️ 回填视频 id，YouTube 播放器靠它渲染
+            loadedTranscriptMd = body.llmTranscriptMd  // ⬅️ 回填转录稿，供「转录」标签
             if let ex = Database.shared.fetchLLMExtras(id: item.id) {
                 loadedScore = ex.score
                 loadedSummary = ex.summary
@@ -2058,8 +2167,10 @@ public struct ReadingView: View {
         loadedContentMd = body.contentMd
         loadedContentHtml = body.contentHtml
         loadedTranslatedMd = body.llmTranslatedMd
-        loadedExcerptTranslated = body.excerptTranslated
         loadedTitleTranslated = body.titleTranslated
+        loadedAudioUrl = body.audioUrl
+        loadedVideoId = body.videoId
+        loadedTranscriptMd = body.llmTranscriptMd
         if let ex = Database.shared.fetchLLMExtras(id: item.id) {
             loadedScore = ex.score
             loadedSummary = ex.summary
@@ -2068,6 +2179,42 @@ public struct ReadingView: View {
 
     /// 原始 HTML（原网页视图用）——@State 缓存，打开时按 id 查
     @State private var loadedContentHtml: String? = nil
+
+    /// 重新处理：按文章所属源的当前开关，重新跑所有已开启管线（阅读栏用，带状态反馈）
+    private func reprocessFromReadingView() {
+        let cid = item.id
+        guard PipelineWorker.shared.tryLockContent(cid) else {
+            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            return
+        }
+        let policy: PipelinePolicy = {
+            guard let row = Database.shared.queryRows(
+                "SELECT s.config FROM content c JOIN content_source s ON s.id = c.source_id WHERE c.id = ?",
+                params: [cid]).first,
+                  let cfg = row["config"], !cfg.isEmpty else { return PipelinePolicy() }
+            return PipelinePolicy.from(configJson: cfg)
+        }()
+        let body = loadedContentMd ?? item.contentMd ?? item.excerpt ?? ""
+        busy = true; busyForId = cid; statusMsg = "内容处理中…"
+        Task {
+            var results: [String] = []
+            if policy.autoScore, pipeline.isAvailable { results.append(await pipeline.score(contentId: cid, title: item.title, body: body) ? "评分✅" : "评分❌") }
+            if policy.autoTranslate, pipeline.isAvailable { results.append(await pipeline.translate(contentId: cid, title: item.title, body: body) ? "翻译✅" : "翻译❌") }
+            if policy.autoSummarize, pipeline.isAvailable { results.append(await pipeline.summarize(contentId: cid, title: item.title, body: body) ? "摘要✅" : "摘要❌") }
+            if policy.autoTranscribe, (item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil) {
+                results.append(await transcriber.transcribe(contentId: cid, title: item.title, audioUrl: item.audioUrl, pageUrl: item.url, language: item.language) ? "转录✅" : "转录❌")
+            }
+            if !results.isEmpty { ArchiveService.shared.rearchive(contentId: cid) }
+            await MainActor.run {
+                PipelineWorker.shared.unlockContent(cid)
+                guard busyForId == cid else { return }
+                busy = false
+                statusMsg = results.isEmpty ? "无已开启管线" : results.joined(separator: " ")
+                refreshLoadedBody()
+                NotificationCenter.default.post(name: .contentUpdated, object: nil)
+            }
+        }
+    }
 
     private func runFulltext() {
         let cid = item.id
@@ -2079,17 +2226,19 @@ public struct ReadingView: View {
         busyForId = cid
         statusMsg = "获取全文中…"
         Task {
-            // 从源 config 解析 fetch_mode
-            let srcConfig = Database.shared.queryRows("""
-                SELECT s.config FROM content c LEFT JOIN content_source s ON c.source_id = s.id WHERE c.id = ?
-                """, params: [cid]).first?["config"] ?? "{}"
+            // 从源 config 解析 fetch_mode + 获取 feed html（feed_full 模式需要）
+            let row = Database.shared.queryRows("""
+                SELECT s.config, c.content_html FROM content c LEFT JOIN content_source s ON c.source_id = s.id WHERE c.id = ?
+                """, params: [cid]).first
+            let srcConfig = row?["config"] ?? "{}"
+            let feedHtml = row?["content_html"]
             var mode: FetchMode = .summary
             if let data = srcConfig.data(using: .utf8),
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let raw = obj["fetch_mode"] as? String,
                let m = FetchMode(rawValue: raw) { mode = m }
             let ok = await FullTextFetcher.shared.fetchAndStore(
-                contentId: cid, url: item.url, feedHtml: nil, mode: mode)
+                contentId: cid, url: item.url, feedHtml: feedHtml, mode: mode)
             if ok { ArchiveService.shared.rearchive(contentId: cid) }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
@@ -2140,11 +2289,17 @@ public struct ReadingView: View {
         busyForId = cid
         statusMsg = "翻译中…"
         Task {
-            // 媒体项：翻译 feed 简介 → llm_excerpt_translated（「译文」标签）；
+            // 媒体项：翻译 defuddle 全文（loadedContentMd）→ llm_translated_md（「转录」标签可显示中英对照）；
+            // 兜底走 feed 简介翻译（translateExcerpt），简介空则返回 false 不浪费 LLM 调用。
             // 非媒体项：翻译正文 → llm_translated_md（译文/原文切换）
             let ok: Bool
             if isMediaItem {
-                ok = await pipeline.translateExcerpt(contentId: cid, title: item.title, contentHtml: item.excerpt ?? item.contentHtml ?? "")
+                if let fulltext = loadedContentMd, !fulltext.isEmpty {
+                    ok = await pipeline.translate(contentId: cid, title: item.title, body: fulltext)
+                } else {
+                    let excerpt = item.excerpt ?? item.contentHtml ?? ""
+                    ok = await pipeline.translateExcerpt(contentId: cid, title: item.title, contentHtml: excerpt)
+                }
             } else {
                 ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
             }

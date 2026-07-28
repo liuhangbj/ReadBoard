@@ -125,13 +125,11 @@ public struct SourcesView: View {
                 } else {
                     Text("管线空闲").font(.caption).foregroundStyle(Color.rbText2)
                 }
-                if let t = worker.lastRunAt {
-                    Text("上次 \(t)").font(.caption2).foregroundStyle(Color.rbText3)
+                Text("待处理 \(worker.pendingCount)").font(.caption2).foregroundStyle(Color.rbText3)
+                Text("已处理 \(worker.processedCount)").font(.caption2).foregroundStyle(Color.rbText3)
+                if worker.deadLetterCount > 0 {
+                    Text("死信 \(worker.deadLetterCount)").font(.caption2).foregroundStyle(Color.rbScoreLow)
                 }
-                if !worker.lastSummary.isEmpty {
-                    Text(worker.lastSummary).font(.caption2).foregroundStyle(Color.rbText3).lineLimit(1)
-                }
-                Text("累计 \(worker.processedTotal)").font(.caption2).foregroundStyle(Color.rbText3)
                 Spacer()
                 Button {
                     Task { await worker.runOnce() }
@@ -144,6 +142,15 @@ public struct SourcesView: View {
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
+            if let item = worker.currentItem {
+                HStack(spacing: 4) {
+                    ProgressView().scaleEffect(0.5)
+                    Text("正在处理：").font(.caption2).foregroundStyle(Color.rbText3)
+                    Text(item).font(.caption2).foregroundStyle(Color.rbText2).lineLimit(1)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 6)
+            }
 
             Hairline()
 
@@ -464,29 +471,32 @@ public struct SourceRow: View {
         .padding(.vertical, 6)
     }
 
-    /// 全文模式选择菜单——自动（当前模式）/重新检测/关闭
+    /// 全文模式选择菜单——自动检测 / 五层级 / 重新检测
     private var fetchModeMenu: some View {
         Menu {
             Button {
                 Task { await store.setFetchMode(id: src.id, mode: "auto") }
             } label: {
                 if src.fetchModeAuto {
-                    Label("自动（\(src.fetchMode.displayName)）", systemImage: "checkmark")
+                    HStack { Image(systemName: "checkmark"); Text("自动检测") }
                 } else {
-                    Text("自动")
+                    HStack { Image(systemName: "arrow.triangle.2.circlepath"); Text("自动检测（当前: \(src.fetchMode.displayName)）") }
                 }
             }
-            Button("重新检测") { Task { await store.redetectFetchMode(id: src.id) } }
             Divider()
-            Button {
-                Task { await store.setFetchMode(id: src.id, mode: "off") }
-            } label: {
-                if src.isFetchOff {
-                    Label("仅摘要", systemImage: "checkmark")
-                } else {
-                    Text("仅摘要")
+            ForEach(FetchMode.allCases, id: \.rawValue) { fm in
+                Button {
+                    Task { await store.setFetchMode(id: src.id, mode: fm.rawValue) }
+                } label: {
+                    if !src.fetchModeAuto && src.fetchMode == fm {
+                        HStack { Image(systemName: "checkmark"); Text(fm.displayName) }
+                    } else {
+                        Text(fm.displayName)
+                    }
                 }
             }
+            Divider()
+            Button("重新检测") { Task { await store.redetectFetchMode(id: src.id) } }
         } label: {
             Text(src.fetchModeAuto ? "自动（\(src.fetchMode.displayName)）" : src.fetchMode.displayName)
                 .font(.caption)
@@ -636,8 +646,6 @@ public struct SourceRow: View {
         switch src.fetchMode {
         case .feedFull: return .rbScoreHigh
         case .defuddle: return .rbAccent
-        case .jinaFree: return .rbScoreMid
-        case .jinaPro: return .rbScoreLow
         case .summary: return .rbScoreNone
         }
     }
@@ -664,11 +672,16 @@ public struct AddSourceSheet: View {
     @State private var identifier = ""          // 唯一的地址栏
     @State private var stype = "article"        // 检测后自动填入，下拉可改
     @State private var selectedFolderId: Int64? = nil   // 检测后可选文件夹，默认未分组
+    @State private var autoScore = false
+    @State private var autoTranslate = false
+    @State private var autoSummarize = false
+    @State private var autoTranscribe = false
     @State private var refreshAfterAdd: Bool = true      // 添加后立即抓取首批（可勾选关闭）
     @State private var testing = false
     @State private var testResult = ""
     @State private var resolvedFeedURL: String? = nil   // 检测成功后定稿的 feed URL（自动发现可能改写）
     @State private var testedOK = false                  // 检测通过才能添加
+    @State private var detectedMode: FetchMode = .summary   // 检测阶段拿到的全文模式，添加时直接复用，不重复 probe
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -737,6 +750,20 @@ public struct AddSourceSheet: View {
                 .disabled(!testedOK)
             }
             .opacity(testedOK ? 1 : 0.45)
+
+            if testedOK {
+                Text("AI 内容处理")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.rbText3)
+                    .tracking(RB.Track.section)
+                    .padding(.top, 4)
+                HStack(spacing: 16) {
+                    Toggle("AI 评分", isOn: $autoScore)
+                    Toggle("AI 翻译", isOn: $autoTranslate)
+                    Toggle("AI 摘要", isOn: $autoSummarize)
+                    Toggle("AI 转录", isOn: $autoTranscribe)
+                }
+            }
 
             if !testResult.isEmpty {
                 HStack(alignment: .top, spacing: 6) {
@@ -831,6 +858,7 @@ public struct AddSourceSheet: View {
                         resolvedFeedURL = feedURL
                         testedOK = true
                         stype = detected          // 自动填入类型
+                        detectedMode = mode       // 记下检测到的全文模式，添加时直接复用
                         if name.isEmpty { name = feed.title }
                     }
                     testing = false
@@ -855,35 +883,28 @@ public struct AddSourceSheet: View {
         let finalName = name.isEmpty ? identifier : name
         testing = true
         testResult = ""
+        let pipeline = PipelinePolicy(autoScore: autoScore, autoTranslate: autoTranslate,
+                                       autoTranscribe: autoTranscribe, autoSummarize: autoSummarize)
         Task {
-            guard let newId = await store.addSource(stype: storeStype, name: finalName, identifier: url, folderId: selectedFolderId) else {
+            guard let newId = await store.addSource(stype: storeStype, name: finalName, identifier: url,
+                                                     folderId: selectedFolderId, pipeline: pipeline,
+                                                     fetchMode: detectedMode) else {
                 await MainActor.run {
                     testing = false
                     testResult = "✗ 添加失败（可能已存在相同源）"
                 }
                 return
             }
-            // 勾选了「添加后立即刷新」→ 对该源立即抓首批文章
+            // 添加成功 → 窗口立即关闭，后续在后台进行
+            await MainActor.run { dismiss() }
+            // 后台刷新首批文章（不阻塞窗口关闭）
             if refreshAfterAdd,
                let src = store.sources.first(where: { $0.id == newId }) {
                 do {
                     let n = try await store.syncOne(src)
-                    await MainActor.run {
-                        testing = false
-                        testResult = "✓ 添加成功，已拉取 \(n) 条新内容"
-                        dismiss()
-                    }
+                    Trace.i("添加源后刷新完成: \(src.name) 拉取 \(n) 条", category: "source")
                 } catch {
-                    await MainActor.run {
-                        testing = false
-                        testResult = "✓ 添加成功，但首次刷新失败：\(error.localizedDescription)"
-                        dismiss()
-                    }
-                }
-            } else {
-                await MainActor.run {
-                    testing = false
-                    dismiss()
+                    Trace.w("添加源后刷新失败: \(src.name) \(error.localizedDescription)", category: "source")
                 }
             }
         }

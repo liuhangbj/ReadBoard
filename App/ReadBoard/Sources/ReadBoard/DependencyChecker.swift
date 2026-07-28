@@ -9,14 +9,16 @@ import Foundation
 
 /// 单一依赖项（一个可执行 / 一个文件）
 public struct DependencyItem: Identifiable, Equatable {
-    public let id: String                 // DependencyPaths.Kind.rawValue
+    public let id: String
     let displayName: String
-    let path: String                     // 当前生效路径，未找到为「未找到」
+    let path: String
     let installed: Bool
-    /// 一键安装命令（brew / npm 类）；nil 表示走自动下载或无需安装
+    let version: String?
     let installCommand: String?
-    /// 安装提示文字
+    let upgradeCommand: String?
     let installHint: String
+    /// 备选路径（whisper 模型多份时供 UI 下拉选取）
+    let alternatePaths: [String]
 }
 
 /// 一个功能所需的全部依赖 + 该项是否可用（全部依赖在位）
@@ -36,13 +38,13 @@ public final class DependencyChecker: @unchecked Sendable {
 
     // MARK: - 各组
 
-    /// 全文提取功能：defuddle 本地引擎（fetch_engine.js）+ 运行它的 node
+    /// 全文提取功能：defuddle 本地引擎 + 运行它的 node
     func fulltextGroup() -> DependencyGroup {
         let items = [
             makeItem(.defuddleEngine,
-                     display: "defuddle 引擎（fetch_engine.js）",
-                     cmd: nil,
-                     hint: "随 App 打包在 Contents/Resources/engine；如需外置可在此指定路径"),
+                     display: "defuddle（正文提取引擎）",
+                     cmd: "cd ~/readboard/App/ReadBoard/Resources/engine && npm install defuddle",
+                     hint: "需在引擎目录 npm install 安装 defuddle 包"),
             makeItem(.node,
                      display: "node（运行引擎）",
                      cmd: "brew install node",
@@ -52,21 +54,39 @@ public final class DependencyChecker: @unchecked Sendable {
             id: "fulltext",
             title: "全文提取（defuddle）",
             icon: "doc.text.magnifyingglass",
-            description: "本地提取文章正文转 Markdown。缺失时自动 fallback 到 Jina Reader 云端渲染。",
+            description: "本地提取文章正文转 Markdown。缺失时自动 fallback 到 feed 自带全文或摘要。",
             items: items)
     }
 
     /// 转录功能：whisper-cli + ffmpeg + yt-dlp + 模型
     func transcribeGroup() -> DependencyGroup {
+        // whisper 模型：动态显示检测到的模型名，多份时显示数量
+        let modelDisplay: String
+        let modelPath = DependencyPaths.resolve(.whisperModel)
+        if let p = modelPath {
+            let name = (p as NSString).lastPathComponent
+            let altModels = DependencyPaths.Kind.whisperModel.commonPaths.filter { $0 != p }
+            modelDisplay = altModels.isEmpty ? "whisper 模型 \(name)" : "whisper 模型 \(name)（另有 \(altModels.count) 份）"
+        } else {
+            modelDisplay = "whisper 模型（未找到 ggml-*.bin）"
+        }
+
         let items = [
             makeItem(.whisperCLI, display: "whisper-cli（转写引擎）",
                      cmd: "brew install whisper-cpp", hint: "brew install whisper-cpp，或在下方指定路径"),
-            makeItem(.ffmpeg, display: "ffmpeg（音频转码）",
+            makeItem(.ffmpeg, display: "ffmpeg（音频转码 / 提取）",
                      cmd: "brew install ffmpeg", hint: "brew install ffmpeg，或在下方指定路径"),
-            makeItem(.ytdlp, display: "yt-dlp（视频抽音频）",
-                     cmd: "brew install yt-dlp", hint: "brew install yt-dlp（或 pip3 install yt-dlp）"),
-            makeItem(.whisperModel, display: "whisper 模型 ggml-medium.bin（1.4G）",
-                     cmd: nil, hint: "可自动下载，或在下方指定已有模型文件"),
+            makeItem(.ytdlp, display: "yt-dlp（视频下载）",
+                     cmd: "brew install yt-dlp", hint: "brew install yt-dlp（也可 pip3 install yt-dlp）"),
+            DependencyItem(
+                id: DependencyPaths.Kind.whisperModel.rawValue, displayName: modelDisplay,
+                path: modelPath ?? "未找到",
+                installed: modelPath != nil,
+                version: modelPath != nil ? modelVersion(modelPath!) : nil,
+                installCommand: "readboard:model-download",
+                upgradeCommand: modelPath != nil ? "readboard:model-redownload" : nil,
+                installHint: "可自动下载，或拖入已有模型文件",
+                alternatePaths: modelPath != nil ? DependencyPaths.Kind.whisperModel.commonPaths.filter { $0 != modelPath } : []),
         ]
         return DependencyGroup(
             id: "transcribe",
@@ -99,10 +119,74 @@ public final class DependencyChecker: @unchecked Sendable {
     private func makeItem(_ kind: DependencyPaths.Kind, display: String,
                           cmd: String?, hint: String) -> DependencyItem {
         let resolved = DependencyPaths.resolve(kind)
+        let version = resolved != nil ? detectVersion(kind: kind, path: resolved!) : nil
+        let upgradeCmd: String? = {
+            guard let c = cmd else { return nil }
+            if c.hasPrefix("brew install") {
+                return c.replacingOccurrences(of: "brew install", with: "brew upgrade")
+            }
+            if c.hasPrefix("pip install") {
+                return c.replacingOccurrences(of: "pip install", with: "pip install --upgrade")
+            }
+            if c.hasPrefix("cd ") && c.contains("npm install") {
+                return c.replacingOccurrences(of: "npm install", with: "npm update")
+            }
+            return nil
+        }()
         return DependencyItem(
             id: kind.rawValue, displayName: display,
             path: resolved ?? "未找到",
             installed: resolved != nil,
-            installCommand: cmd, installHint: hint)
+            version: version,
+            installCommand: cmd,
+            upgradeCommand: upgradeCmd,
+            installHint: hint,
+            alternatePaths: [])
+    }
+
+    /// whisper 模型"版本"= 文件大小 + 模型尺寸标签
+    private func modelVersion(_ path: String) -> String? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = attrs[.size] as? Int64 else { return nil }
+        let mb = Double(size) / 1_048_576
+        let label = (path as NSString).lastPathComponent
+            .replacingOccurrences(of: "ggml-", with: "")
+            .replacingOccurrences(of: ".bin", with: "")
+        return "\(label) · \(String(format: "%.0f", mb)) MB"
+    }
+
+    /// 检测依赖的版本号（--version 或等效命令）
+    private func detectVersion(kind: DependencyPaths.Kind, path: String) -> String? {
+        let args: [String]
+        switch kind {
+        case .whisperCLI: args = ["--version"]
+        case .ffmpeg:     args = ["-version"]
+        case .ytdlp:      args = ["--version"]
+        case .node:       args = ["--version"]
+        case .defuddleEngine:
+            // npm 包版本——读 node_modules/defuddle/package.json
+            let pkgPath = (path as NSString).appendingPathComponent("package.json")
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: pkgPath)),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let ver = obj["version"] as? String {
+                return "v\(ver)"
+            }
+            return nil
+        default: return nil
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: path)
+        proc.arguments = args
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        guard (try? proc.run()) != nil else { return nil }
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return nil }
+        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // 取第一行，截短避免过长的帮助文本
+        let firstLine = out.components(separatedBy: "\n").first ?? out
+        return firstLine.count <= 80 ? firstLine : String(firstLine.prefix(77)) + "..."
     }
 }

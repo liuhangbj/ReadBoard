@@ -34,16 +34,17 @@ public struct ContentItem: Identifiable, Hashable {
     /// 原始 HTML（feed 给的 content_html，原网页视图用——点开阅读时查，列表轻列不取）
     var contentHtml: String? = nil
     /// feed 简介的中文翻译（播客三标签的「译文」——点开阅读时查，列表轻列不取）
+    /// 已废弃——018 迁移后统一走 llm_translated_md
+    @available(*, deprecated, message: "Use llm_translated_md instead")
     var excerptTranslated: String? = nil
     /// 列表标签用轻量标记（不扛译文全文/媒体地址，只存是否有）
-    var hasTranslation: Bool = false  // 有译文/转写（llm_translated_md 非空）
-    var isMedia: Bool = false          // 媒体项（podcast/video/含 audio_url）
+    var hasTranslation: Bool = false  // 有译文（llm_translated_md 非空）
+    var hasTranscript: Bool = false   // 有转录（llm_transcript_md 非空）
+    var isMedia: Bool = false          // 媒体项（podcast/video/youtube/含 audio_url）
     /// 译文开头 120 字符（中栏标题显示中文用——llm_translated_md 第一行是中文标题）
     var translatedHead: String? = nil
     /// 标题的中文翻译（媒体项翻译时连标题一起翻——中栏/标题栏显示中文标题，列表轻列直查）
     var titleTranslated: String? = nil
-    /// 有简介翻译（媒体项 llm_excerpt_translated 非空）——中栏「翻译」badge 用，列表轻列标记
-    var hasExcerptTrans: Bool = false
     /// 有全文（content_md 非空）——全文 badge 用，列表轻列不扛 content_md 大字段
     var hasFulltext: Bool = false
 
@@ -56,11 +57,11 @@ public struct ContentItem: Identifiable, Hashable {
                     audioUrl: audioUrl, readAt: "now", starred: starred, archived: archived)
         copy.imageUrl = imageUrl
         copy.hasTranslation = hasTranslation
+        copy.hasTranscript = hasTranscript
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
         copy.titleTranslated = titleTranslated
         copy.hasFulltext = hasFulltext
-        copy.hasExcerptTrans = hasExcerptTrans
         return copy
     }
 
@@ -73,11 +74,11 @@ public struct ContentItem: Identifiable, Hashable {
                     audioUrl: audioUrl, readAt: readAt, starred: !starred, archived: archived)
         copy.imageUrl = imageUrl
         copy.hasTranslation = hasTranslation
+        copy.hasTranscript = hasTranscript
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
         copy.titleTranslated = titleTranslated
         copy.hasFulltext = hasFulltext
-        copy.hasExcerptTrans = hasExcerptTrans
         return copy
     }
 
@@ -90,17 +91,17 @@ public struct ContentItem: Identifiable, Hashable {
                     audioUrl: audioUrl, readAt: readAt, starred: starred, archived: !archived)
         copy.imageUrl = imageUrl
         copy.hasTranslation = hasTranslation
+        copy.hasTranscript = hasTranscript
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
         copy.titleTranslated = titleTranslated
         copy.hasFulltext = hasFulltext
-        copy.hasExcerptTrans = hasExcerptTrans
         return copy
     }
 
     /// 填充正文的副本（点开阅读时 fetchContentBody 补大字段）
     /// 保留轻量字段（imageUrl/hasTranslation/isMedia/translatedHead/hasFulltext）——否则点开文章后中栏/右栏中文标题丢失
-    func withBody(contentMd: String?, llmTranslatedMd: String?, audioUrl: String?, contentHtml: String? = nil, excerptTranslated: String? = nil, titleTranslated: String? = nil) -> ContentItem {
+    func withBody(contentMd: String?, llmTranslatedMd: String?, audioUrl: String?, contentHtml: String? = nil, titleTranslated: String? = nil) -> ContentItem {
         var copy = ContentItem(id: id, ctype: ctype, source: source, title: title, author: author,
                     url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
                     contentMd: contentMd, llmScore: llmScore, llmSummary: llmSummary,
@@ -108,13 +109,12 @@ public struct ContentItem: Identifiable, Hashable {
                     audioUrl: audioUrl, readAt: readAt, starred: starred, archived: archived)
         copy.imageUrl = imageUrl
         copy.hasTranslation = hasTranslation
+        copy.hasTranscript = hasTranscript
         copy.isMedia = isMedia
         copy.translatedHead = translatedHead
         copy.titleTranslated = titleTranslated ?? self.titleTranslated
         copy.hasFulltext = hasFulltext
-        copy.hasExcerptTrans = hasExcerptTrans
         copy.contentHtml = contentHtml ?? self.contentHtml
-        copy.excerptTranslated = excerptTranslated ?? self.excerptTranslated
         return copy
     }
 }
@@ -627,7 +627,7 @@ public final class Database: @unchecked Sendable {
                        unreadOnly: Bool = false,
                        keyword: String? = nil, starredOnly: Bool = false,
                        archived: Bool = false, tagId: Int64? = nil,
-                       processedFilters: Set<String> = [],
+                       processedFilters: [String: Int] = [:],
                        sortOrder: String = "newest",
                        limit: Int = 200, offset: Int = 0) -> [ContentItem] {
         guard open() else { return [] }
@@ -641,7 +641,8 @@ public final class Database: @unchecked Sendable {
                    c.excerpt, c.llm_score, c.llm_summary, c.fetch_status, c.read_at, c.starred, c.is_archived,
                    c.content_html,
                    (c.llm_translated_md IS NOT NULL AND c.llm_translated_md != '') AS has_trans,
-                   (c.ctype IN ('podcast','video') OR c.meta LIKE '%audio_url%') AS is_media,
+                   (c.llm_transcript_md IS NOT NULL AND c.llm_transcript_md != '') AS has_transcript,
+                   (c.ctype IN ('podcast','video','youtube') OR c.meta LIKE '%audio_url%') AS is_media,
                    substr(c.llm_translated_md, 1, 120) AS translated_head,
                    c.llm_title_translated AS title_translated,
                    (c.content_md IS NOT NULL AND LENGTH(c.content_md) > 500) AS has_fulltext,
@@ -654,7 +655,8 @@ public final class Database: @unchecked Sendable {
                    excerpt, llm_score, llm_summary, fetch_status, read_at, starred, is_archived,
                    content_html,
                    (llm_translated_md IS NOT NULL AND llm_translated_md != '') AS has_trans,
-                   (ctype IN ('podcast','video') OR meta LIKE '%audio_url%') AS is_media,
+                   (llm_transcript_md IS NOT NULL AND llm_transcript_md != '') AS has_transcript,
+                   (ctype IN ('podcast','video','youtube') OR meta LIKE '%audio_url%') AS is_media,
                    substr(llm_translated_md, 1, 120) AS translated_head,
                    llm_title_translated AS title_translated,
                    (content_md IS NOT NULL AND LENGTH(content_md) > 500) AS has_fulltext,
@@ -691,15 +693,27 @@ public final class Database: @unchecked Sendable {
         if tagId != nil {
             conds.append("\(col)id IN (SELECT content_id FROM content_tag WHERE tag_id = ?)")
         }
-        // 处理状态筛选（多选，「或」关系——满足任一即纳入）：
-        // 已 AI 评分/已摘要/已翻译/已转录
+        // 处理状态筛选（三态「或」关系——满足任一条件即纳入）：
+        // 处理状态三态：0=不筛选 / 1=已处理（实色）/ 2=未处理（淡粉）
+        // 每个键按自身状态追加独立条件；同键多状态不可能（单键单一值），跨键取 OR。
         if !processedFilters.isEmpty {
             var orConds: [String] = []
-            if processedFilters.contains("score") { orConds.append("\(col)llm_score IS NOT NULL") }
-            if processedFilters.contains("summary") { orConds.append("(\(col)llm_summary IS NOT NULL AND \(col)llm_summary != '')") }
-            if processedFilters.contains("translate") { orConds.append("(\(col)llm_translated_md IS NOT NULL AND \(col)llm_translated_md != '')") }
-            if processedFilters.contains("transcribe") {
-                orConds.append("((\(col)ctype IN ('podcast','video') OR \(col)meta LIKE '%audio_url%') AND \(col)llm_translated_md IS NOT NULL AND \(col)llm_translated_md != '')")
+            for (key, st) in processedFilters where st != 0 {
+                switch key {
+                case "score":
+                    orConds.append(st == 1 ? "\(col)llm_score IS NOT NULL"
+                                           : "\(col)llm_score IS NULL")
+                case "summary":
+                    orConds.append(st == 1 ? "(\(col)llm_summary IS NOT NULL AND \(col)llm_summary != '')"
+                                           : "(\(col)llm_summary IS NULL OR \(col)llm_summary = '')")
+                case "translate":
+                    orConds.append(st == 1 ? "(\(col)llm_translated_md IS NOT NULL AND \(col)llm_translated_md != '')"
+                                           : "(\(col)llm_translated_md IS NULL OR \(col)llm_translated_md = '')")
+                case "transcribe":
+                    let sub = "(\(col)ctype IN ('podcast','video') OR \(col)meta LIKE '%audio_url%') AND \(col)llm_translated_md IS NOT NULL AND \(col)llm_translated_md != ''"
+                    orConds.append(st == 1 ? "(\(sub))" : "(NOT (\(sub)))")
+                default: break
+                }
             }
             if !orConds.isEmpty {
                 conds.append("(" + orConds.joined(separator: " OR ") + ")")
@@ -768,17 +782,17 @@ public final class Database: @unchecked Sendable {
         return PipelinePolicy.from(configJson: row["src_cfg"] ?? "{}")
     }
 
-    /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl, contentHtml, excerptTranslated, titleTranslated)
-    func fetchContentBody(id: Int64) -> (contentMd: String?, llmTranslatedMd: String?, audioUrl: String?, contentHtml: String?, excerptTranslated: String?, titleTranslated: String?)? {
+    /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl, contentHtml, titleTranslated, llmTranscriptMd, videoId)
+    func fetchContentBody(id: Int64) -> (contentMd: String?, llmTranslatedMd: String?, audioUrl: String?, contentHtml: String?, titleTranslated: String?, llmTranscriptMd: String?, videoId: String?)? {
         let _tAll = Date()
         let isMain = Thread.isMainThread
         let _tOpen = Date()
         guard open() else { return nil }
         let openMs = Int(Date().timeIntervalSince(_tOpen) * 1000)
         var stmt: OpaquePointer?
-        var result: (String?, String?, String?, String?, String?, String?)?
+        var result: (String?, String?, String?, String?, String?, String?, String?)?
         let _tPrep = Date()
-        let prepOK = sqlite3_prepare_v2(db, "SELECT content_md, llm_translated_md, meta, content_html, llm_excerpt_translated, llm_title_translated FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK
+        let prepOK = sqlite3_prepare_v2(db, "SELECT content_md, llm_translated_md, meta, content_html, llm_title_translated, llm_transcript_md FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK
         let prepMs = Int(Date().timeIntervalSince(_tPrep) * 1000)
         if prepOK {
             sqlite3_bind_int64(stmt, 1, id)
@@ -795,11 +809,13 @@ public final class Database: @unchecked Sendable {
                     return String(cString: p)
                 }
                 var audioUrl: String? = nil
+                var videoId: String? = nil
                 if let metaStr = text(2), let data = metaStr.data(using: .utf8),
                    let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     audioUrl = (obj["audio_url"] as? String) ?? (obj["video_url"] as? String)
+                    videoId = obj["video_id"] as? String
                 }
-                result = (text(0), text(1), audioUrl, text(3), text(4), text(5))
+                result = (text(0), text(1), audioUrl, text(3), text(4), text(5), videoId)
             }
         }
         sqlite3_finalize(stmt)
@@ -987,23 +1003,24 @@ public final class Database: @unchecked Sendable {
         if sqlite3_column_count(stmt) > 15, let html = text(15) {
             item.imageUrl = Self.firstImageUrl(in: html)
         }
-        // 列表标签轻量标记（列 16 has_trans / 列 17 is_media / 列 18 translated_head / 列 19 title_translated / 列 20 has_fulltext / 列 21 has_excerpt_trans）
+        // 列表标签轻量标记（列 16 has_trans / 列 17 has_transcript / 列 18 is_media / 列 19 translated_head / 列 20 title_translated / 列 21 has_fulltext / 列 22 has_excerpt_trans）
         if sqlite3_column_count(stmt) > 17 {
             item.hasTranslation = sqlite3_column_int(stmt, 16) == 1
-            item.isMedia = sqlite3_column_int(stmt, 17) == 1
+            item.hasTranscript = sqlite3_column_int(stmt, 17) == 1
         }
         if sqlite3_column_count(stmt) > 18 {
-            item.translatedHead = text(18)
+            item.isMedia = sqlite3_column_int(stmt, 18) == 1
         }
         if sqlite3_column_count(stmt) > 19 {
-            item.titleTranslated = text(19)
+            item.translatedHead = text(19)
         }
         if sqlite3_column_count(stmt) > 20 {
-            item.hasFulltext = sqlite3_column_int(stmt, 20) == 1
+            item.titleTranslated = text(20)
         }
         if sqlite3_column_count(stmt) > 21 {
-            item.hasExcerptTrans = sqlite3_column_int(stmt, 21) == 1
+            item.hasFulltext = sqlite3_column_int(stmt, 21) == 1
         }
+        // col 22 (has_excerpt_trans) kept in SQL for column offset stability; no longer used
         return item
     }
 

@@ -59,13 +59,13 @@ public struct FeedSource: Identifiable, Hashable {
         return obj["fetch_mode_auto"] as? Bool ?? false
     }
 
-    /// 抓取间隔（分钟，config.fetch_interval_min，默认 15）
+    /// 抓取间隔（分钟，config.fetch_interval_min，默认 60）
     var fetchIntervalMin: Int {
         guard let data = config.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 15 }
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 60 }
         if let v = obj["fetch_interval_min"] as? Int { return v }
         if let v = obj["fetch_interval_min"] as? Double { return Int(v) }
-        return 15
+        return 60
     }
 
     /// 是否到期该抓（距 last_fetched_at 超过间隔；从未抓过 = 到期）
@@ -293,11 +293,34 @@ public final class SourceStore: ObservableObject {
     /// 添加订阅源（RSS/播客直接用 url；YouTube 传频道 url 或 UC id）
     /// 添加时自动探测全文模式（仅 RSS 文章类需要; 播客/YouTube 不抓正文, 跳过探测）
     @discardableResult
-    func addSource(stype: String, name: String, identifier: String, folderId: Int64? = nil) async -> Int64? {
+    func addSource(stype: String, name: String, identifier: String, folderId: Int64? = nil,
+                   pipeline: PipelinePolicy = PipelinePolicy(), fetchMode: FetchMode? = nil) async -> Int64? {
         var config = "{}"
-        if stype == "rss" {
-            let mode = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
+        if stype == "rss" || stype == "youtube" {
+            let mode: FetchMode
+            if let m = fetchMode {
+                mode = m
+            } else {
+                mode = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
+            }
             config = "{\"fetch_mode\":\"\(mode.rawValue)\"}"
+        }
+        // 合并管线开关 + 默认抓取间隔到 config
+        if let data = config.data(using: .utf8),
+           var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if pipeline.autoScore || pipeline.autoTranslate || pipeline.autoSummarize || pipeline.autoTranscribe {
+                obj["auto_score"] = pipeline.autoScore
+                obj["auto_translate"] = pipeline.autoTranslate
+                obj["auto_summarize"] = pipeline.autoSummarize
+                obj["auto_transcribe"] = pipeline.autoTranscribe
+            }
+            if obj["fetch_interval_min"] == nil {
+                obj["fetch_interval_min"] = Int(syncInterval / 60)
+            }
+            if let merged = try? JSONSerialization.data(withJSONObject: obj),
+               let str = String(data: merged, encoding: .utf8) {
+                config = str
+            }
         }
         let ok = db.execute(
             "INSERT OR IGNORE INTO content_source (stype, name, identifier, enabled, config, folder_id) VALUES (?,?,?,1,?,?)",
@@ -326,6 +349,10 @@ public final class SourceStore: ObservableObject {
             // 统一用 summary 表达「关闭」——播客的显示摘要和文章的抓不到兜底本质相同
             obj["fetch_mode"] = "summary"
             obj["fetch_mode_auto"] = false
+        } else if FetchMode(rawValue: mode) != nil {
+            // 手动指定具体模式（defuddle / feed_full / summary）
+            obj["fetch_mode"] = mode
+            obj["fetch_mode_auto"] = false
         }
         if let data = try? JSONSerialization.data(withJSONObject: obj),
            let str = String(data: data, encoding: .utf8) {
@@ -350,11 +377,12 @@ public final class SourceStore: ObservableObject {
     }
 
     /// 批量重新检测多个源的全文模式（OPML 导入后后台调用）。
-    /// 跳过 podcast/youtube：媒体源无可读全文，走 summary。
+    /// 跳过 podcast（音频无可读全文，走 summary）；rss 与 youtube 都参与探测——
+    /// youtube 现在会探测成 defuddle（靠视频页抓字幕 + 转录管线出稿，而非"仅摘要"退化）。
     func probeFetchModes(ids: [Int64]) async {
         for id in ids {
             guard let stype = db.scalarString("SELECT stype FROM content_source WHERE id = ?", params: [id]),
-                  stype == "rss" else { continue }
+                  stype == "rss" || stype == "youtube" else { continue }
             await redetectFetchMode(id: id)
         }
     }
@@ -561,8 +589,8 @@ public final class SourceStore: ObservableObject {
         for entry in feed.entries {
             if let newId = upsertContent(source: src.stype, sourceId: src.id, entry: entry) {
                 added += 1
-                // 新文章: 按源的 fetch_mode 立即抓全文（仅文章类）
-                if entry.meta["audio_url"] == nil && entry.meta["video_id"] == nil {
+                // 新文章: 按源的 fetch_mode 立即抓全文（播客跳过——无正文，YouTube 需要 defuddle 抓原文）
+                if entry.meta["audio_url"] == nil {
                     await FullTextFetcher.shared.fetchAndStore(
                         contentId: newId, url: entry.url,
                         feedHtml: entry.html.isEmpty ? nil : entry.html,

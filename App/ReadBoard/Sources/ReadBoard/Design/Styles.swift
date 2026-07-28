@@ -1,5 +1,7 @@
 import SwiftUI
 import AVFoundation
+import AVKit
+import WebKit
 
 // MARK: - 复用样式组件（纸墨系）
 //
@@ -464,4 +466,218 @@ struct AudioPlayerView: View {
         let secs = Int(seconds) % 60
         return String(format: "%d:%02d", mins, secs)
     }
+
+}
+
+/// YouTube video player using yt-dlp -g (URL extraction only, no download) + AVPlayer.
+/// yt-dlp -g returns direct stream URL in ~0.5s; AVPlayer streams directly from YouTube CDN.
+/// WKWebView iframe embed is blocked by YouTube on macOS (Error 152/153 regardless of UA/Origin).
+struct YouTubePlayerView: View {
+    let videoId: String
+    let title: String
+
+    @State private var player: AVPlayer?
+    @State private var isLoading = false
+    @State private var loadError: String?
+    @State private var isPlaying = false
+    @State private var currentTime: Double = 0
+    @State private var duration: Double = 0
+    @State private var timer: Timer?
+
+    private var ytdlpBin: String { DependencyPaths.resolve(.ytdlp) ?? "yt-dlp" }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: RB.Radius.lg)
+                    .fill(Color.black)
+                if let player = player {
+                    AVPlayerViewRepresentable(player: player)
+                        .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
+                } else if isLoading {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                            .scaleEffect(1.2)
+                        Text("Resolving URL...")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.white.opacity(0.7))
+                    }
+                } else if let err = loadError {
+                    VStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 32))
+                            .foregroundStyle(Color.yellow.opacity(0.7))
+                        Text(err)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.white.opacity(0.6))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 8)
+                        Button("Retry") { resolveAndPlay() }
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.rbAccent)
+                    }
+                } else {
+                    Button {
+                        resolveAndPlay()
+                    } label: {
+                        VStack(spacing: 10) {
+                            Image(systemName: "play.circle.fill")
+                                .font(.system(size: 44))
+                                .foregroundStyle(Color.white.opacity(0.92))
+                            Text("Click to load video")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Color.white.opacity(0.7))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+
+            HStack(spacing: 12) {
+                if player != nil {
+                    Button {
+                        togglePlay()
+                    } label: {
+                        Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundStyle(Color.rbAccent)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if player != nil {
+                    VStack(spacing: 4) {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule()
+                                    .fill(Color.rbBg)
+                                    .frame(height: 4)
+                                Capsule()
+                                    .fill(Color.rbAccent)
+                                    .frame(width: duration > 0 ? geo.size.width * CGFloat(currentTime / duration) : 0, height: 4)
+                            }
+                        }
+                        .frame(height: 4)
+                        HStack {
+                            Text(formatTime(currentTime))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Color.rbText3)
+                            Spacer()
+                            Text(formatTime(duration))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Color.rbText3)
+                        }
+                    }
+                }
+
+                Button {
+                    if let url = URL(string: "https://www.youtube.com/watch?v=\(videoId)") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.system(size: 20))
+                        .foregroundStyle(Color.rbText3)
+                }
+                .buttonStyle(.plain)
+                .help("Open in browser")
+
+                Spacer()
+            }
+        }
+        .padding(12)
+        .background(Color.rbSurface)
+        .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
+        .onDisappear { cleanup() }
+    }
+
+    private func resolveAndPlay() {
+        guard !isLoading else { return }
+        isLoading = true
+        loadError = nil
+        Task {
+            if let url = await resolveVideoURL() {
+                await MainActor.run {
+                    isLoading = false
+                    startPlayback(url: url)
+                }
+            } else {
+                await MainActor.run {
+                    isLoading = false
+                    loadError = "Could not resolve video URL.\nTry opening in browser."
+                }
+            }
+        }
+    }
+
+    private func resolveVideoURL() async -> URL? {
+        let watchUrl = "https://www.youtube.com/watch?v=\(videoId)"
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: ytdlpBin)
+        proc.arguments = ["-g", "-f", "best[height<=720]/best", "--no-playlist", watchUrl]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let urls = output.components(separatedBy: "\n").filter { !$0.isEmpty }
+            return urls.first.flatMap { URL(string: $0) }
+        } catch {
+            return nil
+        }
+    }
+
+    private func startPlayback(url: URL) {
+        let p = AVPlayer(url: url)
+        player = p
+        p.play()
+        isPlaying = true
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] _ in
+            guard let p = player else { return }
+            currentTime = p.currentTime().seconds
+            if let item = p.currentItem {
+                duration = item.duration.seconds.isFinite ? item.duration.seconds : 0
+            }
+            isPlaying = p.rate > 0
+        }
+    }
+
+    private func togglePlay() {
+        guard let p = player else { return }
+        if isPlaying { p.pause() } else { p.play() }
+        isPlaying = p.rate > 0
+    }
+
+    private func formatTime(_ sec: Double) -> String {
+        guard sec.isFinite, sec >= 0 else { return "--:--" }
+        let m = Int(sec) / 60, s = Int(sec) % 60
+        return String(format: "%d:%02d", m, s)
+    }
+
+    private func cleanup() {
+        timer?.invalidate()
+        timer = nil
+        player?.pause()
+        player = nil
+    }
+}
+
+/// AVPlayerView wrapper for SwiftUI on macOS
+struct AVPlayerViewRepresentable: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.player = player
+        view.controlsStyle = .inline
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {}
 }

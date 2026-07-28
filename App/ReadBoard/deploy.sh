@@ -6,6 +6,7 @@ set -e
 PROJ="/Users/hangbits/readboard/App/ReadBoard"
 BIN="$PROJ/.build/debug/ReadBoardMain"
 APP="/Users/hangbits/readboard/App/ReadBoard.app/Contents/MacOS/ReadBoard"
+APP_DIR="/Users/hangbits/readboard/App/ReadBoard.app"
 
 echo "==> 1/4 编译 (固定目录 $PROJ)"
 cd "$PROJ"
@@ -18,7 +19,10 @@ echo "==> 3/4 停旧进程 + 部署"
 pkill -x ReadBoard 2>/dev/null || true
 sleep 1
 cp -f "$BIN" "$APP"
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1
+# 同步 Info.plist（隐私权限声明）
+cp -f "$PROJ/AppInfo.plist" "$(dirname "$APP")/../Info.plist"
+xattr -cr "$APP_DIR" 2>/dev/null || true   # 清隔离属性，防 GateKeeper 拦截
+codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1   # 签整个 .app bundle，��二进制
 
 echo "==> 4/4 校验部署结果"
 # codesign 会改 MD5，所以用「产物大小 + 修改时间」验证，不用 MD5
@@ -28,6 +32,6 @@ echo "   产物大小=$SRC_SIZE  部署大小=$DST_SIZE"
 ls -la "$APP"
 
 echo "==> 重启 App"
-open -a /Users/hangbits/readboard/App/ReadBoard.app
+open -a "$APP_DIR"
 echo "==> 完成。验证版本标记：打开一篇文章后执行"
 echo "    grep BUILD_ ~/Library/Logs/ReadBoard/readboard.log | tail -1"

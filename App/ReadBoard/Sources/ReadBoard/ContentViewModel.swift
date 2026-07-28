@@ -14,9 +14,19 @@ public final class ContentViewModel: ObservableObject {
     @Published var readFilter: ReadFilter = .all
     /// 看归档 = readFilter 选了归档分支（派生，不再独立 Toggle）
     var showArchived: Bool { readFilter == .archived }
-    /// 处理状态筛选（多选）：score/summary/translate/transcribe。空 = 不限。
-    /// 多选为「或」关系（满足任一即纳入），符合"我想看已 AI 评分或已翻译的"直觉。
-    @Published var processedFilters: Set<String> = []
+    /// 处理状态三态筛选：score/summary/translate/transcribe。
+    /// 每键三态：.none 不筛选 / .yes 已处理（实色高亮）/ .no 未处理（淡粉高亮）。
+    /// 多选为「或」关系（满足任一条件即纳入），跨键可混合 yes/no。
+    @Published var processedStates: [String: ProcessedState] = [:]
+
+    /// 处理状态三态：none=不筛选 / yes=已处理（实色）/ no=未处理（淡粉）
+    enum ProcessedState: Int {
+        case none = 0, yes = 1, no = 2
+        /// 点击循环：none → yes → no → none
+        var next: ProcessedState {
+            switch self { case .none: return .yes; case .yes: return .no; case .no: return .none }
+        }
+    }
     @Published var keyword: String = ""            // 搜索关键词（标题/正文）
     /// 文章列表排序：newest（最新优先，默认）/ oldest（最早优先）/ score（评分优先）
     @Published var sortOrder: SortOrder = .newest
@@ -156,7 +166,7 @@ public final class ContentViewModel: ObservableObject {
         let unreadOnly = readFilter == .unread
         let starredOnly = readFilter == .starred
         let archivedFlag = showArchived
-        let processed = processedFilters
+        let processed = processedStates.mapValues { $0.rawValue }
         let sort = sortOrder.rawValue
         let pageSize = Self.pageSize
         Task.detached(priority: .userInitiated) {
@@ -199,7 +209,8 @@ public final class ContentViewModel: ObservableObject {
                                     keyword: kw.isEmpty ? nil : kw,
                                     starredOnly: readFilter == .starred,
                                     archived: showArchived,
-                                    processedFilters: processedFilters, sortOrder: sortOrder.rawValue,
+                                    processedFilters: processedStates.mapValues { $0.rawValue },
+                                    sortOrder: sortOrder.rawValue,
                                     limit: Self.pageSize,
                                     offset: items.count)
         hasMore = page.count >= Self.pageSize

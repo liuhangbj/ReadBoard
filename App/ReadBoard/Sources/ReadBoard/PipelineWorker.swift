@@ -11,10 +11,10 @@ public final class PipelineWorker: ObservableObject {
     static let shared = PipelineWorker()
 
     @Published var isRunning = false
-    @Published var lastRunAt: String? = nil
     @Published var lastSummary = ""
-    @Published var processedTotal = 0
-    /// 死信任务数（失败 >=3 被永久跳过的）——设置页可查看并重置
+    @Published var currentItem: String? = nil   // 当前正在处理的条目标题
+    @Published var pendingCount = 0              // DB 实时待处理数
+    @Published var processedCount = 0            // DB 实时已处理数
     @Published var deadLetterCount = 0
 
     private let db = Database.shared
@@ -25,7 +25,7 @@ public final class PipelineWorker: ObservableObject {
     /// 扫描间隔（秒）
     var interval: TimeInterval = 120
     /// 每轮最多处理条数（防一次跑太久）
-    var batchLimit = 30
+    var batchLimit = 100
 
     /// contentId 级互斥锁（修 P1-10）：正在处理的内容 id 集合。
     /// 手动触发（阅读区按钮）和 worker 都先 tryLock——防止手动+worker 对同一篇
@@ -52,6 +52,8 @@ public final class PipelineWorker: ObservableObject {
 
     /// 存量水位线：小于等于此 id 的内容不处理
     private(set) var watermark: Int64 = 0
+    /// 扫描光标：上次扫描到的最大 id（避免每轮都从 0 开始扫全表）
+    private var scanCursor: Int64 = 0
 
     /// 初始化水位线：已存则读，否则取当前最大 id 并持久化。
     /// 修 P1-7：重装/换机时 UserDefaults 没了但 DB 还在——水位线若重置为 MAX(id)，
@@ -75,21 +77,31 @@ public final class PipelineWorker: ObservableObject {
 
     private init() {
         initWatermark()
+        scanCursor = watermark
     }
 
     // MARK: Timer 生命周期
 
     func start() {
         guard timer == nil else { return }
-        // 延迟 5 秒再首次执行——避免与 app 启动阶段 List 首次渲染(300 条)竞争。
-        // 原代码「立即跑一轮」会在启动后几秒内 post contentUpdated → reload 替换 items，
-        // 此时 List 可能还在布局中，数据源替换与布局竞态 → use-after-free 崩溃。
+        // 占位防止重复 start
+        timer = Timer()
+        // 延迟 5 秒再首次执行——避免与 app 启动阶段 List 首次渲染竞争
         Task {
             try? await Task.sleep(nanoseconds: 5_000_000_000)
-            await self.runOnce()
-        }
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.runOnce() }
+            while true {
+                let done = await self.runOnce()
+                await Task.yield()  // 让 SwiftUI 有机会渲染 @Published 更新
+                if done == 0 {
+                    // 无事可做 → 已到 DB 尾部？则等 interval 秒再看；否则继续推进光标
+                    let maxId = db.scalarInt("SELECT MAX(id) FROM content") ?? 0
+                    if scanCursor >= Int64(maxId) {
+                        scanCursor = watermark  // 回卷从头
+                        try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                    }
+                    // 光标未到尾：间隙，不停立刻下一轮推进
+                }
+            }
         }
     }
 
@@ -107,10 +119,12 @@ public final class PipelineWorker: ObservableObject {
         isRunning = true
         defer {
             isRunning = false
-            lastRunAt = Self.nowString()
+            currentItem = nil
+            refreshCounts()
         }
 
         let tasks = collectPendingTasks()
+        fputs("[worker] runOnce: \(tasks.count) pending tasks\n", stderr)
         var done = 0
         var scored = 0, translated = 0, summarized = 0, transcribed = 0, refetched = 0
 
@@ -130,11 +144,10 @@ public final class PipelineWorker: ObservableObject {
         }
 
         for t in tasks.prefix(batchLimit) {
-            // contentId 互斥：手动触发正在处理同一篇则跳过（防双倍 LLM 计费，修 P1-10）
             guard tryLockContent(t.id) else { continue }
             defer { unlockContent(t.id) }
-            // AI 评分（AI 板块总开关 && AI 评分子开关 && 源级开关，源级已在收集时判过）
-            // R2: 每个管线调用包单任务超时——一条挂死不再拖垮整轮 worker
+            currentItem = t.title
+            // AI 评分（独立管线；translateFull 已覆盖时不触发）
             if t.needScore, AIPipeline.score.effective {
                 let ok = await Self.withTimeout(seconds: 180) {
                     await self.llm.score(contentId: t.id, title: t.title, body: t.body)
@@ -143,16 +156,16 @@ public final class PipelineWorker: ObservableObject {
                 else { markJob(contentId: t.id, jtype: "score", ok: false, error: llm.lastError) }
                 if ok { await ExportService.shared.runPending(trigger: "score", contentId: t.id) }
             }
-            // 翻译（仅文章；媒体走转录）
+            // 翻译（整合调用：translateFull = 翻译+评分+摘要，按开关回写）
             if t.needTranslate, AIPipeline.translate.effective {
                 let ok = await Self.withTimeout(seconds: 180) {
-                    await self.llm.translate(contentId: t.id, title: t.title, body: t.body)
+                    await self.llm.translateFull(contentId: t.id, title: t.title, body: t.body, policy: t.policy)
                 } ?? false
                 if ok { translated += 1; markJob(contentId: t.id, jtype: "translate", ok: true) }
                 else { markJob(contentId: t.id, jtype: "translate", ok: false, error: llm.lastError) }
                 if ok { await ExportService.shared.runPending(trigger: "translate", contentId: t.id) }
             }
-            // 摘要（独立管线；若 AI 评分已带摘要则跳过）
+            // 摘要（独立管线；translateFull 已覆盖时不触发）
             if t.needSummary, AIPipeline.summarize.effective {
                 let ok = await Self.withTimeout(seconds: 180) {
                     await self.llm.summarize(contentId: t.id, title: t.title, body: t.body)
@@ -175,14 +188,10 @@ public final class PipelineWorker: ObservableObject {
             done += 1
         }
 
-        processedTotal += done
-        deadLetterCount = countDeadLetters()
-        // 依赖缺失提示优先保留；否则正常汇总
-        if !(anyTranscribePending && !transcribeReady) {
-            lastSummary = "本轮 \(done) 条：评分\(scored) 翻译\(translated) 摘要\(summarized) 转录\(transcribed) 全文补\(refetched)"
-        }
         if done > 0 {
+            lastSummary = "本轮 \(done) 条：评分\(scored) 翻译\(translated) 摘要\(summarized) 转录\(transcribed) 全文补\(refetched)"
             NotificationCenter.default.post(name: .contentUpdated, object: nil)
+            db.execute("PRAGMA wal_checkpoint(PASSIVE);")
         }
         return done
     }
@@ -231,7 +240,7 @@ public final class PipelineWorker: ObservableObject {
                 }
                 if t.needTranslate, AIPipeline.translate.effective {
                     let ok = await Self.withTimeout(seconds: 180) {
-                        await self.llm.translate(contentId: t.id, title: t.title, body: t.body)
+                        await self.llm.translateFull(contentId: t.id, title: t.title, body: t.body, policy: t.policy)
                     } ?? false
                     markJob(contentId: t.id, jtype: "translate", ok: ok)
                     if ok { didSomething = true }
@@ -275,6 +284,7 @@ public final class PipelineWorker: ObservableObject {
         let body: String
         let language: String?
         let audioUrl: String?
+        let policy: PipelinePolicy   // 源级/文件夹级开关快照，translateFull 用
         var needScore = false
         var needTranslate = false
         var needSummary = false
@@ -297,16 +307,21 @@ public final class PipelineWorker: ObservableObject {
         // 媒体项(podcast/video)不看 fetch_status——音频在 enclosure 里, 无正文可抓, fetch_status 恒为 0;
         // 文章类要求 fetch_status IN (2成功, 4直入) 才有正文可做 AI 评分/翻译。
         // 只扫水位线之后的新内容(id > watermark), 存量不动（除非 ignoreWatermark 回填）。
-        var conds = ["((ctype IN ('podcast','video') OR meta LIKE '%audio_url%') OR fetch_status IN (2, 4))"]
+        var conds = ["((ctype IN ('podcast','video','youtube') OR meta LIKE '%audio_url%') OR fetch_status IN (2, 4))"]
         if !ignoreWatermark { conds.append("id > \(watermark)") }
         if let sid = onlySourceId { conds.append("source_id = \(sid)") }
+        // 扫描光标：从上次扫描到的最大 id 继续，避免每轮重扫全表。
+        // 第 0 轮从 watermark 开始；每轮过完更新 scanCursor 到本轮看到的最大 id。
+        // 下一轮 SQL 加 id > scanCursor → 已处理完的不会重扫 → 自然推进。
+        let startId = ignoreWatermark ? watermark : scanCursor
+        conds.append("id > \(startId)")
         let sql = """
         SELECT id, source, source_id, ctype, title, url, language, content_md, excerpt,
-               llm_score, llm_summary, llm_translated_md, meta, content_html
+               llm_score, llm_summary, llm_translated_md, meta, content_html, llm_transcript_md
         FROM content
         WHERE \(conds.joined(separator: " AND "))
-        ORDER BY published_at DESC
-        LIMIT 2000;
+        ORDER BY id ASC
+        LIMIT \(batchLimit * 5);
         """
         guard db.prepare(sql, &stmt) else { return [] }
 
@@ -315,7 +330,7 @@ public final class PipelineWorker: ObservableObject {
             let id: Int64, sourceId: Int64?
             let title: String, url: String, language: String?, md: String?, excerpt: String?
             let html: String?   // content_html：feed 自带全文（md 还没转出来时的正文兜底）
-            let hasScore: Bool, hasSummary: Bool, hasTranslated: Bool, isMedia: Bool
+            let hasScore: Bool, hasSummary: Bool, hasTranslated: Bool, hasTranscript: Bool, isMedia: Bool
             let audioUrl: String?
         }
         var rawRows: [Row] = []
@@ -325,7 +340,7 @@ public final class PipelineWorker: ObservableObject {
             let ctype = colText(stmt, 3) ?? "article"
             let metaStr = colText(stmt, 12) ?? "{}"
             let audioUrl = Self.parseAudioUrl(metaStr)
-            let isMedia = ctype == "podcast" || ctype == "video" || audioUrl != nil
+            let isMedia = ctype == "podcast" || ctype == "video" || ctype == "youtube" || audioUrl != nil
             rawRows.append(Row(
                 id: id, sourceId: sourceId,
                 title: colText(stmt, 4) ?? "", url: colText(stmt, 5) ?? "",
@@ -334,12 +349,14 @@ public final class PipelineWorker: ObservableObject {
                 hasScore: sqlite3_column_type(stmt, 9) != SQLITE_NULL,
                 hasSummary: sqlite3_column_type(stmt, 10) != SQLITE_NULL,
                 hasTranslated: sqlite3_column_type(stmt, 11) != SQLITE_NULL,
+                hasTranscript: sqlite3_column_type(stmt, 14) != SQLITE_NULL,
                 isMedia: isMedia, audioUrl: audioUrl))
         }
         sqlite3_finalize(stmt)
 
         // 一次聚合查询算全量 content 的死信+退避状态（jtype → skip）
         let skipMap = failureSkipMap(contentIds: rawRows.map { $0.id })
+        fputs("[worker] rawRows=\\(rawRows.count) skipMapSize=\\(skipMap.count)\n", stderr)
 
         for r in rawRows {
             let id = r.id
@@ -363,19 +380,19 @@ public final class PipelineWorker: ObservableObject {
             let skip = skipMap[id] ?? [:]
 
             var t = PendingTask(id: id, title: r.title, url: r.url, body: body,
-                                language: r.language, audioUrl: audioUrl)
-            // R1: 各管线判定前先做失败退避/死信过滤——失败过多的不再反复调 LLM（治费用失控）
-            // AI 评分：开关开 且 未评分 且 有正文 且 未死信
-            if pol.policy.autoScore, !r.hasScore, !body.isEmpty,
-               skip["score"] != true { t.needScore = true }
-            // 摘要：开关开 且 未摘要 且 (有正文 或 转录后会有)；媒体等转录补摘要，跳过
-            if pol.policy.autoSummarize, !r.hasSummary, !body.isEmpty, !isMedia,
-               skip["summarize"] != true { t.needSummary = true }
-            // 翻译：开关开 且 未翻译 且 文章有正文（媒体走转录）
-            if pol.policy.autoTranslate, !r.hasTranslated, !isMedia, !body.isEmpty,
+                                language: r.language, audioUrl: audioUrl, policy: pol.policy)
+            // 翻译优先：开关开 且 未翻译 且 有正文
+            // translateFull 整合调用已含评分+摘要 → 翻译开启时不另设 needScore/needSummary
+            if pol.policy.autoTranslate, !r.hasTranslated, !body.isEmpty,
                skip["translate"] != true { t.needTranslate = true }
-            // 转录：开关开 且 未转写 且 有媒体地址
-            if pol.policy.autoTranscribe, !r.hasTranslated, isMedia, (audioUrl != nil || !r.url.isEmpty),
+            // 评分：开关开 且 未评分 且 翻译不覆盖（translateFull 一次调用已产出评分）
+            if pol.policy.autoScore, !r.hasScore, !body.isEmpty, !t.needTranslate,
+               skip["score"] != true { t.needScore = true }
+            // 摘要：开关开 且 未摘要 且 翻译/评分不覆盖
+            if pol.policy.autoSummarize, !r.hasSummary, !body.isEmpty, !isMedia, !t.needTranslate,
+               skip["summarize"] != true { t.needSummary = true }
+            // 转录：开关开 且 未转录（llm_transcript_md） 且 有媒体地址
+            if pol.policy.autoTranscribe, !r.hasTranscript, isMedia, (audioUrl != nil || !r.url.isEmpty),
                skip["transcribe"] != true {
                 t.needTranscribe = true
             }
@@ -383,6 +400,13 @@ public final class PipelineWorker: ObservableObject {
             if t.needScore || t.needTranslate || t.needSummary || t.needTranscribe {
                 out.append(t)
             }
+        }
+        // 更新扫描光标：跳到本轮扫描窗口之后。
+        // 有结果 → 光标到最后一个 id；空结果 → 跳过当前间隙窗口。
+        if let lastRow = rawRows.last {
+            scanCursor = lastRow.id
+        } else {
+            scanCursor += Int64(batchLimit * 5)
         }
         return out
     }
@@ -496,6 +520,17 @@ public final class PipelineWorker: ObservableObject {
             if success { ok += 1 }
         }
         return ok
+    }
+
+    /// 从 DB 刷新待处理/已处理/死信计数，更新 @Published 属性以反映实时状态
+    private func refreshCounts() {
+        guard db.open() else { return }
+        pendingCount = db.scalarInt("""
+            SELECT COUNT(*) FROM content WHERE id > \(watermark)
+            AND fetch_status IN (2,4) AND LENGTH(content_md)>100 AND llm_score IS NULL
+            """) ?? 0
+        processedCount = db.scalarInt("SELECT COUNT(*) FROM content WHERE llm_score IS NOT NULL") ?? 0
+        deadLetterCount = countDeadLetters()
     }
 
     private func fetchEffectivePolicies() -> [Int64: SrcPolicy] {

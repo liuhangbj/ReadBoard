@@ -303,115 +303,43 @@ public struct LLMPane: View {
 // MARK: - 全文抓取
 
 public struct FetchPane: View {
-    @State private var jinaApiKey = UserDefaults.standard.string(forKey: "jina.apiKey") ?? ""
-    @State private var jinaTesting = false
-    @State private var jinaTestResult: String? = nil
-    @State private var jinaProEnabled = UserDefaults.standard.bool(forKey: "jina.pro")
+
     @State private var showDefuddleAlert = false
     @State private var defuddleMissing: [String] = []
 
     public var body: some View {
         Form {
-            Section("全文提取服务（defuddle / Jina Reader）") {
-                Text("defuddle 本地提取失败时，自动 fallback 到 Jina Reader 云端渲染。先走免费档（20 RPM），失败再走付费档。注册送 1000 万 token，按量充值。")
+            // ── defuddle 本地 ──
+            Section("defuddle（本地正文提取）") {
+                Text("基于 Node.js 的本地网页正文提取引擎，无需联网。fetch_engine.js 随 App 打包。")
                     .font(.caption).foregroundStyle(Color.rbText3)
-                Toggle("defuddle 本地提取", isOn: Binding(
-                    get: { UserDefaults.standard.bool(forKey: "defuddle.enabled") },
-                    set: { newValue in
-                        if newValue {
-                            checkDefuddleDeps()
-                        } else {
-                            UserDefaults.standard.set(false, forKey: "defuddle.enabled")
-                        }
-                    }
-                ))
-                .tint(Color.rbAccent)
-                Toggle("Jina Free（免费档 20 RPM）", isOn: Binding(
-                    get: { UserDefaults.standard.bool(forKey: "jina.free") },
-                    set: { UserDefaults.standard.set($0, forKey: "jina.free") }
-                ))
-                .tint(Color.rbAccent)
-                Toggle("Jina Pro（充值 token）", isOn: Binding(
-                    get: { UserDefaults.standard.bool(forKey: "jina.pro") },
-                    set: { newValue in
-                        UserDefaults.standard.set(newValue, forKey: "jina.pro")
-                        jinaProEnabled = newValue
-                    }
-                ))
-                .tint(Color.rbAccent)
-                if jinaProEnabled {
-                    HStack {
-                        Text("Jina API Key")
-                            .frame(width: 96, alignment: .leading)
-                        Spacer()
-                        SecureField("", text: $jinaApiKey)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    .onChange(of: jinaApiKey) { _, v in
-                        UserDefaults.standard.set(v, forKey: "jina.apiKey")
-                    }
-                }
                 HStack {
-                    Button("测试 Jina") {
-                        testJina()
-                    }
-                    .disabled(jinaTesting)
-                    if jinaTesting {
-                        ProgressView().controlSize(.small)
-                    }
-                    if let r = jinaTestResult {
-                        Text(r)
-                            .font(.caption)
-                            .foregroundStyle(r.hasPrefix("OK") ? Color.rbScoreHigh : Color.rbScoreLow)
-                    }
+                    Toggle("启用 defuddle", isOn: Binding(
+                        get: { UserDefaults.standard.bool(forKey: "defuddle.enabled") },
+                        set: { newValue in
+                            if newValue { checkDefuddleDeps() }
+                            else { UserDefaults.standard.set(false, forKey: "defuddle.enabled") }
+                        }
+                    ))
+                    .tint(Color.rbAccent)
+                    Spacer()
+                    Text(UserDefaults.standard.bool(forKey: "defuddle.enabled") ? "已开启" : "已关闭")
+                        .font(.caption).foregroundStyle(Color.rbText3)
                 }
             }
         }
         .formStyle(.grouped)
         .alert("defuddle 依赖缺失", isPresented: $showDefuddleAlert) {
-            Button("自动下载") {
-                installDefuddle()
-            }
+            Button("自动下载") { installDefuddle() }
             Button("关闭", role: .cancel) {
                 UserDefaults.standard.set(false, forKey: "defuddle.enabled")
             }
         } message: {
-            Text("缺少：\(defuddleMissing.joined(separator: "、"))\n\n「自动下载」在项目内 engine 目录运行 npm install 安装 defuddle；「关闭」不使用 defuddle（仅 Jina/摘要）。")
+            Text("缺少：\(defuddleMissing.joined(separator: "、"))\n\n「自动下载」在项目内 engine 目录运行 npm install 安装 defuddle；「关闭」不使用 defuddle。")
         }
     }
 
-    /// 测试 Jina Reader 连通性
-    private func testJina() {
-        jinaTesting = true
-        jinaTestResult = nil
-        let key = jinaApiKey
-        Task {
-            let url = URL(string: "https://r.jina.ai/https://example.com")!
-            var req = URLRequest(url: url)
-            req.setValue("text/plain", forHTTPHeaderField: "Accept")
-            if !key.isEmpty {
-                req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-            }
-            req.timeoutInterval = 15
-            do {
-                let (data, resp) = try await URLSession.shared.data(for: req)
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                let len = String(data: data, encoding: .utf8)?.count ?? 0
-                await MainActor.run {
-                    jinaTestResult = code == 200 ? "OK \(len) 字符" : "HTTP \(code)"
-                    jinaTesting = false
-                }
-            } catch {
-                await MainActor.run {
-                    jinaTestResult = "失败：\(error.localizedDescription)"
-                    jinaTesting = false
-                }
-            }
-        }
-    }
-
-    /// 检测 defuddle 依赖（node + 引擎 fetch_engine.js）
-    /// 路径走 DependencyPaths：用户自定义 > Bundle 资源 > ~/readboard 兜底（与 FullTextFetcher 一致）。
+    /// 检测 defuddle 依赖
     private func checkDefuddleDeps() {
         var missing: [String] = []
         // node
@@ -845,14 +773,12 @@ public struct DepsPane: View {
     @State private var groups: [DependencyGroup] = []
     @ObservedObject private var downloader = ModelDownloader.shared
     @State private var copiedId: String? = nil
-    @State private var customPaths: [String: String] = [:]
+    @State private var installingId: String? = nil
 
     public var body: some View {
         Form {
-            // 按功能分组
             ForEach($groups) { $group in
                 Section {
-                    // 组头：功能名 + 可用状态徽标
                     HStack(spacing: 10) {
                         Image(systemName: group.ready ? "checkmark.seal.fill" : "exclamationmark.octagon.fill")
                             .foregroundStyle(group.ready ? Color.rbScoreHigh : Color.rbScoreMid)
@@ -861,7 +787,7 @@ public struct DepsPane: View {
                             Text(group.title)
                                 .font(.system(size: 15, weight: .semibold))
                                 .foregroundStyle(Color.rbText)
-                            Text(group.ready ? "✅ 该功能可用" : "⛔ 该功能不可用——完成上方缺失依赖")
+                            Text(group.ready ? "✅ 该功能可用" : "⛔ 该功能不可用——完成下方缺失依赖")
                                 .font(.caption)
                                 .foregroundStyle(group.ready ? Color.rbScoreHigh : Color.rbScoreMid)
                         }
@@ -870,13 +796,11 @@ public struct DepsPane: View {
                     .padding(.vertical, 4)
 
                     Text(group.description)
-                        .font(.caption)
-                        .foregroundStyle(Color.rbText3)
-                        .padding(.bottom, 4)
+                        .font(.caption).foregroundStyle(Color.rbText3).padding(.bottom, 4)
 
-                    // 组内每个依赖：状态 + 自动检测 + 自定义
                     ForEach($group.items) { $item in
                         VStack(alignment: .leading, spacing: 6) {
+                            // 缩进视觉层级
                             HStack(spacing: 10) {
                                 Image(systemName: item.installed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                                     .foregroundStyle(item.installed ? Color.rbScoreHigh : Color.rbScoreLow)
@@ -885,46 +809,92 @@ public struct DepsPane: View {
                                     Text(item.displayName)
                                         .font(.system(size: 13, weight: .semibold))
                                         .foregroundStyle(Color.rbText)
+                                    if item.installed, let v = item.version, !v.isEmpty {
+                                        Text(v).font(.caption).foregroundStyle(Color.rbText2)
+                                            .lineLimit(1).truncationMode(.middle)
+                                    }
                                     Text(item.installed ? item.path : item.installHint)
                                         .font(.caption)
-                                        .foregroundStyle(item.installed ? Color.rbText2 : Color.rbText3)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
+                                        .foregroundStyle(item.installed ? Color.rbText3 : Color.rbText3)
+                                        .lineLimit(1).truncationMode(.middle)
                                 }
                                 Spacer()
-                                // 未找到时：复制安装命令 / 自动下载
-                                if !item.installed {
-                                    if let cmd = item.installCommand {
-                                        Button(copiedId == item.id ? "已复制" : "复制命令") {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString(cmd, forType: .string)
-                                            copiedId = item.id
-                                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                                                if copiedId == item.id { copiedId = nil }
+                                // whisper 模型特殊处理优先——有 installCommand 但走下载/下拉，不是复制命令
+                                if item.id == DependencyPaths.Kind.whisperModel.rawValue {
+                                    if item.installed {
+                                        Menu {
+                                            ForEach([item.path] + item.alternatePaths, id: \.self) { p in
+                                                Button((p as NSString).lastPathComponent) {
+                                                    DependencyPaths.setCustom(.whisperModel, p)
+                                                    redetect()
+                                                }
                                             }
+                                        } label: {
+                                            Label("模型", systemImage: "cpu")
                                         }
+                                        .menuStyle(.borderlessButton)
                                         .controlSize(.small)
-                                    } else if item.id == DependencyPaths.Kind.whisperModel.rawValue {
-                                        Button(downloader.isDownloading ? "下载中…" : "自动下载") {
+                                        .fixedSize()
+                                        Button("重下载") {
                                             Task { await downloader.download() }
                                         }
                                         .controlSize(.small)
                                         .disabled(downloader.isDownloading)
+                                    } else {
+                                        Button(downloader.isDownloading ? "下载中…" : "自动下载") {
+                                            Task { await downloader.download() }
+                                        }
+                                        .controlSize(.small).disabled(downloader.isDownloading)
                                     }
+                                } else if let cmd = item.installCommand {
+                                    Button(copiedId == item.id ? "已复制" : "复制命令") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(cmd, forType: .string)
+                                        copiedId = item.id
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                            if copiedId == item.id { copiedId = nil }
+                                        }
+                                    }
+                                    .controlSize(.small)
                                 }
                             }
 
-                            // 该依赖的两个操作按钮：自动检测 / 自定义
                             HStack(spacing: 8) {
-                                Button {
-                                    // 自动检测：清掉自定义回到自动探测，再刷新该组
-                                    DependencyPaths.setCustom(DependencyPaths.Kind(rawValue: item.id) ?? .node, "")
-                                    customPaths[item.id] = ""
-                                    redetect()
-                                } label: {
+                                Button { redetect() } label: {
                                     Label("自动检测", systemImage: "magnifyingglass")
                                 }
                                 .controlSize(.small)
+
+                                // 一键安装（未安装可用，已安装灰掉）
+                                if let cmd = item.installCommand {
+                                    Button {
+                                        if cmd.hasPrefix("readboard:") {
+                                            handleSpecialInstall(cmd, id: item.id)
+                                        } else {
+                                            installDependency(cmd, id: item.id)
+                                        }
+                                    } label: {
+                                        Label(item.installed ? "已安装" : "一键安装",
+                                              systemImage: item.installed ? "checkmark" : "arrow.down.to.line")
+                                    }
+                                    .controlSize(.small)
+                                    .disabled(item.installed || installingId == item.id)
+                                }
+
+                                // 更新（已安装且有升级命令时显示）
+                                if item.installed, let ucmd = item.upgradeCommand {
+                                    Button {
+                                        if ucmd.hasPrefix("readboard:") {
+                                            handleSpecialInstall(ucmd, id: item.id + "-upgrade")
+                                        } else {
+                                            installDependency(ucmd, id: item.id + "-upgrade")
+                                        }
+                                    } label: {
+                                        Label("更新", systemImage: "arrow.triangle.2.circlepath")
+                                    }
+                                    .controlSize(.small)
+                                    .disabled(installingId == item.id + "-upgrade")
+                                }
 
                                 Button {
                                     pickDependencyPath(DependencyPaths.Kind(rawValue: item.id) ?? .node)
@@ -939,10 +909,10 @@ public struct DepsPane: View {
                                     .foregroundStyle(item.installed ? Color.rbScoreHigh : Color.rbScoreLow)
                             }
                         }
-                        .padding(.vertical, 4)
+                        .padding(.leading, 16)
+                        .padding(.bottom, 4)
                     }
 
-                    // 模型下载进度（转录组）
                     if group.id == "transcribe",
                        downloader.isDownloading || !downloader.statusText.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
@@ -951,8 +921,7 @@ public struct DepsPane: View {
                             } else {
                                 ProgressView()
                             }
-                            Text(downloader.statusText)
-                                .font(.caption).foregroundStyle(Color.rbText3)
+                            Text(downloader.statusText).font(.caption).foregroundStyle(Color.rbText3)
                             if let err = downloader.errorMessage {
                                 Text(err).font(.caption).foregroundStyle(Color.rbScoreLow)
                             }
@@ -961,71 +930,62 @@ public struct DepsPane: View {
                     }
                 }
             }
-
-            // 自定义路径汇总（留空 = 自动探测）
-            Section("自定义路径（留空 = 自动探测 PATH / Bundle 资源 / 常见位置）") {
-                ForEach(DependencyPaths.Kind.allCases) { kind in
-                    HStack {
-                        Text(kind.displayName)
-                            .frame(width: 200, alignment: .leading)
-                        Text(customPaths[kind.rawValue].isNilOrEmpty ? "自动探测" : (customPaths[kind.rawValue] ?? ""))
-                            .font(.caption)
-                            .foregroundStyle(customPaths[kind.rawValue].isNilOrEmpty ? Color.rbText3 : Color.rbText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        if DependencyPaths.isCustomStale(kind) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(Color.rbScoreMid)
-                                .help("该路径已失效（文件不存在），请修正或清除回自动探测")
-                        }
-                        Button("选择…") { pickDependencyPath(kind) }
-                            .controlSize(.small)
-                        if !customPaths[kind.rawValue].isNilOrEmpty {
-                            Button("清除") {
-                                customPaths[kind.rawValue] = ""
-                                DependencyPaths.setCustom(kind, "")
-                                redetect()
-                            }
-                            .controlSize(.small)
-                            .buttonStyle(.quiet)
-                        }
-                    }
-                }
-                Text("改动即时生效，点击上方功能的「自动检测」或本段「清除」即重新探测。")
-                    .font(.caption).foregroundStyle(Color.rbText3)
-            }
         }
         .formStyle(.grouped)
         .onAppear { redetect() }
     }
 
-    /// 重新探测所有依赖并刷新各组
+    /// 强制重检测所有依赖（清除缓存重新 resolve）
     private func redetect() {
         groups = DependencyChecker.shared.checkAllGroups()
-        for kind in DependencyPaths.Kind.allCases {
-            customPaths[kind.rawValue] = UserDefaults.standard.string(forKey: kind.defaultsKey) ?? ""
+    }
+
+    /// 处理特殊安装命令（模型下载、重下载等）
+
+    /// 处理特殊安装命令（模型下载等）
+    private func handleSpecialInstall(_ cmd: String, id: String) {
+        if cmd == "readboard:model-download" || cmd == "readboard:model-redownload" {
+            installingId = id
+            Task {
+                await downloader.download()
+                await MainActor.run {
+                    installingId = nil
+                    redetect()
+                }
+            }
         }
     }
 
-    /// 系统文件选择器选依赖路径（whisper-cli/ffmpeg/yt-dlp/node/模型/defuddle 引擎）
+    /// 一键安装：在终端里跑 brew install / pip install
+    private func installDependency(_ cmd: String, id: String) {
+        installingId = id
+        Task.detached {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            proc.arguments = ["-l", "-c", cmd]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            try? proc.run()
+            proc.waitUntilExit()
+            await MainActor.run {
+                installingId = nil
+                redetect()
+            }
+        }
+    }
+
     private func pickDependencyPath(_ kind: DependencyPaths.Kind) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
-        panel.canChooseDirectories = (kind == .defuddleEngine)  // 引擎允许选整个 engine 目录？保持选文件更稳
+        panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.prompt = "选择"
         panel.message = "选择 \(kind.displayName)（留空则自动探测）"
         if panel.runModal() == .OK, let url = panel.url {
-            customPaths[kind.rawValue] = url.path
             DependencyPaths.setCustom(kind, url.path)
             redetect()
         }
     }
-}
-
-private extension Optional where Wrapped == String {
-    var isNilOrEmpty: Bool { self?.isEmpty ?? true }
 }
 
 // MARK: - 功能板块

@@ -3,6 +3,9 @@ import SwiftUI
 // 入口在 Sources/ReadBoardMain/main.swift（独立 mini-target，库本身无 @main 以便测试链接）
 public struct ReadBoardApp: App {
     public init() {
+        // SIGPIPE：URLSession 在受限网络环境（沙箱/VPN/proxy）下写已断开的 socket 会触发，
+        // 默认信号处理直接杀进程。设为 SIG_IGN 让系统调用返回 EPIPE 错误码而非崩溃。
+        signal(SIGPIPE, SIG_IGN)
         // 追踪日志：路径打出来，运行期可在控制台/文件查（UserDefaults readboard.trace 控级别，
         // off/error/warn/info/debug，默认 info）。排查阅读页卡死/内存爆炸用。
         let lvl = UserDefaults.standard.string(forKey: "readboard.trace") ?? "info"

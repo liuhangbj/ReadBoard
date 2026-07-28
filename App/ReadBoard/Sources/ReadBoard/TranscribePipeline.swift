@@ -71,14 +71,14 @@ public final class TranscribePipeline: @unchecked Sendable {
             guard !text.isEmpty else { throw TranscribeError.emptyTranscript }
 
             // 4. 非中文 → LLM 生成「中英文对照」版本（碎句合并成通顺段落+逐段对照）。
-            //    中文转录稿直接用（无需对照）。对照版存 llm_translated_md。
+            //    中文转录稿直接用（无需对照）。对照版存 llm_transcript_md。
             if lang != "zh", llm.isAvailable, let bilingual = await llm.translateBilingual(text) {
                 text = bilingual
             }
 
-            // 5. 写库：中英文对照稿进 llm_translated_md
+            // 5. 写库：中英文对照稿进 llm_transcript_md（独立转录字段）
             let ok = db.execute(
-                "UPDATE content SET llm_translated_md = ?, llm_processed_at = datetime('now') WHERE id = ?",
+                "UPDATE content SET llm_transcript_md = ?, llm_processed_at = datetime('now') WHERE id = ?",
                 params: [text, contentId])
             // 6. 转录稿自动补一段摘要（媒体内容没有正文，评分/摘要以转录稿为准）
             if ok, llm.isAvailable,

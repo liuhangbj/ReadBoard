@@ -7,21 +7,17 @@ import Foundation
 //   cdp        — 需要浏览器渲染(Chrome CDP/微信绕过)。暂未收编——engine 返回 NEEDS_CDP 退出码 3，降级 summary
 //   summary    — 抓不到全文, 只留摘要
 // 执行时按 mode 走对应路径, 结果写 content_md + fetch_status + fetch_engine。
-// 抓取引擎：Resources/engine/fetch_engine.js（自包含，defuddle+Jina，node_modules 随 App 打包）
+// 抓取引擎：Resources/engine/fetch_engine.js（defuddle + node_modules 随 App 打包）
 
 public enum FetchMode: String, CaseIterable, Sendable {
     case feedFull = "feed_full"
     case defuddle = "defuddle"
-    case jinaFree = "jina_free"
-    case jinaPro = "jina_pro"
     case summary = "summary"
 
     var displayName: String {
         switch self {
         case .feedFull: return "feed 自带全文"
         case .defuddle: return "defuddle 本地"
-        case .jinaFree: return "Jina Free"
-        case .jinaPro: return "Jina Pro"
         case .summary: return "仅摘要"
         }
     }
@@ -30,8 +26,8 @@ public enum FetchMode: String, CaseIterable, Sendable {
 extension FullTextFetcher {
     /// 引擎 tag（fetch_engine.js 输出）→ fetch_engine 记录值。tag 与 FetchMode rawValue 一致，直接用。
     static func mapEngineTag(_ tag: String?) -> String? {
-        guard let tag, !tag.isEmpty else { return nil }
-        return FetchMode(rawValue: tag) != nil ? tag : nil
+        guard let tag, !tag.isEmpty, tag.hasPrefix("defuddle") || tag == "feed_full" || tag == "summary" else { return nil }
+        return tag
     }
     /// 引擎 tag → FetchMode
     static func fetchMode(forEngineTag tag: String) -> FetchMode? {
@@ -65,11 +61,11 @@ public final class FullTextFetcher: @unchecked Sendable {
     ///
     /// 逻辑（与你的理解一致）：
     ///   1. feed 自带全文（content_html 够长）→ feedFull，直接 html 转 md
-    ///   2. 否则调 engine 抓原页——内部按域名路由（虎嗅预处理 / defuddle 直连 / Jina 兜底），
+    ///   2. 否则调 engine 抓原页——defuddle 本地提取，
     ///      需 CDP 的源（微信/cubox/jiqizhixin）返回 NEEDS_CDP 退出码 3 → 降级 summary
     ///   3. 都抓不到 → summary 兜底（留 feed 摘要）
     /// 自动检测该源最高优先级的全文获取模式——确定后记录，后续固定用该模式
-    /// 优先级：feed 自带全文 → defuddle → Jina Free → Jina Pro → feed 摘要
+    /// 优先级：feed 自带全文 → defuddle → feed 摘要
     func probeMode(feedUrl: String) async -> FetchMode {
         guard let feed = try? await FeedFetcher.fetch(urlString: feedUrl) else {
             return .summary
@@ -82,45 +78,30 @@ public final class FullTextFetcher: @unchecked Sendable {
         let samples = Array(feed.entries.prefix(2))
         guard !samples.isEmpty else { return .summary }
 
-        // 播客 / 视频：feed 不提供可读文本，只有音频/视频，不应误判为全文。
-        // 直接显示"摘要"（= 留 feed 自带的 show notes / 简介），不跑 feedFull 探测。
-        if feed.kind != .article {
+        // 播客：feed 不提供可读文本，只有音频，不应误判为全文。
+        // 直接显示"摘要"（= 留 feed 自带的 show notes / 简介），不跑 defuddle 探测。
+        if feed.kind == .podcast {
             return .summary
+        }
+
+        // YouTube（video）：feed 同样不提供可读文本，但「可获取全文」靠视频页抓字幕 +
+        // 转录管线，而非 feed 自带。旧逻辑 `kind != .article` 一刀切把 YouTube 也判成
+        // summary，导致自动检测永远"仅摘要"退化、没法用 defuddle。这里明确改成返回
+        // .defuddle——标记该源走 defuddle 抓取（对视频页抓标题/简介，再交转录管线出稿），
+        // 而不是"仅摘要"终态。（不进下面的实时 defuddle 网络探测：视频页正文价值低，
+        // 且重新检测时对每篇跑 defuddle 既慢又多半空手而归）
+        if feed.kind == .video {
+            return .defuddle
         }
 
         // 第 1 级：feed 自带全文?
         let feedLongEnough = samples.contains { $0.html.count >= fullTextMinChars }
         if feedLongEnough { return .feedFull }
 
-        // 第 2 级：defuddle 本地提取（引擎内部可能 fallback 到 Jina——用真实引擎标记模式）
+        // 第 2 级：defuddle 本地提取
         for entry in samples where !entry.url.isEmpty {
-            let (md, realEngine) = runCLI(mode: "url", input: entry.url)
-            if let md, md.count >= fullTextMinChars {
-                // 真实引擎是 Jina Free/Pro 时直接返回对应模式——源管理显示真实抓取路径
-                if let realEngine, let realMode = Self.fetchMode(forEngineTag: realEngine) {
-                    return realMode
-                }
-                return .defuddle
-            }
-        }
-
-        // 第 3 级：Jina Free（开关控制）
-        if UserDefaults.standard.bool(forKey: "jina.free") {
-            for entry in samples where !entry.url.isEmpty {
-                if let md = runJina(url: entry.url, usePro: false), md.count >= fullTextMinChars {
-                    return .jinaFree
-                }
-            }
-        }
-
-        // 第 4 级：Jina Pro（开关控制 + 有 key）
-        if UserDefaults.standard.bool(forKey: "jina.pro"),
-           let key = UserDefaults.standard.string(forKey: "jina.apiKey"), !key.isEmpty {
-            for entry in samples where !entry.url.isEmpty {
-                if let md = runJina(url: entry.url, usePro: true), md.count >= fullTextMinChars {
-                    return .jinaPro
-                }
-            }
+            let (md, _) = runCLI(mode: "url", input: entry.url)
+            if let md, md.count >= fullTextMinChars { return .defuddle }
         }
 
         // 兜底：feed 摘要
@@ -130,7 +111,7 @@ public final class FullTextFetcher: @unchecked Sendable {
     // MARK: 执行
 
     /// 按 mode 抓全文并写入 content_md / fetch_status / fetch_engine。
-    /// 失败时自动降级到下一级模式（defuddle→Jina Free→Jina Pro→summary）。
+    /// 失败时自动降级到下一级模式（defuddle→summary）。
     /// 降级成功后更新源的 fetch_mode——下次直接用降级后的模式，不再重复失败。
     /// 返回是否成功拿到全文。
     @discardableResult
@@ -187,29 +168,13 @@ public final class FullTextFetcher: @unchecked Sendable {
                 markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
                 return false
             }
-            // 用引擎回传的真实抓取引擎记录——defuddle 内部可能走了 Jina Free/Pro
+            // 用引擎回传的真实抓取引擎记录
             let actualEngine = Self.mapEngineTag(realEngine) ?? mode.rawValue
             storeMd(contentId: contentId, md: md, engine: actualEngine)
             // 真实引擎与调用模式不同（内部降级）——回写源的 fetch_mode，下次直接用真实引擎
             if let realEngine, let realMode = Self.fetchMode(forEngineTag: realEngine), realMode != mode {
                 updateSourceFetchMode(contentId: contentId, newMode: realMode)
             }
-            return true
-
-        case .jinaFree:
-            guard !url.isEmpty, let md = runJina(url: url, usePro: false), md.count >= 40 else {
-                markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
-                return false
-            }
-            storeMd(contentId: contentId, md: md, engine: mode.rawValue)
-            return true
-
-        case .jinaPro:
-            guard !url.isEmpty, let md = runJina(url: url, usePro: true), md.count >= 40 else {
-                markFetched(contentId: contentId, ok: false, engine: mode.rawValue)
-                return false
-            }
-            storeMd(contentId: contentId, md: md, engine: mode.rawValue)
             return true
 
         case .summary:
@@ -223,17 +188,7 @@ public final class FullTextFetcher: @unchecked Sendable {
     private func nextFallbackMode(after mode: FetchMode) -> FetchMode? {
         switch mode {
         case .feedFull: return .defuddle
-        case .defuddle:
-            // defuddle 失败 → Jina Free（开了才走）→ Jina Pro（开了才走）→ summary
-            if UserDefaults.standard.bool(forKey: "jina.free") { return .jinaFree }
-            if UserDefaults.standard.bool(forKey: "jina.pro"),
-               let key = UserDefaults.standard.string(forKey: "jina.apiKey"), !key.isEmpty { return .jinaPro }
-            return .summary
-        case .jinaFree:
-            if UserDefaults.standard.bool(forKey: "jina.pro"),
-               let key = UserDefaults.standard.string(forKey: "jina.apiKey"), !key.isEmpty { return .jinaPro }
-            return .summary
-        case .jinaPro: return .summary
+        case .defuddle: return .summary
         case .summary: return nil
         }
     }
@@ -303,22 +258,9 @@ public final class FullTextFetcher: @unchecked Sendable {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: nodeBin)
         proc.arguments = args
-        // 传 Jina 配置给 fetch_engine.js
         var env = ProcessInfo.processInfo.environment
-        // node 路径——fetch_engine 用它调 defuddle CLI（保持与 App 解析的一致）
         env["READBOARD_NODE_BIN"] = nodeBin
-        // Jina Free 开关（默认关——免费档 20 RPM，不能所有源都走）
-        if UserDefaults.standard.bool(forKey: "jina.free") {
-            env["JINA_FREE_ENABLED"] = "1"
-        }
-        // Jina Pro key（仅 Pro 开启且有 key 时传）
-        if UserDefaults.standard.bool(forKey: "jina.pro"),
-           let jinaKey = UserDefaults.standard.string(forKey: "jina.apiKey"), !jinaKey.isEmpty {
-            env["JINA_API_KEY"] = jinaKey
-        }
-        if env["JINA_FREE_ENABLED"] != nil || env["JINA_API_KEY"] != nil {
-            proc.environment = env
-        }
+        proc.environment = env
         let outPipe = Pipe()
         let errPipe = Pipe()
         proc.standardOutput = outPipe
@@ -352,8 +294,14 @@ public final class FullTextFetcher: @unchecked Sendable {
 
         do {
             try proc.run()
-            if let stdinData {
-                inPipe.fileHandleForWriting.write(stdinData)
+            if let stdinData, proc.isRunning {
+                // 安全写 stdin：子进程可能在写之前就退出了 → pipe 断开 → write 抛
+                // NSFileHandleOperationException（ObjC 异常，Swift do-catch 抓不住 → 崩溃）。
+                // 用 POSIX write() 替代——失败返回 -1 而非抛异常。
+                let fd = inPipe.fileHandleForWriting.fileDescriptor
+                stdinData.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
+                    _ = write(fd, buf.baseAddress, buf.count)
+                }
                 inPipe.fileHandleForWriting.closeFile()
             }
         } catch {
@@ -388,7 +336,7 @@ public final class FullTextFetcher: @unchecked Sendable {
             return (nil, nil)
         }
         // 从 stderr 解析真实抓取引擎（fetch_engine.js url 模式输出 RB_FETCH_ENGINE:xxx）
-        // ——引擎内部 fallback 后，标签要反映真实路径（识别哪些源在烧 Jina token）
+        // ——引擎内部 fallback 后，标签要反映真实路径
         var realEngine: String? = nil
         if let errStr = String(data: errData, encoding: .utf8) {
             for line in errStr.split(separator: "\n") where line.hasPrefix("RB_FETCH_ENGINE:") {
@@ -398,72 +346,7 @@ public final class FullTextFetcher: @unchecked Sendable {
         return (String(data: outData, encoding: .utf8), realEngine)
     }
 
-    /// 直接调 Jina Reader（不经过 clip_core 的 fallback 链）——jinaFree/jinaPro 模式用
-    private func runJina(url: String, usePro: Bool) -> String? {
-        let jinaUrl = "https://r.jina.ai/" + url
-        var request = URLRequest(url: URL(string: jinaUrl)!)
-        request.setValue("text/plain", forHTTPHeaderField: "Accept")
-        // 只保留链接文本，去掉 URL——导航链接变纯文本不占篇幅
-        request.setValue("text", forHTTPHeaderField: "x-retain-links")
-        // 延长超时——让 Jina 加载更多内容（展开按钮/懒加载）
-        request.setValue("30", forHTTPHeaderField: "x-timeout")
-        // 移除导航/广告/页脚——按通用选择器
-        request.setValue("nav, footer, .sidebar, .ads, header, .advertisement, .social-share, .newsletter-signup", forHTTPHeaderField: "x-remove-selector")
-        if usePro, let key = UserDefaults.standard.string(forKey: "jina.apiKey"), !key.isEmpty {
-            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        }
-        request.timeoutInterval = 45
-        guard let (data, response) = try? URLSession.shared.syncDataTask(with: request),
-              let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200,
-              let text = String(data: data, encoding: .utf8), text.count >= 50 else {
-            return nil
-        }
-        // CAPTCHA/验证页检测——Jina 返回错误页不算成功
-        let lower = text.lowercased()
-        if lower.contains("access to this page has been denied")
-            || lower.contains("press & hold to confirm")
-            || lower.contains("captcha")
-            || lower.contains("please make sure you are authorized") {
-            return nil
-        }
-        // 清洗 Jina 返回——去掉导航/推荐链接段落（[text](url) 且 text < 50 字符的段落）
-        let cleaned = Self.cleanJinaMarkdown(text)
-        return cleaned.count >= 50 ? cleaned : nil
-    }
 
-    /// 清洗 Jina 返回的 markdown——去掉导航栏、推荐链接、订阅按钮等噪音段落
-    /// 规则：段落全是链接（[text](url) 格式）且链接文本 < 50 字符 → 噪音
-    private static func cleanJinaMarkdown(_ md: String) -> String {
-        let paragraphs = md.components(separatedBy: "\n\n")
-        var cleaned: [String] = []
-        for para in paragraphs {
-            let trimmed = para.trimmingCharacters(in: .whitespacesAndNewlines)
-            // 空段落跳过
-            if trimmed.isEmpty { continue }
-            // 全是链接的段落（导航/推荐）——链接文本 < 50 字符
-            let linkPattern = #"\[([^\]]{1,50})\]\([^)]+\)"#
-            let regex = try! NSRegularExpression(pattern: linkPattern)
-            let range = NSRange(trimmed.startIndex..., in: trimmed)
-            let matches = regex.matches(in: trimmed, range: range)
-            var linkTextLen = 0
-            for match in matches {
-                if let r = Range(match.range(at: 1), in: trimmed) {
-                    linkTextLen += trimmed[r].count
-                }
-            }
-            // 段落长度和链接文本长度接近 → 全是链接，噪音
-            if Double(linkTextLen) / Double(trimmed.count) > 0.8, trimmed.count < 500 {
-                continue
-            }
-            // 订阅/导航关键词
-            let navKeywords = ["subscribe", "sign in", "log in", "menu", "navigation"]
-            if navKeywords.contains(where: { trimmed.lowercased().contains($0) }), trimmed.count < 200 {
-                continue
-            }
-            cleaned.append(trimmed)
-        }
-        return cleaned.joined(separator: "\n\n")
-    }
 }
 
 // MARK: - 批量重抓全文（右键菜单调用）
@@ -520,7 +403,7 @@ extension FullTextFetcher {
     }
 }
 
-// MARK: - URLSession 同步请求扩展（Jina 用）
+// MARK: - URLSession 同步请求扩展
 
 extension URLSession {
     func syncDataTask(with request: URLRequest) throws -> (Data, URLResponse)? {

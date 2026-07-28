@@ -365,28 +365,76 @@ struct MarkdownBodyView: View {
     let fontSize: Double
     let lineSpacing: Double
 
-    @State private var blocks: [MdBlock] = []
+    // 渲染单元：把「连续的纯段落」聚合成单个 Text，使其可被一次拖选跨多段；
+    // 标题/列表/引用/代码/图片/元信息保留独立 block 渲染（各有视觉容器，不该跨选）。
+    // ⚠️ 安全性（对照 07-27 崩溃潮教训）：仍用数组下标 id —— 绝不用 MdBlock.id
+    // （其 `var id: UUID { UUID() }` 每次新值 → 全量重建崩溃）。合并只在 .task 算一次，
+    // 绝不进 body，也不引入任何在视图更新期写的 @State。
+    private struct RenderUnit {
+        let index: Int                          // 在 units 中的稳定下标（= 渲染顺序）
+        let blocks: [MdBlock]                   // 1 个独立 block，或若干连续段落
+        var isMergedParagraph: Bool { blocks.count > 1 }
+    }
+
+    @State private var units: [RenderUnit] = []
 
     private var p: ThemePalette { theme.palette(for: mode) }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(blocks) { block in
-                blockView(block)
+    /// 由 parse 结果构建渲染单元：连续 paragraph 合并，其余保持单行。
+    /// 纯函数、无副作用，仅在 .task 中执行一次（绝不进 body，避免渲染风暴）。
+    private static func buildUnits(_ blocks: [MdBlock]) -> [RenderUnit] {
+        var out: [RenderUnit] = []
+        var buf: [MdBlock] = []
+        for b in blocks {
+            if case .paragraph = b {
+                buf.append(b)
+            } else {
+                if !buf.isEmpty { out.append(RenderUnit(index: out.count, blocks: buf)); buf = [] }
+                out.append(RenderUnit(index: out.count, blocks: [b]))
             }
         }
-        // ⚠️ 恢复 f269c64 稳定设计（13:45 对照 git 历史定案）：
-        // 后台解析 + @State 写回——这是 07-26 全天不崩的版本。
-        // 07-26 深夜改为「init 主线程同步 parse + eager 全量排版」后，
-        // 每次视图重建都主线程全量解析+全量排版，渲染风暴升级成 07-27 的崩溃潮。
-        // 切标签卡顿的真根因是通知回调"视图更新中发布"（已在 ContentViewModel 修复），
-        // 不是这里的异步占位——切勿再走回同步 init 老路。
+        if !buf.isEmpty { out.append(RenderUnit(index: out.count, blocks: buf)) }
+        return out
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // 下标 id：同一位置单元身份稳定，body 重算不重建 → 选区/图片状态保留
+            ForEach(units.indices, id: \.self) { i in
+                let u = units[i]
+                if u.isMergedParagraph {
+                    // 合并段落：单个 Text —— 可一次跨段拖选
+                    Text(attributedMergedParagraph(u.blocks))
+                        .font(fontChoice.font(size: fontSize))
+                        .lineSpacing(lineSpacing)
+                        .foregroundStyle(p.text)
+                } else {
+                    blockView(u.blocks[0])
+                }
+            }
+        }
+        // ⚠️ 后台解析 + @State 写回（f269c64 稳定设计）：切勿改回 init 同步 parse，
+        // 那会引发渲染风暴并升级成崩溃潮。
         .task(id: markdown) {
             let parsed = await Task.detached(priority: .userInitiated) {
                 MarkdownRenderer.parse(markdown)
             }.value
-            blocks = parsed
+            units = Self.buildUnits(parsed)
         }
+    }
+
+    /// 把若干段落拼成单个 AttributedString（段落间空一行），供一次跨段拖选。
+    /// inline() 已为每个 run 设好 font/颜色（加粗、行内代码、链接），此处的 .font/.lineSpacing
+    /// 只作用于未显式设属性的 run，不会覆盖行内样式。
+    private func attributedMergedParagraph(_ blocks: [MdBlock]) -> AttributedString {
+        var result = AttributedString()
+        for (idx, b) in blocks.enumerated() {
+            if case .paragraph(let text) = b {
+                if idx > 0 { result.append(AttributedString("\n\n")) }
+                result.append(MarkdownRenderer.inline(text, palette: p, fontSize: fontSize))
+            }
+        }
+        return result
     }
 
     @ViewBuilder

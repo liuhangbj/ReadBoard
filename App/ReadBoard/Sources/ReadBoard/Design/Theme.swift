@@ -29,6 +29,8 @@ extension Color {
     static let rbStar      = RB.C.star
     static let rbSummary   = RB.C.summary
     static let rbTranslate = RB.C.translate
+    // 三态筛选「未处理」淡粉高亮（语义：反选/排除）。用动态色字面量，明暗自动适配
+    static let rbPink      = Color.pink
 }
 
 extension View {
