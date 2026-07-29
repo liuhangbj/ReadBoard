@@ -22,8 +22,6 @@ public struct ExportRulePane: View {
                 } label: { Label("新建规则", systemImage: "plus") }.buttonStyle(.primaryCapsule)
             }.padding(.horizontal, 20).padding(.vertical, 14)
             Hairline()
-            platformConfigSection.padding(.horizontal, 20).padding(.vertical, 12)
-            Hairline()
             if rules.isEmpty {
                 ContentUnavailableView("还没有导出规则", systemImage: "square.and.arrow.up", description: Text("新建一条规则：按条件把内容自动导出到 Obsidian 或 Webhook。"))
             } else {
@@ -51,7 +49,7 @@ public struct ExportRulePane: View {
             Toggle("", isOn: Binding(get: { rule.enabled }, set: { on in var r = rule; r.enabled = on; _ = ExportService.shared.saveRule(r); reload() })).labelsHidden().controlSize(.small).tint(Color.rbAccent)
             VStack(alignment: .leading, spacing: 3) {
                 Text(rule.name.isEmpty ? "未命名" : rule.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.rbText)
-                Text("\(rule.triggerDisplay) → \(rule.targetDisplay)").font(.caption).foregroundStyle(Color.rbText2)
+                Text("\(rule.triggerDisplay) → \(rule.targetDisplay)").font(.callout).foregroundStyle(Color.rbText2)
                 Text(statsText(for: rule.id)).font(.caption2.monospacedDigit()).foregroundStyle(Color.rbText3)
             }
             Spacer()
@@ -66,19 +64,6 @@ public struct ExportRulePane: View {
 }
 
 // MARK: - 平台配置区
-
-private var platformConfigSection: some View {
-    VStack(alignment: .leading, spacing: 12) {
-        Text("导出平台配置").font(.system(size: 14, weight: .semibold))
-        HStack { Text("Obsidian Vault").frame(width: 120, alignment: .leading); Text(ExportPlatformConfig.shared.obsidianDir.isEmpty ? "未设置目录" : ExportPlatformConfig.shared.obsidianDir).font(.caption).foregroundStyle(Color.rbText3).lineLimit(1).truncationMode(.middle); Spacer(); Button("选择…") { pickObsidianDir() }.controlSize(.small) }
-        HStack { Text("Webhook URL").frame(width: 120, alignment: .leading); TextField("https://...", text: Binding(get: { ExportPlatformConfig.shared.webhookURL }, set: { ExportPlatformConfig.shared.webhookURL = $0 })).textFieldStyle(.roundedBorder).font(.caption) }
-    }
-}
-
-private func pickObsidianDir() {
-    let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
-    if panel.runModal() == .OK, let url = panel.url { ExportPlatformConfig.shared.obsidianDir = url.path }
-}
 
 // MARK: - 规则编辑表单
 
@@ -182,14 +167,35 @@ public struct ExportRuleEditor: View {
                         }.tint(Color.rbAccent)
                     }
                     Section("Frontmatter 字段") {
-                        VStack(alignment: .leading, spacing: 6) {
+                        let columns: [GridItem] = [
+                            GridItem(.fixed(120), spacing: 8, alignment: .leading),
+                            GridItem(.fixed(120), spacing: 8, alignment: .leading),
+                            GridItem(.fixed(46), spacing: 50, alignment: .center),
+                            GridItem(.fixed(140), spacing: 0, alignment: .leading)
+                        ]
+                        VStack(spacing: 1) {
+                            // 表头
+                            LazyVGrid(columns: columns, spacing: 0) {
+                                Text("数据项").font(.callout).foregroundStyle(Color.rbText3)
+                                Text("字段名").font(.callout).foregroundStyle(Color.rbText3)
+                                Text("开关").font(.callout).foregroundStyle(Color.rbText3)
+                                Text("导出字段名").font(.callout).foregroundStyle(Color.rbText3).padding(.leading, 8)
+                            }.padding(.horizontal, 4).padding(.vertical, 5)
+                            Divider()
                             ForEach(allFFields, id: \.self) { field in
-                                HStack(spacing: 8) {
-                                    Toggle(fLabels[field] ?? field, isOn: fBind(field)).tint(Color.rbAccent).font(.caption).frame(width: 130, alignment: .leading)
+                                LazyVGrid(columns: columns, spacing: 0) {
+                                    Text(fLabels[field] ?? field).font(.callout).foregroundStyle(Color.rbText)
+                                    Text(field).font(.caption.monospaced()).foregroundStyle(Color.rbText3)
+                                    Toggle("", isOn: fBind(field)).tint(Color.rbAccent).labelsHidden()
                                     if selectedFrontmatterFields.contains(field) {
-                                        TextField("字段名", text: lBind(field)).textFieldStyle(.roundedBorder).font(.caption).frame(width: 100)
+                                        TextField("", text: lBind(field)).textFieldStyle(.plain).font(.callout)
+                                            .padding(.horizontal, 8).padding(.vertical, 3)
+                                            .background(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.3)))
+                                    } else {
+                                        Color.clear.frame(height: 1)
                                     }
-                                }
+                                }.padding(.horizontal, 4).padding(.vertical, 4)
+                                Divider()
                             }
                         }
                     }
@@ -298,7 +304,7 @@ private struct ExportRulePreviewView: View {
             HStack{Text("导出预览").font(.headline);Spacer();Button("完成"){dismiss()}.keyboardShortcut(.defaultAction)}
             Text("共匹配 \(preview.matchingCount) 条，预览不写文件。").foregroundStyle(Color.rbText2)
             if preview.samples.isEmpty { ContentUnavailableView("没有匹配内容", systemImage: "doc.text.magnifyingglass") }
-            else { List(preview.samples, id:\.contentId){s in VStack(alignment:.leading, spacing:5){Text(s.title).font(.system(size:13,weight:.semibold)); if let i=s.issue{Text(i).font(.caption).foregroundStyle(Color.rbScoreLow)} else if let d=s.destination{Text(d).font(.caption.monospaced()).foregroundStyle(Color.rbText3).lineLimit(2).truncationMode(.middle)}; if let m=s.markdown{Text(String(m.prefix(400))).font(.caption).foregroundStyle(Color.rbText2).lineLimit(6)}}.padding(.vertical,4)} }
+            else { List(preview.samples, id:\.contentId){s in VStack(alignment:.leading, spacing:5){Text(s.title).font(.system(size:13,weight:.semibold)); if let i=s.issue{Text(i).font(.callout).foregroundStyle(Color.rbScoreLow)} else if let d=s.destination{Text(d).font(.caption.monospaced()).foregroundStyle(Color.rbText3).lineLimit(2).truncationMode(.middle)}; if let m=s.markdown{Text(String(m.prefix(400))).font(.callout).foregroundStyle(Color.rbText2).lineLimit(6)}}.padding(.vertical,4)} }
         }.padding(20).frame(width:620,height:480)
     }
 }
