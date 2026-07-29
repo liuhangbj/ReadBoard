@@ -1572,7 +1572,7 @@ public struct ArticleRow: View {
     }
 
     /// 相对时间（ISO8601 → x 分钟/小时/天前）
-    static func relativeDate(from iso: String) -> String {
+    nonisolated static func relativeDate(from iso: String) -> String {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         var date = f.date(from: iso)
