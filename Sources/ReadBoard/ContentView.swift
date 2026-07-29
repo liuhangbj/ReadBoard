@@ -1791,8 +1791,9 @@ public struct ReadingView: View {
                     RBSegmented(
                         items: mediaTabItems,
                         selection: mediaTabSelection,
-                        fillsAvailableWidth: true
+                        fillsAvailableWidth: false
                     )
+                    .frame(maxWidth: .infinity)
                 // ⚠️ 切标签"点了没反应"根治（09:21 用户直觉定位：在等通知但通知没给到，是个低级问题）：
                 // 原判断 `!= nil` —— llm_translated_md=0KB 的文章 loadedTranslatedMd 是**空字符串 ""（非 nil）**，
                 // `!= nil` 通过 → 标签显示"译文/原文"；但正文 hasTranslated 判断是 `!$0.isEmpty`，
@@ -1802,8 +1803,9 @@ public struct ReadingView: View {
                     RBSegmented(
                         items: [(0, "译文"), (1, "原文")],
                         selection: $viewMode,
-                        fillsAvailableWidth: true
+                        fillsAvailableWidth: false
                     )
+                    .frame(maxWidth: .infinity)
                 } else {
                     Spacer(minLength: 0)
                 }
@@ -1854,11 +1856,23 @@ public struct ReadingView: View {
                             .foregroundStyle(p.textSecondary)
                             .textSelection(.enabled)
                     }
-                    // 元信息（作者 · 日期 · 评分，编辑部点分隔；frontmatter 块在正文里单独折叠）
+                    // 元信息（类型图标 + 源名称 · 作者 · 日期 · 评分）
                     if !metaParts.isEmpty {
-                        Text(metaParts.joined(separator: "  ·  "))
-                            .font(.system(size: metaFontSize))
-                            .foregroundStyle(p.textSecondary)
+                        HStack(spacing: 6) {
+                            let ctype = item.ctype
+                            if ctype == "podcast" {
+                                Image(systemName: "mic.fill")
+                                    .foregroundStyle(Color.rbPodcast)
+                            } else if ctype == "video" || ctype == "youtube" {
+                                Image(systemName: "play.rectangle.fill")
+                                    .foregroundStyle(Color.rbVideo)
+                            } else if ctype != "wechat" && ctype != "social" {
+                                RSSIcon(size: metaFontSize, color: .rbRSS)
+                            }
+                            Text(metaParts.joined(separator: "  ·  "))
+                        }
+                        .font(.system(size: metaFontSize))
+                        .foregroundStyle(p.textSecondary)
                     }
 
                     // ── 媒体播放器（固定顶部——切标签不动）──
@@ -1995,6 +2009,7 @@ public struct ReadingView: View {
     /// 元信息片段（作者/日期/评分）——编辑部点分隔风格，有则收集
     private var metaParts: [String] {
         var parts: [String] = []
+        if let sn = item.sourceName, !sn.isEmpty { parts.append(sn) }
         if let a = item.author, !a.isEmpty { parts.append(a) }
         if let pd = item.publishedAt { parts.append(String(pd.prefix(10))) }
         if let s = effectiveScore { parts.append("评分 \(s)") }
