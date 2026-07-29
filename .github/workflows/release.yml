@@ -19,32 +19,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  sign-notarize-release:
+  release:
     runs-on: macos-15
     timeout-minutes: 60
     env:
       RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
-      CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
-      CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
-      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
-      APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Validate version and release secrets
+      - name: Validate version
         shell: bash
         run: |
-          set -euo pipefail
           [[ "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
             echo "Version must look like v1.0.0"
             exit 1
           }
-          for name in CERTIFICATE_BASE64 CERTIFICATE_PASSWORD APPLE_API_KEY_ID APPLE_API_ISSUER_ID APPLE_API_PRIVATE_KEY_BASE64; do
-            [ -n "${!name}" ] || { echo "Missing GitHub Actions secret: $name"; exit 1; }
-          done
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -56,8 +47,23 @@ jobs:
       - name: Install full-text engine dependencies
         run: npm ci --omit=dev --prefix Sources/ReadBoard/Resources/engine
 
-      - name: Import Developer ID certificate
-        id: signing
+      - name: Build app
+        shell: bash
+        run: |
+          set -euo pipefail
+          READBOARD_OUTPUT_DIR="$RUNNER_TEMP/release" \
+          READBOARD_VERSION="$RELEASE_VERSION" \
+          READBOARD_BUILD_NUMBER="$GITHUB_RUN_NUMBER" \
+            Scripts/package_app.sh
+
+      - name: Sign and notarize (if credentials available)
+        if: env.DEVELOPER_ID_CERTIFICATE_BASE64 != ''
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -74,25 +80,12 @@ jobs:
           IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
             | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)"
           [ -n "$IDENTITY" ] || { echo "Developer ID Application identity not found"; exit 1; }
-          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
-          echo "keychain=$KEYCHAIN_PATH" >> "$GITHUB_OUTPUT"
 
-      - name: Build and sign app
-        shell: bash
-        env:
-          READBOARD_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
-        run: |
-          set -euo pipefail
-          READBOARD_VERSION="$RELEASE_VERSION" \
-          READBOARD_BUILD_NUMBER="$GITHUB_RUN_NUMBER" \
-          READBOARD_OUTPUT_DIR="$RUNNER_TEMP/release" \
-            Scripts/package_app.sh
+          codesign --deep --force --sign "$IDENTITY" \
+            --options runtime \
+            "$RUNNER_TEMP/release/ReadBoard.app"
           codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/release/ReadBoard.app"
 
-      - name: Notarize and staple
-        shell: bash
-        run: |
-          set -euo pipefail
           API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
           SUBMISSION_ZIP="$RUNNER_TEMP/ReadBoard-notarization.zip"
           printf '%s' "$APPLE_API_PRIVATE_KEY_BASE64" | base64 -D > "$API_KEY_PATH"
@@ -106,6 +99,8 @@ jobs:
           xcrun stapler staple "$RUNNER_TEMP/release/ReadBoard.app"
           xcrun stapler validate "$RUNNER_TEMP/release/ReadBoard.app"
           spctl --assess --type execute --verbose=2 "$RUNNER_TEMP/release/ReadBoard.app"
+
+          security delete-keychain "$KEYCHAIN_PATH"
 
       - name: Create release archive
         id: archive
@@ -123,16 +118,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          NOTE="未经签名的 macOS 应用。首次打开需右键 → 打开，或在系统设置中放行。"
           gh release create "$RELEASE_VERSION" "$ARCHIVE_PATH" \
             --target "$GITHUB_SHA" \
             --title "ReadBoard $RELEASE_VERSION" \
+            --notes "$NOTE" \
             --generate-notes
-
-      - name: Remove temporary signing keychain
-        if: always()
-        shell: bash
-        run: |
-          keychain="${{ steps.signing.outputs.keychain }}"
-          if [ -n "$keychain" ] && [ -e "$keychain" ]; then
-            security delete-keychain "$keychain"
-          fi
