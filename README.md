@@ -1,6 +1,6 @@
 # ReadBoard
 
-<p align="center"><img src="docs/icon.png" width="128" alt="ReadBoard"></p>
+<p align="center"><img src="docs/icon.png" width="256" alt="ReadBoard"></p>
 
 
 **信息整合与加工中台。服务你和你的 Agent。**
