@@ -38,3 +38,7 @@ secrets.json
 *.key
 *.mobileprovision
 *.provisionprofile
+
+# Original screenshots (optimized versions are tracked)
+docs/screenshots/*.png
+!docs/screenshots/optimized/
