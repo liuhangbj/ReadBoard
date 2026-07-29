@@ -12,11 +12,13 @@
 清理策略：剥掉开头 2 行调试日志；嵌套 frontmatter 的 description 提取存回
 excerpt（若为空），其余 frontmatter 行剥掉，正文保留。
 """
+import argparse
+import os
 import sqlite3
 import re
-import sys
 
-DB = "/Users/hangbits/readboard/Data/readboard.db"
+DEFAULT_DB = os.path.expanduser("~/Library/Application Support/ReadBoard/readboard.db")
+DB = DEFAULT_DB
 
 def clean(md: str) -> tuple[str, str | None]:
     """返回 (清理后的正文, 提取的 description)。不匹配污染模式返回原文。"""
@@ -70,4 +72,9 @@ def main(dry_run: bool):
     conn.close()
 
 if __name__ == "__main__":
-    main(dry_run="--apply" not in sys.argv)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default=os.environ.get("READBOARD_DB", DEFAULT_DB))
+    parser.add_argument("--apply", action="store_true", help="实际写入；默认只预览")
+    args = parser.parse_args()
+    DB = args.db
+    main(dry_run=not args.apply)

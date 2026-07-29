@@ -56,9 +56,8 @@ public enum DependencyPaths {
                 return Self.scanWhisperModels()
             case .defuddleEngine:
                 // fetch_engine.js 脚本路径（非 node_modules/defuddle 目录——cliPath 需要具体的 .js 文件）
-                let bundlePath = Bundle.main.resourceURL?.appendingPathComponent("engine/fetch_engine.js").path ?? ""
-                return [bundlePath,
-                        home + "/readboard/App/ReadBoard/Resources/engine/fetch_engine.js"]
+                return AppResourceLocator.existingURL("engine/fetch_engine.js")
+                    .map { [$0.path] } ?? []
             }
         }
 
@@ -68,6 +67,7 @@ public enum DependencyPaths {
         private static func scanWhisperModels() -> [String] {
             let home = NSHomeDirectory()
             let searchDirs = [
+                AppResourceLocator.modelsDirectory.path,
                 home + "/tools/whisper/models",
                 home + "/models",
                 home + "/.cache/whisper",

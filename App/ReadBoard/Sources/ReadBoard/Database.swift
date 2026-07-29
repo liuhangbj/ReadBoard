@@ -181,16 +181,10 @@ public final class Database: @unchecked Sendable {
 
     /// 数据库实际路径：
     /// - 测试可用 READBOARD_DB 显式覆盖；
-    /// - 已有开发安装继续使用 ~/readboard/Data/readboard.db，避免升级后误开空库；
-    /// - 全新安装使用标准 Application Support 目录，不依赖源码仓库存在。
+    /// - 正式运行统一使用 Application Support，不依赖源码仓库存在。
     static let databasePath: String = {
         if let p = ProcessInfo.processInfo.environment["READBOARD_DB"] { return p }
-        let legacy = NSHomeDirectory() + "/readboard/Data/readboard.db"
-        if FileManager.default.fileExists(atPath: legacy) { return legacy }
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
-        return base.appendingPathComponent("ReadBoard", isDirectory: true)
+        return AppResourceLocator.applicationSupportDirectory
             .appendingPathComponent("readboard.db").path
     }()
 
@@ -278,7 +272,7 @@ public final class Database: @unchecked Sendable {
         return db != nil && wdb != nil && readerDB != nil && listDB != nil
     }
 
-    // MARK: 迁移机制（PRAGMA user_version 版本化执行 Data/migrations/*.sql）
+    // MARK: 迁移机制（PRAGMA user_version 版本化执行 App Resources/migrations/*.sql）
     // 每次启动检查版本，按文件名顺序补跑未执行的迁移。WAL/FTS/索引/export 表都走这里挂载。
 
     @discardableResult
@@ -350,36 +344,10 @@ public final class Database: @unchecked Sendable {
         return version >= 20
     }
 
-    /// 迁移资源定位：部署后的 App Resources 优先；开发/测试环境回落到 SwiftPM
-    /// resource bundle 和源码 Resources。最后保留旧仓库目录兼容当前开发机。
+    /// 迁移资源定位：部署后的 App Resources 优先；开发/测试环境回落到
+    /// SwiftPM Target 内的源码 Resources。
     private static func migrationDirectory() -> URL? {
-        var roots: [URL] = []
-        if let mainResources = Bundle.main.resourceURL { roots.append(mainResources) }
-        roots.append(Bundle.main.bundleURL
-            .appendingPathComponent("ReadBoard_ReadBoard.bundle", isDirectory: true)
-            .appendingPathComponent("Resources", isDirectory: true))
-        if let executable = Bundle.main.executableURL {
-            roots.append(executable.deletingLastPathComponent()
-                .appendingPathComponent("ReadBoard_ReadBoard.bundle", isDirectory: true)
-                .appendingPathComponent("Resources", isDirectory: true))
-        }
-        let packageRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        roots.append(packageRoot.appendingPathComponent("Resources", isDirectory: true))
-        roots.append(URL(fileURLWithPath: NSHomeDirectory() + "/readboard/Data",
-                         isDirectory: true))
-
-        for root in roots {
-            let dir = root.appendingPathComponent("migrations", isDirectory: true)
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory),
-               isDirectory.boolValue {
-                return dir
-            }
-        }
-        return nil
+        AppResourceLocator.existingURL("migrations", isDirectory: true)
     }
 
     @discardableResult

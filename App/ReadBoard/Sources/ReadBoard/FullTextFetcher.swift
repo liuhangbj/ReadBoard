@@ -40,11 +40,9 @@ public final class FullTextFetcher: @unchecked Sendable {
 
     /// node / CLI 脚本路径（node 走 DependencyPaths 解析，脚本在 App 资源内）
     private var nodeBin: String { DependencyPaths.resolve(.node) ?? "node" }
-    // 引擎路径：Bundle 优先（App 打包在 Contents/Resources/engine），其次用户自定义 / ~/readboard 兜底。
-    // 注意：之前硬编码 ~/readboard/App/ReadBoard/...，在 .app 部署形态下永远命中不到，导致全文提取引擎缺失。
+    // 引擎路径：用户配置优先，其次 App/SwiftPM 资源；不再回落到源码仓库绝对路径。
     private lazy var cliPath: String = {
-        DependencyPaths.resolve(.defuddleEngine)
-            ?? (NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/engine/fetch_engine.js")
+        DependencyPaths.resolve(.defuddleEngine) ?? ""
     }()
 
     /// 正文达到该长度视为"全文"（阈值, 与探测一致）

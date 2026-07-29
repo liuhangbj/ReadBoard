@@ -2,13 +2,19 @@
 """readboard: PostgreSQL CSV → SQLite 导入脚本
 处理类型转换：hex→BLOB、timestamptz→ISO、空串→NULL、jsonb 保留文本
 """
+import argparse
 import csv
 import sqlite3
 import sys
 import os
 
-EXPORT_DIR = open('/tmp/readboard_export_dir.txt').read().strip()
-DB = '/Users/hangbits/readboard/Data/readboard.db'
+parser = argparse.ArgumentParser()
+parser.add_argument("--db", default=os.environ.get(
+    "READBOARD_DB", os.path.expanduser("~/Library/Application Support/ReadBoard/readboard.db")))
+parser.add_argument("--export-dir", default=os.environ.get("READBOARD_EXPORT_DIR"))
+args = parser.parse_args()
+EXPORT_DIR = args.export_dir or open('/tmp/readboard_export_dir.txt').read().strip()
+DB = args.db
 
 csv.field_size_limit(sys.maxsize)
 

@@ -8,13 +8,20 @@ markdown 存进 content_md。纯本地、无网络、无 Jina。
 
 安全：只 UPDATE 满足条件的行；转换失败/太短的跳过不动原数据；逐行提交可中断续跑。
 """
+import argparse
+import os
+from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
-import sys
 
-DB = "/Users/hangbits/readboard/Data/readboard.db"
-ENGINE = "/Users/hangbits/readboard/App/ReadBoard/Resources/engine/fetch_engine.js"
-NODE = "/Users/hangbits/.workbuddy/binaries/node/versions/22.22.2/bin/node"
+DEFAULT_DB = os.path.expanduser("~/Library/Application Support/ReadBoard/readboard.db")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_ENGINE = REPO_ROOT / "App/ReadBoard/Sources/ReadBoard/Resources/engine/fetch_engine.js"
+
+DB = DEFAULT_DB
+ENGINE = str(DEFAULT_ENGINE)
+NODE = shutil.which("node") or "node"
 
 MIN_HTML = 800   # content_html 至少这么长才算 feed 有全文
 MIN_MD_KEEP = 500  # content_md 短于这个认为是摘要，需要回填
@@ -45,7 +52,15 @@ def to_markdown(html: str) -> str | None:
 
 
 def main():
-    limit = int(sys.argv[1]) if len(sys.argv) > 1 else 0  # 0 = 全部
+    global DB, ENGINE, NODE
+    parser = argparse.ArgumentParser()
+    parser.add_argument("limit", nargs="?", type=int, default=0, help="最多处理数量，0 表示全部")
+    parser.add_argument("--db", default=os.environ.get("READBOARD_DB", DEFAULT_DB))
+    parser.add_argument("--engine", default=os.environ.get("READBOARD_ENGINE", str(DEFAULT_ENGINE)))
+    parser.add_argument("--node", default=os.environ.get("READBOARD_NODE_BIN", NODE))
+    args = parser.parse_args()
+    DB, ENGINE, NODE = args.db, args.engine, args.node
+    limit = args.limit
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()

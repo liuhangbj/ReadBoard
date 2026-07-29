@@ -6,10 +6,14 @@
   folder_id 按 FreshRSS category 归属, feed_id 保留 FreshRSS feed.id 溯源
 - 幂等: 按 name/identifier 去重, 可重跑
 """
-import sqlite3, sys
+import argparse
+import os
+import sqlite3
 
-PG_DSN = "host=localhost port=5432 dbname=freshrss user=freshrss"
-RB_DB = "/Users/hangbits/readboard/Data/readboard.db"
+DEFAULT_DB = os.path.expanduser("~/Library/Application Support/ReadBoard/readboard.db")
+DEFAULT_PG_DSN = "host=localhost port=5432 dbname=freshrss user=freshrss"
+PG_DSN = DEFAULT_PG_DSN
+RB_DB = DEFAULT_DB
 
 # FreshRSS category id -> 是否导入(跳过 Uncategorized)
 CATEGORIES = {10: "1.快讯", 11: "2.深度", 7: "WeChat"}
@@ -69,4 +73,9 @@ def main():
         print(f"  {name}: {cnt}")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default=os.environ.get("READBOARD_DB", DEFAULT_DB))
+    parser.add_argument("--pg-dsn", default=os.environ.get("READBOARD_PG_DSN", DEFAULT_PG_DSN))
+    args = parser.parse_args()
+    RB_DB, PG_DSN = args.db, args.pg_dsn
     main()

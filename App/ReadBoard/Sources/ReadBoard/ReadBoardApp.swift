@@ -14,7 +14,7 @@ public struct ReadBoardApp: App {
         Trace.i("═══ ReadBoard 启动 ═══ 版本跟踪日志就绪，日志路径见上", category: "app")
         // 启动后台管线 worker（周期扫描未处理内容，按开关补跑 AI 评分/翻译/摘要/转录）
         PipelineWorker.shared.start()
-        // 启动 DB 自动备份（每日热备到 Data/backups/，保留最近5份）
+        // 启动 DB 自动备份（每日热备到 Application Support/ReadBoard/backups，保留最近5份）
         BackupService.shared.start()
         // 启动数据保留策略（已读超期软删除，每日）
         RetentionService.shared.start()

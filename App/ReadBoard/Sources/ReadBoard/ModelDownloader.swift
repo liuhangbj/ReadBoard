@@ -1,7 +1,7 @@
 import Foundation
 
 // MARK: - whisper 模型自动下载
-// 模型缺失时从 huggingface 下载到 ~/tools/whisper/models/，带进度回调。
+// 模型缺失时从 huggingface 下载到 Application Support/ReadBoard/models，带进度回调。
 // 支持 tiny / small / medium / large-v3 四种模型。
 
 @MainActor
@@ -28,7 +28,8 @@ public final class ModelDownloader: ObservableObject {
 
     /// 获取某模型的默认下载路径
     static func modelPath(for modelName: String) -> String {
-        NSHomeDirectory() + "/tools/whisper/models/ggml-\(modelName).bin"
+        AppResourceLocator.modelsDirectory
+            .appendingPathComponent("ggml-\(modelName).bin").path
     }
 
     /// 检查模型是否存在，返回实际文件大小（字节），不存在返回 -1

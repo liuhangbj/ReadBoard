@@ -1,25 +1,40 @@
-# 临时备份 / SPM 内部元数据
+# macOS / 编辑器
+.DS_Store
+
+# 临时备份 / SwiftPM 内部元数据
 *.bak
 .v-old.bak
-App/ReadBoard/.swiftpm/
+.swiftpm/
+**/.swiftpm/
 
-# 运行时产物
+# 运行时数据必须位于 ~/Library/Application Support/ReadBoard
+Data/
+Runtime/
 archive/
-Data/backups/
-Data/trash/
-Data/readboard.db
-Data/readboard.db-shm
-Data/readboard.db-wal
-readboard.db
+*.db
+*.db-shm
+*.db-wal
+*.db.bak.*
+secrets.json
+.env
+.env.*
 
 # 构建产物
 .build/
-App/ReadBoard/.build/
-App/ReadBoard.app/
+**/.build/
+*.app/
+*.dmg
+*.xcarchive/
+.artifacts/
 
 # node 依赖（engine 的 package.json 进 git，node_modules 首次 npm install 重建）
-App/ReadBoard/Resources/engine/node_modules/
+**/node_modules/
+**/__pycache__/
+*.pyc
 
-# macOS
-.DS_Store
-Data/readboard.db.bak.*
+# 签名与公证凭证永不入库
+*.p12
+*.cer
+*.key
+*.mobileprovision
+*.provisionprofile

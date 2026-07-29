@@ -285,12 +285,12 @@ public struct FetchPane: View {
         }
         .formStyle(.grouped)
         .alert("defuddle 依赖缺失", isPresented: $showDefuddleAlert) {
-            Button("自动下载") { installDefuddle() }
+            Button("重新检测") { checkDefuddleDeps() }
             Button("关闭", role: .cancel) {
                 UserDefaults.standard.set(false, forKey: "defuddle.enabled")
             }
         } message: {
-            Text("缺少：\(defuddleMissing.joined(separator: "、"))\n\n「自动下载」在项目内 engine 目录运行 npm install 安装 defuddle；「关闭」不使用 defuddle。")
+            Text("缺少：\(defuddleMissing.joined(separator: "、"))\n\ndefuddle 引擎应随 ReadBoard 一同安装；如果重新检测仍然缺失，请重新安装 App。")
         }
     }
 
@@ -314,29 +314,6 @@ public struct FetchPane: View {
         }
     }
 
-    /// 自动安装 defuddle 依赖（引擎目录 npm install）
-    /// 引擎目录同样走 Bundle 优先解析，避免硬编码 ~/readboard 在打包形态下失效。
-    private func installDefuddle() {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/bash")
-        let engineDir: String
-        if let resolved = DependencyPaths.resolve(.defuddleEngine) {
-            engineDir = (resolved as NSString).deletingLastPathComponent
-        } else if let bundle = Bundle.main.resourceURL?.appendingPathComponent("engine").path {
-            engineDir = bundle
-        } else {
-            engineDir = NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/engine"
-        }
-        let nodeBin = DependencyPaths.resolve(.node) ?? "node"
-        let npmBin = nodeBin.replacingOccurrences(of: "/node", with: "/npm")
-        task.arguments = ["-c", "cd '\(engineDir)' && '\(npmBin)' install"]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        try? task.run()
-        task.waitUntilExit()
-        // 安装完重新检测
-        checkDefuddleDeps()
-    }
 }
 
 // MARK: - 内容处理

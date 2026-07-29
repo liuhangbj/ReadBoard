@@ -43,8 +43,8 @@ public final class DependencyChecker: @unchecked Sendable {
         let items = [
             makeItem(.defuddleEngine,
                      display: "defuddle（正文提取引擎）",
-                     cmd: "cd ~/readboard/App/ReadBoard/Resources/engine && npm install defuddle",
-                     hint: "需在引擎目录 npm install 安装 defuddle 包"),
+                     cmd: nil,
+                     hint: "该引擎应随 ReadBoard 一同安装；缺失时请重新安装 App"),
             makeItem(.node,
                      display: "node（运行引擎）",
                      cmd: "brew install node",

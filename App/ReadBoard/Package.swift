@@ -9,7 +9,8 @@ let package = Package(
             name: "ReadBoard",
             path: "Sources/ReadBoard",
             resources: [
-                .process("../../Resources")
+                .copy("Resources/migrations"),
+                .copy("Resources/engine")
             ]
         ),
         .executableTarget(
