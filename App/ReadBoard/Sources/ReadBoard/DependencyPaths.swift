@@ -64,7 +64,7 @@ public enum DependencyPaths {
 
         var defaultsKey: String { "dep.path.\(rawValue)" }
 
-        /// 扫描所有 whisper 模型文件（ggml-*.bin），不再硬编码模型名
+        /// 扫描所有 whisper 模型文件（ggml-*.bin），按文件名去重
         private static func scanWhisperModels() -> [String] {
             let home = NSHomeDirectory()
             let searchDirs = [
@@ -73,10 +73,14 @@ public enum DependencyPaths {
                 home + "/.cache/whisper",
             ]
             let fm = FileManager.default
+            var seen: Set<String> = []
             var found: [String] = []
             for dir in searchDirs {
                 guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
                 for f in files where f.hasPrefix("ggml-") && f.hasSuffix(".bin") {
+                    let name = (f as NSString).lastPathComponent
+                    guard !seen.contains(name) else { continue }
+                    seen.insert(name)
                     found.append(dir + "/" + f)
                 }
             }

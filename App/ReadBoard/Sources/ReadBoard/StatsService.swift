@@ -9,7 +9,6 @@ public struct StatsOverview {
     var totalContent = 0
     var unreadCount = 0
     var starredCount = 0
-    var archivedCount = 0
     var duplicateCount = 0
     var withFulltext = 0
     var scored = 0
@@ -40,10 +39,9 @@ public final class StatsService: @unchecked Sendable {
         // 单趟聚合：9 个 content 维度一次扫完
         if let row = db.queryRows("""
             SELECT
-              SUM(CASE WHEN is_duplicate = 0 THEN 1 ELSE 0 END) AS total,
-              SUM(CASE WHEN read_at IS NULL AND is_archived = 0 AND is_duplicate = 0 THEN 1 ELSE 0 END) AS unread,
-              SUM(CASE WHEN starred = 1 AND is_duplicate = 0 THEN 1 ELSE 0 END) AS starred,
-              SUM(CASE WHEN is_archived = 1 AND is_duplicate = 0 THEN 1 ELSE 0 END) AS archived,
+              SUM(CASE WHEN is_duplicate = 0 AND deleted_at IS NULL THEN 1 ELSE 0 END) AS total,
+              SUM(CASE WHEN read_at IS NULL AND is_duplicate = 0 AND deleted_at IS NULL THEN 1 ELSE 0 END) AS unread,
+              SUM(CASE WHEN starred = 1 AND is_duplicate = 0 AND deleted_at IS NULL THEN 1 ELSE 0 END) AS starred,
               SUM(CASE WHEN is_duplicate = 1 THEN 1 ELSE 0 END) AS dup,
               SUM(CASE WHEN content_md IS NOT NULL AND content_md != '' AND is_duplicate = 0 THEN 1 ELSE 0 END) AS fulltext,
               SUM(CASE WHEN llm_score IS NOT NULL AND is_duplicate = 0 THEN 1 ELSE 0 END) AS scored,
@@ -55,7 +53,6 @@ public final class StatsService: @unchecked Sendable {
             s.totalContent = v("total")
             s.unreadCount = v("unread")
             s.starredCount = v("starred")
-            s.archivedCount = v("archived")
             s.duplicateCount = v("dup")
             s.withFulltext = v("fulltext")
             s.scored = v("scored")
@@ -76,7 +73,7 @@ public final class StatsService: @unchecked Sendable {
         }
 
         // DB 文件大小
-        let path = NSHomeDirectory() + "/readboard/Data/readboard.db"
+        let path = Database.databasePath
         if let attr = try? FileManager.default.attributesOfItem(atPath: path),
            let size = attr[.size] as? Int64 {
             s.dbSizeMB = Double(size) / 1_000_000

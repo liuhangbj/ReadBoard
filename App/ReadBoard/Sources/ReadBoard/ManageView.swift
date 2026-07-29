@@ -65,7 +65,6 @@ public struct StatsPane: View {
                     statCard("内容总数", "\(s.totalContent)", "doc.text", .rbText2)
                     statCard("未读", "\(s.unreadCount)", "circlebadge.fill", .rbAccent)
                     statCard("星标", "\(s.starredCount)", "star.fill", .rbStar)
-                    statCard("归档", "\(s.archivedCount)", "archivebox", .rbText2)
                     statCard("重复", "\(s.duplicateCount)", "doc.on.doc", .rbSummary)
                     statCard("全文", "\(s.withFulltext)", "text.alignleft", .rbScoreHigh)
                     statCard("已 AI 评分", "\(s.scored)", "number", .rbAccent)
@@ -357,7 +356,7 @@ public struct FilterRulePane: View {
     @State private var rField = "title"
     @State private var rMatch = "contains"
     @State private var rPattern = ""
-    @State private var rAction = "archive"
+    @State private var rAction = "mark_read"
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -383,8 +382,7 @@ public struct FilterRulePane: View {
                             Text("包含").tag("contains"); Text("正则").tag("regex"); Text("前缀").tag("prefix")
                         }
                         Picker("动作", selection: $rAction) {
-                            Text("归档").tag("archive"); Text("标已读").tag("mark_read")
-                            Text("加星").tag("star")
+                            Text("标已读").tag("mark_read"); Text("加星").tag("star")
                         }
                         .labelsHidden()
                     }
@@ -454,6 +452,6 @@ public struct FilterRulePane: View {
     }
     private func actionLabel(_ a: String) -> String {
         if a.hasPrefix("tag:") { return "打标签「\(a.dropFirst(4))」" }
-        return ["archive": "归档", "mark_read": "标已读", "star": "加星"][a] ?? a
+        return ["mark_read": "标已读", "star": "加星"][a] ?? a
     }
 }

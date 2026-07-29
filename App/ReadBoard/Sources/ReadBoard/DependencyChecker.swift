@@ -60,16 +60,8 @@ public final class DependencyChecker: @unchecked Sendable {
 
     /// 转录功能：whisper-cli + ffmpeg + yt-dlp + 模型
     func transcribeGroup() -> DependencyGroup {
-        // whisper 模型：动态显示检测到的模型名，多份时显示数量
-        let modelDisplay: String
         let modelPath = DependencyPaths.resolve(.whisperModel)
-        if let p = modelPath {
-            let name = (p as NSString).lastPathComponent
-            let altModels = DependencyPaths.Kind.whisperModel.commonPaths.filter { $0 != p }
-            modelDisplay = altModels.isEmpty ? "whisper 模型 \(name)" : "whisper 模型 \(name)（另有 \(altModels.count) 份）"
-        } else {
-            modelDisplay = "whisper 模型（未找到 ggml-*.bin）"
-        }
+        let modelDisplay = "whisper 模型（语音转文字模型）"
 
         let items = [
             makeItem(.whisperCLI, display: "whisper-cli（转写引擎）",
@@ -144,15 +136,13 @@ public final class DependencyChecker: @unchecked Sendable {
             alternatePaths: [])
     }
 
-    /// whisper 模型"版本"= 文件大小 + 模型尺寸标签
+    /// whisper 模型"版本"= ggml-medium · 1483 MB
     private func modelVersion(_ path: String) -> String? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               let size = attrs[.size] as? Int64 else { return nil }
-        let mb = Double(size) / 1_048_576
-        let label = (path as NSString).lastPathComponent
-            .replacingOccurrences(of: "ggml-", with: "")
-            .replacingOccurrences(of: ".bin", with: "")
-        return "\(label) · \(String(format: "%.0f", mb)) MB"
+        let mb = String(format: "%.0f MB", Double(size) / 1_048_576)
+        let name = (path as NSString).lastPathComponent
+        return "\(name) · \(mb)"
     }
 
     /// 检测依赖的版本号（--version 或等效命令）
@@ -164,9 +154,11 @@ public final class DependencyChecker: @unchecked Sendable {
         case .ytdlp:      args = ["--version"]
         case .node:       args = ["--version"]
         case .defuddleEngine:
-            // npm 包版本——读 node_modules/defuddle/package.json
-            let pkgPath = (path as NSString).appendingPathComponent("package.json")
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: pkgPath)),
+            // resolve(.defuddleEngine) 返回 fetch_engine.js 路径（引擎脚本），
+            // npm 包版本在 node_modules/defuddle/package.json，反推找到它
+            let engineDir = (path as NSString).deletingLastPathComponent
+            let pkg = engineDir + "/node_modules/defuddle/package.json"
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: pkg)),
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let ver = obj["version"] as? String {
                 return "v\(ver)"
@@ -185,8 +177,30 @@ public final class DependencyChecker: @unchecked Sendable {
         guard proc.terminationStatus == 0 else { return nil }
         let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        // 取第一行，截短避免过长的帮助文本
-        let firstLine = out.components(separatedBy: "\n").first ?? out
-        return firstLine.count <= 80 ? firstLine : String(firstLine.prefix(77)) + "..."
+        return Self.extractVersion(out, kind: kind)
+    }
+
+    /// 从版本命令输出中提取干净的版本号
+    static func extractVersion(_ raw: String, kind: DependencyPaths.Kind) -> String? {
+        switch kind {
+        case .ffmpeg:
+            // "ffmpeg version 8.1.2 Copyright (c) ..." → "8.1.2"
+            guard let r = raw.range(of: #"version (\d+\.\d+(\.\d+)?)"#, options: .regularExpression) else { return nil }
+            return String(raw[r]).replacingOccurrences(of: "version ", with: "")
+        case .whisperCLI:
+            // "whisper.cpp v1.7.6..." → "v1.7.6"
+            if let r = raw.range(of: #"v?\d+\.\d+(\.\d+)?"#, options: .regularExpression) {
+                let v = String(raw[r])
+                return v.hasPrefix("v") ? v : "v\(v)"
+            }
+            return raw
+        case .node:
+            // "v24.11.1" → already clean
+            return raw.trimmingCharacters(in: .whitespaces)
+        default:
+            // yt-dlp etc: first line, short enough
+            let firstLine = raw.components(separatedBy: "\n").first ?? raw
+            return firstLine.count <= 40 ? firstLine : String(firstLine.prefix(37)) + "..."
+        }
     }
 }

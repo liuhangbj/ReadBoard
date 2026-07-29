@@ -37,6 +37,14 @@ public struct ChatMessage {
 
 public final class LLMClient {
 
+    /// URLSession 取消通常表现为 URLError.cancelled，而不是 CancellationError。
+    /// 两者都必须终止 fallback 链，不能当成普通网络失败继续请求下一个模型。
+    nonisolated static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        return false
+    }
+
     /// 每次调用都读当前配置（设置页改后立即生效，无需重启）。
     /// 多模型按列表从上到下 fallback（空模型跳过）。不读 .env / 不读外部环境变量。
     private func activeProviders() -> [LLMProvider] {
@@ -56,16 +64,21 @@ public final class LLMClient {
     /// - 429（限流）：同 provider 退避重试 2 次（2s/5s）再 fallback 下一个。
     /// - 网络错误/5xx/解析错误：直接 fallback 下一个。
     func chat(messages: [ChatMessage], maxTokens: Int = 4096) async throws -> (content: String, model: String) {
+        try Task.checkCancellation()
         let providers = activeProviders()
         guard !providers.isEmpty else { throw LLMError.noProvider }
         var lastError: Error = LLMError.emptyResponse
         for p in providers {
+            try Task.checkCancellation()
             do {
                 let text = try await callWithRateLimitRetry(p, messages: messages, maxTokens: maxTokens)
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     return (text, p.model)
                 }
             } catch {
+                if Self.isCancellation(error) || Task.isCancelled {
+                    throw CancellationError()
+                }
                 lastError = error
                 continue  // fallback 下一个
             }
@@ -77,12 +90,18 @@ public final class LLMClient {
     private func callWithRateLimitRetry(_ p: LLMProvider, messages: [ChatMessage], maxTokens: Int) async throws -> String {
         var delays: [UInt64] = [2_000_000_000, 5_000_000_000]  // 2s, 5s
         while true {
+            try Task.checkCancellation()
             do {
                 return try await call(p, messages: messages, maxTokens: maxTokens)
-            } catch LLMError.httpError(let code, _) where code == 429 && !delays.isEmpty {
+            } catch {
+                if Self.isCancellation(error) || Task.isCancelled {
+                    throw CancellationError()
+                }
+                guard case LLMError.httpError(let code, _) = error,
+                      code == 429, !delays.isEmpty else { throw error }
                 let d = delays.removeFirst()
-                try? await Task.sleep(nanoseconds: d)
-                continue
+                // 不吞 CancellationError：worker 超时后必须立刻结束，不能继续重试并产生费用。
+                try await Task.sleep(nanoseconds: d)
             }
         }
     }
@@ -107,6 +126,7 @@ public final class LLMClient {
     }
 
     private func call(_ p: LLMProvider, messages: [ChatMessage], maxTokens: Int) async throws -> String {
+        try Task.checkCancellation()
         guard let url = URL(string: p.endpoint) else { throw LLMError.httpError(0, "bad endpoint") }
         var req = URLRequest(url: url, timeoutInterval: 120)
         req.httpMethod = "POST"
@@ -123,6 +143,7 @@ public final class LLMClient {
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
         let (data, resp) = try await URLSession.shared.data(for: req)
+        try Task.checkCancellation()
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
         guard code < 400 else {
             throw LLMError.httpError(code, String(data: data, encoding: .utf8) ?? "")

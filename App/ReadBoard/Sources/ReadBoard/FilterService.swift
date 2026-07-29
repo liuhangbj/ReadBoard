@@ -1,7 +1,7 @@
 import Foundation
 
 // MARK: - 规则过滤器
-// 关键词/正则规则：新内容入库/管线扫描时命中则自动执行动作（归档/标已读/加星/打标签）。
+// 关键词/正则规则：新内容入库/管线扫描时命中则自动执行动作（标已读/加星/打标签）。
 // source_id NULL=全局规则，否则仅对某源生效。
 
 public struct FilterRule: Identifiable, Hashable {
@@ -10,7 +10,7 @@ public struct FilterRule: Identifiable, Hashable {
     var field: String        // title / content / author / url
     var matchType: String    // contains / regex / prefix
     var pattern: String
-    var action: String       // archive / mark_read / star / tag:<名>
+    var action: String       // mark_read / star / tag:<名>
     var sourceId: Int64?     // nil = 全局
     var enabled: Bool
 }
@@ -31,7 +31,7 @@ public final class FilterService: @unchecked Sendable {
                     field: r["field"] ?? "title",
                     matchType: r["match_type"] ?? "contains",
                     pattern: r["pattern"] ?? "",
-                    action: r["action"] ?? "archive",
+                    action: r["action"] ?? "mark_read",
                     sourceId: r["source_id"].flatMap { Int64($0) },
                     enabled: r["enabled"] == "1"
                 )
@@ -91,9 +91,7 @@ public final class FilterService: @unchecked Sendable {
     }
 
     private func applyAction(_ action: String, contentId: Int64) {
-        if action == "archive" {
-            db.execute("UPDATE content SET is_archived = 1 WHERE id = ?", params: [contentId])
-        } else if action == "mark_read" {
+        if action == "mark_read" {
             db.execute("UPDATE content SET read_at = datetime('now') WHERE id = ?", params: [contentId])
         } else if action == "star" {
             db.execute("UPDATE content SET starred = 1 WHERE id = ?", params: [contentId])

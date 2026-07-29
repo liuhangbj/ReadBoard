@@ -17,16 +17,23 @@ public final class FailedJobService: @unchecked Sendable {
     private let db = Database.shared
     private init() {}
 
-    /// 最近失败的 job（每 content+jtype 只取最新一条失败的）
+    /// 最近失败的 job：每个 content+jtype 先取最新一次任务，只有最新状态仍失败才展示。
+    /// 不能先筛 status=3，否则“失败后已成功”的旧记录会永远留在失败页。
     func recentFailures(limit: Int = 100) -> [FailedJob] {
         db.queryRows("""
-            SELECT j.id, j.content_id, j.jtype, j.error, j.finished_at,
-                   (SELECT title FROM content WHERE id = j.content_id) AS title
-            FROM content_job j
-            WHERE j.status = 3
-            GROUP BY j.content_id, j.jtype
-            HAVING j.id = MAX(j.id)
-            ORDER BY j.finished_at DESC LIMIT ?;
+            WITH latest AS (
+                SELECT j.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY j.content_id, j.jtype ORDER BY j.id DESC
+                       ) AS rn
+                FROM content_job j
+            )
+            SELECT latest.id, latest.content_id, latest.jtype, latest.error,
+                   latest.finished_at, COALESCE(c.title, '(已删除)') AS title
+            FROM latest
+            LEFT JOIN content c ON c.id = latest.content_id
+            WHERE latest.rn = 1 AND latest.status = 3
+            ORDER BY latest.finished_at DESC LIMIT ?;
             """, params: [limit]).map { r in
                 FailedJob(
                     id: Int64(r["id"] ?? "0") ?? 0,
@@ -54,15 +61,43 @@ public final class FailedJobService: @unchecked Sendable {
             audioUrl = (obj["audio_url"] as? String) ?? (obj["video_url"] as? String)
         }
 
+        guard await PipelineWorker.shared.tryLockContent(job.contentId) else { return false }
+
         let llm = LLMPipeline()
+        let ok: Bool
+        let error: String?
+        var recordsOwnResult = false
         switch job.jtype {
-        case "score":     return await llm.score(contentId: job.contentId, title: title, body: body)
-        case "translate": return await llm.translate(contentId: job.contentId, title: title, body: body)
-        case "summarize": return await llm.summarize(contentId: job.contentId, title: title, body: body)
+        case "score":
+            ok = await llm.score(contentId: job.contentId, title: title, body: body)
+            error = llm.lastError
+        case "translate":
+            ok = await llm.translate(contentId: job.contentId, title: title, body: body)
+            error = llm.lastError
+        case "summarize":
+            ok = await llm.summarize(contentId: job.contentId, title: title, body: body)
+            error = llm.lastError
         case "transcribe":
-            return await TranscribePipeline().transcribe(
+            recordsOwnResult = true
+            ok = await TranscribePipeline().transcribe(
                 contentId: job.contentId, title: title, audioUrl: audioUrl, pageUrl: url, language: language)
-        default: return false
+            error = nil
+        default:
+            await PipelineWorker.shared.unlockContent(job.contentId)
+            return false
         }
+        await PipelineWorker.shared.unlockContent(job.contentId)
+        if recordsOwnResult { return ok }
+        // 成功结果必须记账；即使界面在模型返回后恰好消失/取消，也不能继续显示旧失败。
+        // 只有“未成功且任务已取消”才不新增失败记录。
+        guard ok || !Task.isCancelled else { return false }
+        recordResult(contentId: job.contentId, jtype: job.jtype, ok: ok, error: error)
+        return ok
+    }
+
+    private func recordResult(contentId: Int64, jtype: String, ok: Bool, error: String?) {
+        db.execute(
+            "INSERT INTO content_job (content_id, jtype, status, finished_at, error) VALUES (?, ?, ?, datetime('now'), ?)",
+            params: [contentId, jtype, ok ? 2 : 3, ok ? nil : (error ?? "重试失败")])
     }
 }

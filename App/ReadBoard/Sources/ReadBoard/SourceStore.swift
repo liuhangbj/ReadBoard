@@ -39,7 +39,7 @@ public struct FeedSource: Identifiable, Hashable {
 
     var policy: PipelinePolicy { PipelinePolicy.from(configJson: config) }
 
-    /// 全文获取模式（config.fetch_mode, 默认 summary）
+    /// 全文提取模式（config.fetch_mode, 默认 summary）
     var fetchMode: FetchMode {
         guard let data = config.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -48,7 +48,7 @@ public struct FeedSource: Identifiable, Hashable {
         return m
     }
 
-    /// 是否「关闭全文获取/显示摘要」——fetch_mode == summary。
+    /// 是否「关闭全文提取/显示摘要」——fetch_mode == summary。
     /// 统一语义：summary = 不抓全文只留 feed 摘要（文章抓不到兜底 / 播客显示摘要，本质相同）。
     var isFetchOff: Bool { fetchMode == .summary }
 
@@ -82,7 +82,7 @@ public struct FeedSource: Identifiable, Hashable {
     var transcribable: Bool { stype == "podcast" || stype == "youtube" }
 
     /// 最多保留条数（config.max_keep，0 = 不限制，默认 0）
-    /// 超出后最旧的自动归档（不删除，可检索）。播客源几百上千条，限制保留量。
+    /// 超出后最旧的自动软删除。播客源几百上千条时用于限制列表保留量。
     var maxKeep: Int {
         guard let data = config.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 0 }
@@ -115,6 +115,11 @@ public final class SourceStore: ObservableObject {
     @Published var lastSyncMessage = ""
 
     private let db = Database.shared
+
+    enum SyncError: LocalizedError {
+        case alreadyRunning
+        var errorDescription: String? { "已有抓取任务正在运行" }
+    }
 
     // MARK: 自动抓取调度
 
@@ -211,7 +216,11 @@ public final class SourceStore: ObservableObject {
     /// 文件夹级批量设置管线开关：把该值写入组内每个源的 config（不写 folder.config）。
     /// 设计：文件夹的值没有意义，实际处理只按单个源——文件夹选项仅作批量设置入口 + 打钩显示组内一致性。
     func setFolderPolicy(id: Int64, key: String, value: Bool) {
+        let col = ["auto_score":"auto_score","auto_translate":"auto_translate",
+                   "auto_summarize":"auto_summarize","auto_transcribe":"auto_transcribe"][key] ?? key
+        var sids: [Int64] = []
         for src in sources(inFolder: id) {
+            sids.append(src.id)
             let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [src.id]) ?? "{}"
             var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
             obj[key] = value
@@ -220,7 +229,13 @@ public final class SourceStore: ObservableObject {
                 db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, src.id])
             }
         }
-        reload()   // 批量写完只 reload 一次（避免 145 个源 reload 145 次）
+        // 关→开：不碰 per-item；开→关：文件夹内所有源的条目一次批量置零
+        if !value, !sids.isEmpty {
+            let placeholders = sids.map { _ in "?" }.joined(separator: ",")
+            db.execute("UPDATE content SET \(col)=0 WHERE source_id IN (\(placeholders)) AND \(col) IS NOT 0",
+                       params: sids)
+        }
+        reload()
     }
 
     /// 查某源的文件夹开关(供生效判定)。已废弃——管线改为纯按源处理，folder 不再存管线值。
@@ -268,6 +283,8 @@ public final class SourceStore: ObservableObject {
             guard !existsByIdentifier(item.url) else { continue }
             let fid = folderId(for: item.folderName)
             let p = policies[item.url] ?? PipelinePolicy()
+            // OPML 汇总页用 article 表示普通文章源；数据库统一使用 rss。
+            let storedStype = item.stype == "article" ? "rss" : item.stype
             let configObj: [String: Any] = [
                 "fetch_mode": item.fetchModeRaw,
                 "fetch_mode_auto": true,
@@ -280,7 +297,7 @@ public final class SourceStore: ObservableObject {
                     .flatMap({ String(data: $0, encoding: .utf8) }) else { continue }
             let ok = db.execute(
                 "INSERT INTO content_source (stype, name, identifier, enabled, config, folder_id) VALUES (?,?,?,1,?,?)",
-                params: [item.stype, item.name, item.url, configStr, fid.map { Int($0) }]
+                params: [storedStype, item.name, item.url, configStr, fid.map { Int($0) }]
             )
             if ok, let row = db.scalarInt("SELECT id FROM content_source WHERE identifier = ?", params: [item.url]) {
                 insertedIds.append(Int64(row))
@@ -333,7 +350,7 @@ public final class SourceStore: ObservableObject {
         return Int64(row)
     }
 
-    /// 设置某源的全文获取模式——auto=自动检测（四级优先级），off=关闭全文
+    /// 设置某源的全文提取模式——auto=自动检测（四级优先级），off=关闭全文
     /// 自动检测确定后记录 fetch_mode（后续固定用该模式）
     func setFetchMode(id: Int64, mode: String) async {
         let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
@@ -345,7 +362,7 @@ public final class SourceStore: ObservableObject {
             obj["fetch_mode"] = detected.rawValue
             obj["fetch_mode_auto"] = true   // 标记是自动检测的
         } else if mode == "off" {
-            // 关闭全文获取 = summary 兜底（不抓全文，只留 feed 摘要）。
+            // 关闭全文提取 = summary 兜底（不抓全文，只留 feed 摘要）。
             // 统一用 summary 表达「关闭」——播客的显示摘要和文章的抓不到兜底本质相同
             obj["fetch_mode"] = "summary"
             obj["fetch_mode_auto"] = false
@@ -413,7 +430,7 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
-    /// 文件夹级批量设全文抓取模式（对文件夹内所有源统一设置）
+    /// 文件夹级批量设全文提取模式（对文件夹内所有源统一设置）
     func setFolderFetchMode(folderId: Int64, mode: FetchMode) {
         let ids = db.queryRows("SELECT id FROM content_source WHERE folder_id = ?",
                                params: [folderId]).compactMap { Int64($0["id"] ?? "") }
@@ -441,7 +458,7 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
-    /// 设置某源最多保留条数（0 = 不限制）。超出后最旧的自动归档。
+    /// 设置某源最多保留条数（0 = 不限制）。超出后最旧的自动软删除。
     func setMaxKeep(id: Int64, count: Int) {
         let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
         var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
@@ -453,22 +470,22 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
-    /// 执行源级保留策略：超出 max_keep 的最旧内容自动归档（不删除，可检索）
-    /// 返回归档条数。
+    /// 执行源级保留策略：超出 max_keep 的最旧内容自动软删除。
+    /// 返回删除条数。
     @discardableResult
     func enforceMaxKeep(sourceId: Int64) -> Int {
         guard let src = sources.first(where: { $0.id == sourceId }), src.maxKeep > 0 else { return 0 }
         // 查该源超出保留量的最旧内容（按 published_at 升序，取超出部分）
         let excess = db.queryRows("""
             SELECT id FROM content
-            WHERE source_id = ? AND is_archived = 0 AND is_duplicate = 0
+            WHERE source_id = ? AND deleted_at IS NULL AND is_duplicate = 0
             ORDER BY published_at ASC
-            LIMIT MAX(0, (SELECT COUNT(*) FROM content WHERE source_id = ? AND is_archived = 0 AND is_duplicate = 0) - ?);
+            LIMIT MAX(0, (SELECT COUNT(*) FROM content WHERE source_id = ? AND deleted_at IS NULL AND is_duplicate = 0) - ?);
             """, params: [sourceId, sourceId, src.maxKeep])
         var n = 0
         for row in excess {
             guard let cid = Int64(row["id"] ?? "") else { continue }
-            db.execute("UPDATE content SET is_archived = 1 WHERE id = ?", params: [cid])
+            db.execute("UPDATE content SET deleted_at = datetime('now') WHERE id = ?", params: [cid])
             n += 1
         }
         return n
@@ -504,7 +521,7 @@ public final class SourceStore: ObservableObject {
         }
     }
 
-    /// 文件夹级批量设为「仅摘要」（关闭全文获取=summary 兜底, auto=false）
+    /// 文件夹级批量设为「仅摘要」（关闭全文提取=summary 兜底, auto=false）
     func setFolderFetchModeOff(folderId: Int64) {
         for src in sources(inFolder: folderId) {
             let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [src.id]) ?? "{}"
@@ -520,11 +537,7 @@ public final class SourceStore: ObservableObject {
     }
 
     func removeSource(id: Int64) {
-        // 修 P0-3：删源前先把该源内容归档（保留可查）——ON DELETE SET NULL 会把
-        // source_id 抹成 NULL，孤儿内容 source_id=NULL 后 worker/retention 都
-        // 查不到（guard let sid 跳过），永远躺在未归档区没人管。
-        // 归档后：内容保留在 DB 可检索，但不占活跃列表，不会因 SET NULL 变孤儿失明。
-        db.execute("UPDATE content SET is_archived = 1 WHERE source_id = ? AND is_archived = 0", params: [id])
+        // 只删除订阅关系；历史内容由 ON DELETE SET NULL 保留，仍可在“全部”中阅读和搜索。
         db.execute("DELETE FROM content_source WHERE id = ?", params: [id])
         reload()
     }
@@ -545,6 +558,12 @@ public final class SourceStore: ObservableObject {
            let str = String(data: data, encoding: .utf8) {
             db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id])
         }
+        // 关→开：不碰 per-item 字段，由 UI 弹窗决定；开→关：该源所有条目立刻置 0
+        if !value {
+            let col = ["auto_score":"auto_score","auto_translate":"auto_translate",
+                       "auto_summarize":"auto_summarize","auto_transcribe":"auto_transcribe"][key] ?? key
+            db.execute("UPDATE content SET \(col)=0 WHERE source_id=? AND \(col) IS NOT 0", params: [id])
+        }
         reload()
     }
 
@@ -552,7 +571,13 @@ public final class SourceStore: ObservableObject {
 
     /// 抓取所有启用的源。manual=true 忽略频率限制全抓；自动调度(false)只抓到期的源。
     func syncAll(manual: Bool = true) async {
+        // @MainActor 在 await 时允许重入；isSyncing 必须既是 UI 状态也是入口锁。
+        guard !isSyncing else { return }
         isSyncing = true
+        defer {
+            isSyncing = false
+            reload()
+        }
         lastSyncMessage = ""
         var total = 0
         var failed = 0
@@ -565,7 +590,7 @@ public final class SourceStore: ObservableObject {
             // 自动调度时按源的抓取间隔筛选：距上次抓取不足间隔的跳过
             if !manual && !src.isDue { skipped += 1; continue }
             do {
-                let n = try await syncOne(src)
+                let n = try await syncOneUnlocked(src)
                 total += n
             } catch {
                 failed += 1
@@ -577,17 +602,31 @@ public final class SourceStore: ObservableObject {
         if skipped > 0 { msg += "（跳过未到期 \(skipped)）" }
         if mediaSkipped > 0 { msg += "（媒体板块已关闭，跳过 \(mediaSkipped) 个媒体源）" }
         lastSyncMessage = msg
-        isSyncing = false
-        reload()
     }
 
     /// 抓取单个源，返回新增条数
     @discardableResult
     func syncOne(_ src: FeedSource) async throws -> Int {
+        // 单源刷新、添加源后的首次刷新与 syncAll 共用同一入口锁，避免网络请求重叠。
+        guard !isSyncing else { throw SyncError.alreadyRunning }
+        isSyncing = true
+        defer { isSyncing = false }
+        return try await syncOneUnlocked(src)
+    }
+
+    /// 已持有 isSyncing 锁时执行实际抓取；只允许 syncAll/syncOne 调用。
+    private func syncOneUnlocked(_ src: FeedSource) async throws -> Int {
         let feed = try await FeedFetcher.fetch(urlString: src.identifier)
+        // 频道级语言可安全回填该源的历史空值；单条 entry 的语言在 upsertContent 中优先处理。
+        if let feedLanguage = ContentLanguage.normalize(feed.language) {
+            db.execute("""
+                UPDATE content SET language = ?
+                WHERE source_id = ? AND (language IS NULL OR TRIM(language) = '');
+                """, params: [feedLanguage, src.id])
+        }
         var added = 0
         for entry in feed.entries {
-            if let newId = upsertContent(source: src.stype, sourceId: src.id, entry: entry) {
+            if let newId = upsertContent(source: src.stype, sourceId: src.id, entry: entry, pipeline: src.policy) {
                 added += 1
                 // 新文章: 按源的 fetch_mode 立即抓全文（播客跳过——无正文，YouTube 需要 defuddle 抓原文）
                 if entry.meta["audio_url"] == nil {
@@ -597,6 +636,11 @@ public final class SourceStore: ObservableObject {
                         mode: src.fetchMode
                     )
                 }
+                // 入库事件只负责唤醒规则；是否已具备所需文稿由导出规则的完成条件判断。
+                await ExportService.shared.runPending(trigger: "ingest", contentId: newId)
+                // “加工完成”规则的就绪条件与触发分离：不要求 AI 产物的规则在全文入库后即可交付；
+                // 要求评分/摘要/译文/转录的规则此时不会匹配，后续由 Worker 再次触发。
+                await ExportService.shared.runPending(trigger: "ready", contentId: newId)
             }
         }
         db.execute("UPDATE content_source SET last_fetched_at = datetime('now'), error = NULL WHERE id = ?",
@@ -650,7 +694,7 @@ public final class SourceStore: ObservableObject {
 
     /// 把一条 feed entry 写进 content（按 source+guid 去重 + 跨源内容去重），返回新插入的 content id（已存在返回 nil）
     /// R3: 判重+插入包进事务——Timer 调度与手动同步并发时，原来的"先 SELECT 再 INSERT"两条语句间存在竞态会重复插入。
-    private func upsertContent(source: String, sourceId: Int64, entry: ParsedEntry) -> Int64? {
+    private func upsertContent(source: String, sourceId: Int64, entry: ParsedEntry, pipeline: PipelinePolicy = PipelinePolicy()) -> Int64? {
         let ctype: String
         if entry.meta["video_id"] != nil { ctype = "video" }
         else if entry.meta["audio_url"] != nil { ctype = "podcast" }
@@ -661,6 +705,11 @@ public final class SourceStore: ObservableObject {
         let normTitle = Self.normalizeTitle(entry.title)
         let hash = Self.contentHash(url: normUrl, title: normTitle)
         let published = entry.published.map { ISO8601DateFormatter().string(from: $0) }
+        let language: String? = {
+            if let declared = ContentLanguage.normalize(entry.language) { return declared }
+            let sample = entry.title + "\n" + Self.stripHtml(entry.html)
+            return ContentLanguage.looksChinese(sample) ? "zh" : nil
+        }()
         let metaJson = (try? JSONSerialization.data(withJSONObject: entry.meta))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
 
@@ -668,8 +717,14 @@ public final class SourceStore: ObservableObject {
         // 事务内完成"查重 + 判 dup + 插入"，并发下不会出现两条重复主记录
         let committed = db.transaction {
             // 同源同 guid 已存在则跳过
-            if let _ = self.db.scalarInt("SELECT id FROM content WHERE source = ? AND guid = ?",
-                                         params: [source, entry.guid]) {
+            if let existingId = self.db.scalarInt("SELECT id FROM content WHERE source = ? AND guid = ?",
+                                                   params: [source, entry.guid]) {
+                if let language {
+                    self.db.execute("""
+                        UPDATE content SET language = ?
+                        WHERE id = ? AND (language IS NULL OR TRIM(language) = '');
+                        """, params: [language, existingId])
+                }
                 return true   // 已存在，提交空事务返回 nil
             }
             var isDup = 0
@@ -685,23 +740,33 @@ public final class SourceStore: ObservableObject {
                 ? Self.stripHtml(entry.html) : nil
             let ok = self.db.execute(
                 """
-                INSERT INTO content (ctype, guid, source, source_id, title, author, url, published_at, content_html, excerpt, fetch_status, meta, content_hash, is_duplicate, duplicate_of)
-                VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)
+                INSERT INTO content (ctype, guid, source, source_id, title, author, url, language, published_at, content_html, excerpt, fetch_status, meta, content_hash, is_duplicate, duplicate_of, auto_score, auto_translate, auto_summarize, auto_transcribe)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)
                 """,
-                params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url, published, entry.html, excerptForInsert, metaJson, hash, isDup, dupOf.map { Int($0) }]
+                params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url,
+                         language, published, entry.html, excerptForInsert, metaJson, hash, isDup,
+                         dupOf.map { Int($0) },
+                         pipeline.autoScore ? 1 : 0,
+                         pipeline.autoTranslate ? 1 : 0,
+                         pipeline.autoSummarize ? 1 : 0,
+                         pipeline.autoTranscribe ? 1 : 0]
             )
             if ok { newId = self.db.lastInsertId() }
             return ok
         }
         guard committed, let cid = newId else { return nil }
-        // 新内容应用过滤规则（归档/标已读/加星/打标签）——事务外，不影响原子性
+        // 新内容应用过滤规则（标已读/加星/打标签）——事务外，不影响原子性
         FilterService.shared.applyRules(contentId: cid, sourceId: sourceId,
             title: entry.title, content: entry.html, author: entry.author ?? "", url: entry.url)
-        // 入库即归档：源没开任何管线 → 没有中间环节 → 立即落盘纯原文 md。
-        // 开了管线的交给 worker 管线完成后归档（双语版），这里不动。
-        ArchiveService.shared.archiveOnInsertIfNoPipeline(contentId: cid, sourceId: sourceId)
         return cid
     }
+
+#if DEBUG
+    /// 隔离数据库测试入口：验证 ParsedEntry.language 确实写入 content.language。
+    func upsertContentForTesting(source: String, sourceId: Int64, entry: ParsedEntry) -> Int64? {
+        upsertContent(source: source, sourceId: sourceId, entry: entry)
+    }
+#endif
 
     // MARK: 内容去重辅助
 

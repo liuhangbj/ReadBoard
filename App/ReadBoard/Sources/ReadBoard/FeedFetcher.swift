@@ -10,6 +10,7 @@ public struct ParsedEntry: Sendable {
     let published: Date?
     let html: String
     let author: String?
+    var language: String? = nil
     var meta: [String: String] = [:]   // audio_url / video_id / duration 等
 }
 
@@ -21,6 +22,7 @@ public struct ParsedFeed: Sendable {
     let title: String
     let siteURL: String?
     let entries: [ParsedEntry]
+    var language: String? = nil
     /// 按内容特征判定类型（收编 detectType 逻辑）
     var kind: FeedKind {
         if entries.contains(where: { $0.meta["video_id"] != nil }) { return .video }
@@ -133,29 +135,18 @@ public final class FeedFetcher {
     /// 返回 (feedURL, ParsedFeed)。找不到 feed 抛 parseFailed。
     static func discoverAndFetch(urlString: String, proxy: String? = nil) async throws -> (feedURL: String, feed: ParsedFeed) {
         let effectiveProxy = proxy ?? globalProxy
-        // 1. 直接试抓（已经是 feed URL 的情况）
+        // 1. 已知播客平台的节目页先解析为真实 RSS。
+        if let resolvedURL = await resolvePlatformFeedURL(urlString: urlString, proxy: effectiveProxy),
+           let feed = try? await fetch(urlString: resolvedURL, proxy: effectiveProxy) {
+            return (resolvedURL, feed)
+        }
+        // 2. 直接试抓（已经是 feed URL 的情况）
         if let feed = try? await fetch(urlString: urlString, proxy: effectiveProxy) {
             return (urlString, feed)
         }
-        // 2. 当 HTML 主页解析 feed 链接
+        // 3. 当 HTML 主页解析 feed 链接
         guard let url = URL(string: urlString) else { throw FeedFetchError.badURL }
-        var req = URLRequest(url: url, timeoutInterval: 30)
-        req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-                     forHTTPHeaderField: "User-Agent")
-
-        let config = URLSessionConfiguration.default
-        if let proxy = effectiveProxy, let purl = URL(string: proxy), let host = purl.host, let port = purl.port {
-            config.connectionProxyDictionary = [
-                kCFNetworkProxiesHTTPEnable: true, kCFNetworkProxiesHTTPProxy: host,
-                kCFNetworkProxiesHTTPPort: port, kCFNetworkProxiesHTTPSEnable: true,
-                kCFNetworkProxiesHTTPSProxy: host, kCFNetworkProxiesHTTPSPort: port,
-            ]
-        }
-        let session = URLSession(configuration: config)
-        let (data, resp) = try await session.data(for: req)
-        if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
-            throw FeedFetchError.httpError(http.statusCode)
-        }
+        let data = try await downloadData(from: url, proxy: effectiveProxy)
         guard let html = String(data: data, encoding: .utf8) else { throw FeedFetchError.parseFailed }
 
         // 提取 <link ... type="application/rss+xml" ... href="...">（也认 atom）。
@@ -182,6 +173,108 @@ public final class FeedFetcher {
             }
         }
         throw FeedFetchError.parseFailed
+    }
+
+    /// Apple Podcasts 页面路径中的 `id123` → Apple podcast id。
+    static func applePodcastID(from url: URL) -> String? {
+        guard url.host?.lowercased() == "podcasts.apple.com",
+              let re = try? NSRegularExpression(pattern: #"(?:^|/)id(\d+)(?:/|$)"#),
+              let match = re.firstMatch(in: url.path, range: NSRange(url.path.startIndex..., in: url.path)),
+              let range = Range(match.range(at: 1), in: url.path) else { return nil }
+        return String(url.path[range])
+    }
+
+    /// 喜马拉雅节目页 → 公开 XML Feed。支持 `/album/8583636` 与 `/yule/8583636` 等栏目路径。
+    static func ximalayaFeedURL(from url: URL) -> String? {
+        guard let host = url.host?.lowercased(),
+              host == "ximalaya.com" || host.hasSuffix(".ximalaya.com"),
+              !url.path.lowercased().hasSuffix(".xml") else { return nil }
+        let parts = url.path.split(separator: "/").map(String.init)
+        let albumID: String?
+        if let index = parts.firstIndex(where: { $0.lowercased() == "album" }), index + 1 < parts.count {
+            albumID = parts[index + 1]
+        } else if parts.count >= 2,
+                  !["sound", "track"].contains(parts[parts.count - 2].lowercased()) {
+            albumID = parts.last
+        } else {
+            albumID = nil
+        }
+        guard let albumID, !albumID.isEmpty,
+              albumID.allSatisfy(\.isNumber) else { return nil }
+        return "https://www.ximalaya.com/album/\(albumID).xml"
+    }
+
+    /// 荔枝节目页的 Next.js 数据包含 `band`（RSS 节目 id）。
+    static func lizhiFeedURL(fromHTML html: String) -> String? {
+        let normalized = html.replacingOccurrences(of: #"\""#, with: #"""#)
+        guard let re = try? NSRegularExpression(pattern: #""band"\s*:\s*"(\d+)""#),
+              let match = re.firstMatch(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)),
+              let range = Range(match.range(at: 1), in: normalized) else { return nil }
+        return "https://rss.lizhi.fm/rss/\(normalized[range]).xml"
+    }
+
+    /// 荔枝历史 Feed 常由 Apple 返回为 HTTP；统一 HTTPS，避免同一节目因协议不同重复入库。
+    static func canonicalPlatformFeedURL(_ raw: String) -> String {
+        guard var components = URLComponents(string: raw),
+              components.scheme?.lowercased() == "http",
+              components.host?.lowercased() == "rss.lizhi.fm" else { return raw }
+        components.scheme = "https"
+        return components.url?.absoluteString ?? raw
+    }
+
+    private struct AppleLookupResponse: Decodable {
+        struct Result: Decodable { let feedUrl: String? }
+        let results: [Result]
+    }
+
+    /// 平台节目页 → 真实 RSS。失败返回 nil，继续走通用 RSS 自动发现，不影响普通网站。
+    private static func resolvePlatformFeedURL(urlString: String, proxy: String?) async -> String? {
+        guard let url = URL(string: urlString), let host = url.host?.lowercased() else { return nil }
+
+        if let podcastID = applePodcastID(from: url),
+           let lookupURL = URL(string: "https://itunes.apple.com/lookup?id=\(podcastID)&entity=podcast"),
+           let data = try? await downloadData(from: lookupURL, proxy: proxy, userAgent: "ReadBoard/1.0"),
+           let response = try? JSONDecoder().decode(AppleLookupResponse.self, from: data) {
+            return response.results.compactMap(\.feedUrl).first.map(canonicalPlatformFeedURL)
+        }
+
+        if let feedURL = ximalayaFeedURL(from: url) {
+            return feedURL
+        }
+
+        if (host == "lizhi.fm" || host.hasSuffix(".lizhi.fm")),
+           host != "rss.lizhi.fm", host != "nj.lizhi.fm",
+           !url.path.lowercased().hasSuffix(".xml"),
+           let data = try? await downloadData(from: url, proxy: proxy),
+           let html = String(data: data, encoding: .utf8) {
+            return lizhiFeedURL(fromHTML: html)
+        }
+
+        return nil
+    }
+
+    private static func downloadData(
+        from url: URL,
+        proxy: String?,
+        userAgent: String = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+    ) async throws -> Data {
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+
+        let config = URLSessionConfiguration.default
+        if let proxy, let proxyURL = URL(string: proxy), let host = proxyURL.host, let port = proxyURL.port {
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable: true, kCFNetworkProxiesHTTPProxy: host,
+                kCFNetworkProxiesHTTPPort: port, kCFNetworkProxiesHTTPSEnable: true,
+                kCFNetworkProxiesHTTPSProxy: host, kCFNetworkProxiesHTTPSPort: port,
+            ]
+        }
+        let (data, response) = try await URLSession(configuration: config).data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            throw FeedFetchError.httpError(http.statusCode)
+        }
+        guard !data.isEmpty else { throw FeedFetchError.emptyBody }
+        return data
     }
 
     /// 全局代理（设置页配置，UserDefaults 持久化）。所有 fetch/discover/probe 调用点统一走这里，
@@ -252,6 +345,7 @@ public final class FeedFetcher {
 private final class FeedXMLParser: NSObject, XMLParserDelegate {
     private var feedTitle = ""
     private var siteURL: String?
+    private var feedLanguage: String?
     private var entries: [ParsedEntry] = []
 
     // 当前条目累积态
@@ -259,6 +353,7 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
     private var currentElement = ""
     private var buf = ""
     private var eGuid = "", eTitle = "", eURL = "", eHTML = "", eAuthor: String?
+    private var eLanguage: String?
     private var ePublished: Date?
     private var eMeta: [String: String] = [:]
     private var sawAnyEntryTag = false
@@ -268,7 +363,8 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
         parser.delegate = self
         let ok = parser.parse()
         guard ok, sawAnyEntryTag else { return nil }
-        return ParsedFeed(title: feedTitle, siteURL: siteURL, entries: entries)
+        return ParsedFeed(title: feedTitle, siteURL: siteURL, entries: entries,
+                          language: ContentLanguage.normalize(feedLanguage))
     }
 
     // MARK: XMLParserDelegate
@@ -283,6 +379,7 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
             inEntry = true
             sawAnyEntryTag = true
             eGuid = ""; eTitle = ""; eURL = ""; eHTML = ""; eAuthor = nil
+            eLanguage = attr["xml:lang"] ?? attr["lang"]
             ePublished = nil; eMeta = [:]
             return
         }
@@ -311,6 +408,10 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
                 }
             }
         } else {
+            // Atom 常在根 <feed xml:lang="zh-CN"> 声明语言。
+            if feedLanguage == nil {
+                feedLanguage = attr["xml:lang"] ?? attr["lang"]
+            }
             // 频道级 link
             if local == "link", let href = attr["href"], !href.isEmpty, siteURL == nil {
                 siteURL = href
@@ -348,6 +449,8 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
                 if eHTML.isEmpty { eHTML = text }
             case "author", "dc:creator", "itunes:author", "name":
                 if eAuthor == nil && !text.isEmpty { eAuthor = text }
+            case "language", "dc:language", "itunes:language":
+                if eLanguage == nil && !text.isEmpty { eLanguage = text }
             case "yt:videoid":
                 eMeta["video_id"] = text
             case "itunes:duration":
@@ -358,6 +461,10 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
         } else {
             if local == "title" && feedTitle.isEmpty { feedTitle = text }
             if local == "link" && siteURL == nil && !text.isEmpty { siteURL = text }
+            if ["language", "dc:language", "itunes:language"].contains(local),
+               feedLanguage == nil, !text.isEmpty {
+                feedLanguage = text
+            }
         }
         buf = ""
     }
@@ -381,7 +488,8 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
         guard !guid.isEmpty else { return }
         entries.append(ParsedEntry(
             guid: guid, title: eTitle, url: eURL, published: ePublished,
-            html: FeedFetcher.stripNestedCDATA(eHTML), author: eAuthor, meta: eMeta
+            html: FeedFetcher.stripNestedCDATA(eHTML), author: eAuthor,
+            language: ContentLanguage.normalize(eLanguage ?? feedLanguage), meta: eMeta
         ))
     }
 

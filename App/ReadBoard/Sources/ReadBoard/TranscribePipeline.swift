@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - 播客/视频转录管线
 // 流程: 下载音频(yt-dlp/直链) → ffmpeg 转 16k wav → whisper-cli(medium) 转写 →
-//       非中文用 LLM 全文翻译成中文 → 写 llm_translated_md + 记 content_job
+//       非中文用 LLM 生成双语稿 → 写 llm_transcript_md + 记 content_job
 
 public enum TranscribeError: Error, LocalizedError {
     case noAudioUrl
@@ -23,8 +23,21 @@ public enum TranscribeError: Error, LocalizedError {
 }
 
 public final class TranscribePipeline: @unchecked Sendable {
-    private let db = Database.shared
+    typealias JobRecorder = @Sendable (_ contentId: Int64, _ ok: Bool, _ error: String?) async -> Void
+
+    enum LLMPostProcessMode: Equatable {
+        case polishOnly
+        case bilingualTranslation
+    }
+
+    // 延迟获取，取消策略的纯回归测试不会初始化或触碰用户数据库。
+    private var db: Database { Database.shared }
     private let llm = LLMPipeline()
+    private let jobRecorder: JobRecorder?
+
+    init(jobRecorder: JobRecorder? = nil) {
+        self.jobRecorder = jobRecorder
+    }
 
     // 依赖路径走 DependencyPaths 解析（用户配置 > PATH 探测 > 常见位置），不再硬编码
     private var whisperBin: String { DependencyPaths.resolve(.whisperCLI) ?? "whisper-cli" }
@@ -33,9 +46,10 @@ public final class TranscribePipeline: @unchecked Sendable {
     private var modelPath: String { DependencyPaths.resolve(.whisperModel) ?? "" }
 
     /// 转录单条内容（播客/视频）。audioUrl 为音频流或视频页地址。
-    /// 结果写入 llm_translated_md（中文），并同步生成摘要。返回是否成功。
+    /// 结果写入 llm_transcript_md（中文或双语），并同步生成摘要。返回是否成功。
     @discardableResult
     func transcribe(contentId: Int64, title: String = "", audioUrl: String?, pageUrl: String, language: String?) async -> Bool {
+        guard !Task.isCancelled else { return false }
         let target = audioUrl ?? pageUrl
         guard !target.isEmpty else { await markJob(contentId: contentId, ok: false, err: "无地址"); return false }
 
@@ -63,23 +77,45 @@ public final class TranscribePipeline: @unchecked Sendable {
                 }
             }
             // 3. whisper 转写
-            let lang = whisperLang(language)
+            let lang = ContentLanguage.whisperCode(language)
             let outBase = workDir + "/transcript"
             try await run(whisperBin, ["-m", modelPath, "-f", wavPath, "-l", lang, "--output-txt", "--output-file", outBase])
             var text = (try? String(contentsOfFile: outBase + ".txt", encoding: .utf8))?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !text.isEmpty else { throw TranscribeError.emptyTranscript }
 
-            // 4. 非中文 → LLM 生成「中英文对照」版本（碎句合并成通顺段落+逐段对照）。
-            //    中文转录稿直接用（无需对照）。对照版存 llm_transcript_md。
-            if lang != "zh", llm.isAvailable, let bilingual = await llm.translateBilingual(text) {
-                text = bilingual
+            // 4. 所有转录稿都交给 LLM 梳理；语言只决定处理模式。
+            //    中文：整理断句/标点/段落，不翻译。非中文：整理原文并生成中文对照。
+            let resolvedLanguage = ContentLanguage.resolvedAfterTranscription(
+                declared: language, transcript: text)
+            if llm.isAvailable {
+                switch Self.llmPostProcessMode(
+                    declaredLanguage: language,
+                    transcript: text,
+                    translateEnabled: AIPromptSettings.transcriptTranslationEnabled) {
+                case .polishOnly:
+                    if let polished = await llm.polishTranscript(text) {
+                        text = polished
+                        fputs("[transcribe] 转录稿已由 LLM 用原语言整理 id=\(contentId)\n", stderr)
+                    } else {
+                        fputs("[transcribe] LLM 整理失败，保留 Whisper 原稿 id=\(contentId)\n", stderr)
+                    }
+                case .bilingualTranslation:
+                    if let bilingual = await llm.translateBilingual(text) {
+                        text = bilingual
+                    }
+                }
             }
+            guard !Task.isCancelled else { throw CancellationError() }
 
             // 5. 写库：中英文对照稿进 llm_transcript_md（独立转录字段）
-            let ok = db.execute(
-                "UPDATE content SET llm_transcript_md = ?, llm_processed_at = datetime('now') WHERE id = ?",
-                params: [text, contentId])
+            let ok = db.execute("""
+                UPDATE content
+                SET llm_transcript_md = ?,
+                    language = COALESCE(NULLIF(language, ''), ?),
+                    llm_processed_at = datetime('now')
+                WHERE id = ?
+                """, params: [text, resolvedLanguage, contentId])
             // 6. 转录稿自动补一段摘要（媒体内容没有正文，评分/摘要以转录稿为准）
             if ok, llm.isAvailable,
                let sum = await llm.summarizeRaw(title: title, body: text) {
@@ -88,23 +124,27 @@ public final class TranscribePipeline: @unchecked Sendable {
             await markJob(contentId: contentId, ok: ok, err: ok ? nil : "写库失败")
             return ok
         } catch {
-            await markJob(contentId: contentId, ok: false, err: error.localizedDescription)
-            return false
+            return await finishAfterFailure(contentId: contentId, error: error)
         }
     }
 
     // MARK: - 私有
 
-    private func whisperLang(_ language: String?) -> String {
-        guard let l = language?.lowercased() else { return "auto" }
-        if l.hasPrefix("zh") || l == "cn" { return "zh" }
-        if l.hasPrefix("en") { return "en" }
-        // 常见语言精确映射（whisper -l 用 ISO-639-1）：feed 里 language 字段可能是
-        // ja/ja-jp/de-de 等形式，auto 检测在多语言混合内容里不稳，能定就定死
-        let map: [String: String] = ["ja": "ja", "ko": "ko", "fr": "fr", "de": "de",
-                                     "es": "es", "it": "it", "pt": "pt", "ru": "ru"]
-        for (prefix, code) in map where l.hasPrefix(prefix) { return code }
-        return "auto"
+    static func llmPostProcessMode(
+        declaredLanguage: String?, transcript: String, translateEnabled: Bool = true
+    ) -> LLMPostProcessMode {
+        guard translateEnabled else { return .polishOnly }
+        return ContentLanguage.shouldTranslateTranscript(declared: declaredLanguage, transcript: transcript)
+            ? .bilingualTranslation
+            : .polishOnly
+    }
+
+    /// 取消是 worker 生命周期事件，不是内容处理失败，不能累计死信次数。
+    /// internal 便于用注入的 recorder 验证取消路径不会触碰真实数据库。
+    func finishAfterFailure(contentId: Int64, error: Error) async -> Bool {
+        guard !Task.isCancelled, !LLMClient.isCancellation(error) else { return false }
+        await markJob(contentId: contentId, ok: false, err: error.localizedDescription)
+        return false
     }
 
     /// 取音频文件路径。direct=true 表示 audioUrl 是直链音频，curl 下载；否则 yt-dlp 抽音频。
@@ -134,79 +174,124 @@ public final class TranscribePipeline: @unchecked Sendable {
     /// 跑外部进程，非 0 退出抛错。带超时 terminate + stdout/stderr 持续 drain。
     /// 不修这两个会出大事：whisper/ffmpeg 挂死则 continuation 永不 resume（任务永久卡死）；
     /// stdout 大量输出无人读会写满 pipe 缓冲区(64KB)导致子进程阻塞。
-    private func run(_ bin: String, _ args: [String], timeout: TimeInterval = 1800) async throws {
+    /// internal 便于用短生命周期子进程做取消回归测试。
+    func run(_ bin: String, _ args: [String], timeout: TimeInterval = 1800) async throws {
         // 可变状态封装进 @unchecked Sendable 盒子，满足 @Sendable 闭包捕获要求
         final class Box: @unchecked Sendable {
             let lock = NSLock()
             var errData = Data()
             var resumed = false
+            var cancelled = false
             var watchdog: DispatchWorkItem?
-            var resume: ((Result<Void, Error>) -> Void)?
+            var process: Process?
+            var resume: (@Sendable (Result<Void, Error>) -> Void)?
+
+            func cancel() {
+                lock.lock()
+                cancelled = true
+                let process = process
+                let resume = resume
+                lock.unlock()
+                if let process, process.isRunning { process.terminate() }
+                resume?(.failure(CancellationError()))
+            }
         }
         let box = Box()
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: bin)
-            p.arguments = args
-            let errPipe = Pipe()
-            let outPipe = Pipe()
-            p.standardError = errPipe
-            p.standardOutput = outPipe
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: bin)
+                p.arguments = args
+                let errPipe = Pipe()
+                let outPipe = Pipe()
+                p.standardError = errPipe
+                p.standardOutput = outPipe
 
-            // 持续 drain 两个 pipe，防缓冲区写满阻塞子进程；stderr 攒着报错用
-            errPipe.fileHandleForReading.readabilityHandler = { fh in
-                let chunk = fh.availableData
-                if !chunk.isEmpty { box.lock.lock(); box.errData.append(chunk); box.lock.unlock() }
-            }
-            outPipe.fileHandleForReading.readabilityHandler = { fh in
-                _ = fh.availableData   // stdout 丢弃，只 drain
-            }
-
-            box.resume = { result in
-                box.lock.lock()
-                if box.resumed { box.lock.unlock(); return }
-                box.resumed = true
-                box.lock.unlock()
-                errPipe.fileHandleForReading.readabilityHandler = nil
-                outPipe.fileHandleForReading.readabilityHandler = nil
-                switch result {
-                case .success: cont.resume()
-                case .failure(let e): cont.resume(throwing: e)
+                // 持续 drain 两个 pipe，防缓冲区写满阻塞子进程；stderr 攒着报错用
+                errPipe.fileHandleForReading.readabilityHandler = { fh in
+                    let chunk = fh.availableData
+                    if !chunk.isEmpty { box.lock.lock(); box.errData.append(chunk); box.lock.unlock() }
                 }
-            }
+                outPipe.fileHandleForReading.readabilityHandler = { fh in
+                    _ = fh.availableData   // stdout 丢弃，只 drain
+                }
 
-            // 超时看门狗：到点强杀进程
-            box.watchdog = DispatchWorkItem {
-                if p.isRunning { p.terminate() }
-            }
-            if let wd = box.watchdog {
-                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: wd)
-            }
-
-            p.terminationHandler = { proc in
-                box.watchdog?.cancel()
-                let status = proc.terminationStatus
-                if status == 0 {
-                    box.resume?(.success(()))
-                } else {
-                    box.lock.lock(); let errStr = String(data: box.errData, encoding: .utf8) ?? ""; box.lock.unlock()
-                    let name = URL(fileURLWithPath: bin).lastPathComponent
-                    // 被看门狗强杀（超时）单独归类：uncaughtSignal(SIGTERM) = 超时，区别于进程自己崩
-                    if proc.terminationReason == .uncaughtSignal {
-                        box.resume?(.failure(TranscribeError.timedOut(
-                            "\(name) 超过 \(Int(timeout))s 未完成被终止（长音频属正常，可重试或加大超时）")))
-                    } else {
-                        box.resume?(.failure(TranscribeError.whisperFailed(
-                            "\(name) exit \(status): \(errStr.suffix(200))")))
+                let finish: @Sendable (Result<Void, Error>) -> Void = { result in
+                    box.lock.lock()
+                    if box.resumed { box.lock.unlock(); return }
+                    box.resumed = true
+                    box.lock.unlock()
+                    errPipe.fileHandleForReading.readabilityHandler = nil
+                    outPipe.fileHandleForReading.readabilityHandler = nil
+                    switch result {
+                    case .success: cont.resume()
+                    case .failure(let e): cont.resume(throwing: e)
                     }
                 }
+                box.lock.lock()
+                box.process = p
+                box.resume = finish
+                let alreadyCancelled = box.cancelled
+                box.lock.unlock()
+                if alreadyCancelled { box.cancel(); return }
+
+                // 超时看门狗：到点强杀进程
+                box.watchdog = DispatchWorkItem {
+                    if p.isRunning { p.terminate() }
+                }
+                if let wd = box.watchdog {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: wd)
+                }
+
+                p.terminationHandler = { proc in
+                    box.watchdog?.cancel()
+                    let status = proc.terminationStatus
+                    if status == 0 {
+                        finish(.success(()))
+                    } else {
+                        box.lock.lock()
+                        let wasCancelled = box.cancelled
+                        let errStr = String(data: box.errData, encoding: .utf8) ?? ""
+                        box.lock.unlock()
+                        if wasCancelled {
+                            finish(.failure(CancellationError()))
+                        } else {
+                            let name = URL(fileURLWithPath: bin).lastPathComponent
+                            // 被看门狗强杀（超时）单独归类：uncaughtSignal(SIGTERM) = 超时，区别于进程自己崩
+                            if proc.terminationReason == .uncaughtSignal {
+                                finish(.failure(TranscribeError.timedOut(
+                                    "\(name) 超过 \(Int(timeout))s 未完成被终止（长音频属正常，可重试或加大超时）")))
+                            } else {
+                                finish(.failure(TranscribeError.whisperFailed(
+                                    "\(name) exit \(status): \(errStr.suffix(200))")))
+                            }
+                        }
+                    }
+                }
+                do {
+                    try p.run()
+                    // 处理 cancel 恰好发生在 isRunning=false、p.run() 之前的竞态。
+                    box.lock.lock(); let cancelAfterLaunch = box.cancelled; box.lock.unlock()
+                    if cancelAfterLaunch, p.isRunning { p.terminate() }
+                } catch {
+                    box.watchdog?.cancel()
+                    finish(.failure(error))
+                }
             }
-            do { try p.run() } catch { box.watchdog?.cancel(); box.resume?(.failure(error)) }
+        } onCancel: {
+            box.cancel()
         }
     }
 
     /// 记 content_job（jtype=transcribe）
     private func markJob(contentId: Int64, ok: Bool, err: String?) async {
+        // 防止任务在错误分类后、实际写库前被取消的竞态。
+        guard ok || !Task.isCancelled else { return }
+        if let jobRecorder {
+            await jobRecorder(contentId, ok, err)
+            return
+        }
         db.execute(
             """
             INSERT INTO content_job (content_id, jtype, status, finished_at, error)

@@ -6,7 +6,7 @@ import Foundation
 //
 // 板块划分（对应用户定义）：
 //   media     多类型资源获取（podcast / video / social media 的抓取与入队）
-//   fulltext  全文抓取（probe + fetch + 回填）
+//   fulltext  全文提取（probe + fetch + 回填）
 //   ai        AI 板块（AI 评分 / AI 摘要 / AI 翻译 / AI 转录 四条 LLM/whisper 管线）
 //   export    后处理板块（按条件导出到 Obsidian / readitlater / webhook）
 
@@ -17,17 +17,17 @@ public enum FeatureBoard: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .media: return "多类型资源获取"
-        case .fulltext: return "全文抓取"
-        case .ai: return "AI 板块"
-        case .export: return "后处理板块"
+        case .media: return "多平台订阅"
+        case .fulltext: return "全文提取"
+        case .ai: return "AI 内容处理"
+        case .export: return "导出规则"
         }
     }
 
     var subtitle: String {
         switch self {
         case .media: return "podcast · video · social media 的抓取与入队"
-        case .fulltext: return "defuddle / CDP 全文抓取与回填"
+        case .fulltext: return "defuddle / CDP 全文提取与回填"
         case .ai: return "AI 评分 · AI 摘要 · AI 翻译 · AI 转录"
         case .export: return "按条件导出到 Obsidian / readitlater / webhook"
         }
@@ -99,8 +99,7 @@ public enum AIPipeline: String, CaseIterable, Identifiable {
 // MARK: - LLM 配置（多模型，列表 fallback）
 // 配置以「槽位」(slot) 为单位：可按需添加/移除/拖拽排序；按列表从上到下 fallback，空模型跳过。不读 .env。
 // 每槽允许为空（空槽跳过）。baseURL/model 存 UserDefaults；apiKey 按槽存 SecretStore（本地 AES-GCM 加密文件，替代 Keychain）。
-// 保留单档时代的旧 key 做一次性迁移（旧配置 → 第 1 槽）。
-// 注意：UserDefaults/Keychain 存储键（llm.slotN.*）保持不动，避免老用户配置丢失（槽位下标即存储下标）。
+// 存储键沿用 llm.slotN.*；槽位下标即存储下标。
 
 public struct LLMSettings {
     var baseURL: String
@@ -150,7 +149,7 @@ public struct LLMSettings {
     ]
 
     /// 配置槽位数量（key 持久化；最小 0 个——全新安装无预设模型，点 + 才添加）
-    /// 无记录（全新安装）→ 默认 0；老版本迁移过或已手动存过的值原样保留
+    /// 无记录（全新安装）→ 默认 0；已手动保存的值原样保留
     static var slotCount: Int {
         get {
             UserDefaults.standard.integer(forKey: K.slotCount)
@@ -165,32 +164,24 @@ public struct LLMSettings {
         static func baseURL(_ i: Int) -> String { "llm.slot\(i).baseURL" }
         static func model(_ i: Int) -> String { "llm.slot\(i).model" }
         static func temperature(_ i: Int) -> String { "llm.slot\(i).temperature" }
-        static func keychainKey(_ i: Int) -> String { "llm.slot\(i).apiKey" }
+        static func secretKey(_ i: Int) -> String { "llm.slot\(i).apiKey" }
         static func keySet(_ i: Int) -> String { "llm.slot\(i).keySet" }
-        // 旧单档键（仅迁移用）
-        static let legacyBaseURL = "llm.baseURL"
-        static let legacyApiKey = "llm.apiKey"
-        static let legacyModel = "llm.model"
-        static let legacySaved = "llm.savedInApp"
-        static let migrated = "llm.slotsMigrated"
     }
 
     /// 读某档配置（可能为空档）。会读 SecretStore 取真实 Key。
     static func profile(_ i: Int) -> LLMSettings {
-        migrateLegacyIfNeeded()
         let d = UserDefaults.standard
         let temp = d.object(forKey: K.temperature(i)) == nil ? 0.3 : d.double(forKey: K.temperature(i))
         return LLMSettings(
             baseURL: d.string(forKey: K.baseURL(i)) ?? "",
-            apiKey: SecretStore.load(forKey: K.keychainKey(i)) ?? "",
+            apiKey: SecretStore.load(forKey: K.secretKey(i)) ?? "",
             model: d.string(forKey: K.model(i)) ?? "",
             temperature: temp)
     }
 
-    /// 渲染用元数据：只读 UserDefaults，绝不碰 Keychain。
-    /// hasKey 由 keySet 位推断（保存 Key 时置位、清空时复位），避免读钥匙串。
+    /// 渲染用元数据：只读 UserDefaults，不读取 SecretStore。
+    /// hasKey 由 keySet 位推断（保存 Key 时置位、清空时复位），避免重复解密。
     static func meta(_ i: Int) -> LLMSettings {
-        migrateLegacyIfNeeded()
         let d = UserDefaults.standard
         let temp = d.object(forKey: K.temperature(i)) == nil ? 0.3 : d.double(forKey: K.temperature(i))
         return LLMSettings(
@@ -205,7 +196,7 @@ public struct LLMSettings {
     /// ⚠️ 缓存版（16:37 定案）：原实现每次调用都 3× SecretStore.load（读加密文件+AES 解密），
     /// 而阅读区操作条每次 body 求值都调 isAvailable → profiles()——每篇 ~10 次求值 = 几十次
     /// 文件+解密，叠加重算派生密钥（已修）曾是压垮主线程的组合拳。
-    /// 配置只在 save/clear/migrate 时变化，缓存命中即可；变更点已全部失效处理。
+    /// 配置只在 save/clear 时变化，缓存命中即可；变更点已全部失效处理。
     /// nonisolated(unsafe)：读多写极少，引用赋值原子，最坏情况并发各算一次（与 Tracer 同模式）。
     private nonisolated(unsafe) static var profilesCache: [LLMSettings]?
 
@@ -219,33 +210,6 @@ public struct LLMSettings {
     /// 配置变更后调用——让 profiles() 缓存失效
     private static func invalidateProfilesCache() { profilesCache = nil }
 
-    /// 旧单档配置一次性迁到第 1 档（老用户升级不丢配置）
-    private static func migrateLegacyIfNeeded() {
-        let d = UserDefaults.standard
-        guard !d.bool(forKey: K.migrated) else { return }
-        defer { d.set(true, forKey: K.migrated) }
-        // 老版本明文 apiKey 也在 UserDefaults 的，一并收
-        let legacyKey = SecretStore.load(forKey: "llm.apiKey")
-            ?? d.string(forKey: K.legacyApiKey) ?? ""
-        let legacy = LLMSettings(
-            baseURL: d.string(forKey: K.legacyBaseURL) ?? "",
-            apiKey: legacyKey,
-            model: d.string(forKey: K.legacyModel) ?? "")
-        guard legacy.isValid else { return }
-        // 写入第 1 档
-        d.set(legacy.baseURL, forKey: K.baseURL(0))
-        d.set(legacy.model, forKey: K.model(0))
-        _ = SecretStore.save(legacy.apiKey, forKey: K.keychainKey(0))
-        // 初始化槽数量（否则老用户只有 1 槽显得少，但旧三档其实全空无意义）
-        slotCount = 3
-        // 清旧 key（含 SecretStore 旧 account 和 UserDefaults 明文）
-        d.removeObject(forKey: K.legacyBaseURL)
-        d.removeObject(forKey: K.legacyModel)
-        d.removeObject(forKey: K.legacyApiKey)
-        SecretStore.delete(forKey: "llm.apiKey")
-        invalidateProfilesCache()
-    }
-
     /// 当前生效配置：首个非空档（兼容旧调用方——testConnection 测单条用）。
     /// 仅来自 App 内模型配置，不读 .env。
     static func current() -> LLMSettings {
@@ -255,9 +219,9 @@ public struct LLMSettings {
             model: presets[0].defaultModel)
     }
 
-    /// 保存到指定档：baseURL/model 进 UserDefaults，apiKey 进 Keychain；全空 = 清档
-    /// 返回 true=全部落盘成功；false=Keychain 写入失败（Key 没存进去）。
-    /// ⚠️ 关键：Keychain 写入失败时【绝不】置位 keySet，
+    /// 保存到指定档：baseURL/model 进 UserDefaults，apiKey 进 SecretStore；全空 = 清档
+    /// 返回 true=全部落盘成功；false=SecretStore 写入失败（Key 没存进去）。
+    /// ⚠️ 关键：SecretStore 写入失败时【绝不】置位 keySet，
     /// 否则 UI 会显示「已配置」但真实 Key 缺失，误导用户以为存好了。
     @discardableResult
     func save(toProfile i: Int) -> Bool {
@@ -267,11 +231,11 @@ public struct LLMSettings {
         d.set(model, forKey: K.model(i))
         d.set(temperature, forKey: K.temperature(i))
         if apiKey.isEmpty {
-            SecretStore.delete(forKey: K.keychainKey(i))
+            _ = SecretStore.delete(forKey: K.secretKey(i))
             d.set(false, forKey: K.keySet(i))
             return true
         } else {
-            let ok = SecretStore.save(apiKey, forKey: K.keychainKey(i))
+            let ok = SecretStore.save(apiKey, forKey: K.secretKey(i))
             if ok {
                 d.set(true, forKey: K.keySet(i))
             } else {
@@ -288,7 +252,7 @@ public struct LLMSettings {
         let d = UserDefaults.standard
         d.removeObject(forKey: K.baseURL(i))
         d.removeObject(forKey: K.model(i))
-        SecretStore.delete(forKey: K.keychainKey(i))
+        _ = SecretStore.delete(forKey: K.secretKey(i))
         d.set(false, forKey: K.keySet(i))
     }
 
@@ -322,7 +286,7 @@ public struct LLMSettings {
             (UserDefaults.standard.string(forKey: K.baseURL(i)) ?? "",
              UserDefaults.standard.string(forKey: K.model(i)) ?? "",
              UserDefaults.standard.double(forKey: K.temperature(i)),
-             SecretStore.load(forKey: K.keychainKey(i)) ?? "")
+             SecretStore.load(forKey: K.secretKey(i)) ?? "")
         }
         var arr = Array(snap)
         let item = arr.remove(at: from)
@@ -331,8 +295,8 @@ public struct LLMSettings {
             UserDefaults.standard.set(v.0, forKey: K.baseURL(i))
             UserDefaults.standard.set(v.1, forKey: K.model(i))
             UserDefaults.standard.set(v.2, forKey: K.temperature(i))
-            if v.3.isEmpty { SecretStore.delete(forKey: K.keychainKey(i)) }
-            else { _ = SecretStore.save(v.3, forKey: K.keychainKey(i)) }
+            if v.3.isEmpty { _ = SecretStore.delete(forKey: K.secretKey(i)) }
+            else { _ = SecretStore.save(v.3, forKey: K.secretKey(i)) }
         }
     }
 

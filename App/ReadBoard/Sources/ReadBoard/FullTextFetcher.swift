@@ -1,7 +1,7 @@
 import Foundation
 
 // MARK: - 自适应全文引擎
-// 探测每个源最适合的全文获取方式, 缓存进 content_source.config.fetch_mode:
+// 探测每个源最适合的全文提取方式, 缓存进 content_source.config.fetch_mode:
 //   feed_full  — feed 自带 content_html ≥800 字符, 直接用 defuddle 转 md
 //   defuddle   — defuddle 直连原页抓得动
 //   cdp        — 需要浏览器渲染(Chrome CDP/微信绕过)。暂未收编——engine 返回 NEEDS_CDP 退出码 3，降级 summary
@@ -41,7 +41,7 @@ public final class FullTextFetcher: @unchecked Sendable {
     /// node / CLI 脚本路径（node 走 DependencyPaths 解析，脚本在 App 资源内）
     private var nodeBin: String { DependencyPaths.resolve(.node) ?? "node" }
     // 引擎路径：Bundle 优先（App 打包在 Contents/Resources/engine），其次用户自定义 / ~/readboard 兜底。
-    // 注意：之前硬编码 ~/readboard/App/ReadBoard/...，在 .app 部署形态下永远命中不到，导致全文抓取引擎缺失。
+    // 注意：之前硬编码 ~/readboard/App/ReadBoard/...，在 .app 部署形态下永远命中不到，导致全文提取引擎缺失。
     private lazy var cliPath: String = {
         DependencyPaths.resolve(.defuddleEngine)
             ?? (NSHomeDirectory() + "/readboard/App/ReadBoard/Resources/engine/fetch_engine.js")
@@ -64,7 +64,7 @@ public final class FullTextFetcher: @unchecked Sendable {
     ///   2. 否则调 engine 抓原页——defuddle 本地提取，
     ///      需 CDP 的源（微信/cubox/jiqizhixin）返回 NEEDS_CDP 退出码 3 → 降级 summary
     ///   3. 都抓不到 → summary 兜底（留 feed 摘要）
-    /// 自动检测该源最高优先级的全文获取模式——确定后记录，后续固定用该模式
+    /// 自动检测该源最高优先级的全文提取模式——确定后记录，后续固定用该模式
     /// 优先级：feed 自带全文 → defuddle → feed 摘要
     func probeMode(feedUrl: String) async -> FetchMode {
         guard let feed = try? await FeedFetcher.fetch(urlString: feedUrl) else {
@@ -84,7 +84,7 @@ public final class FullTextFetcher: @unchecked Sendable {
             return .summary
         }
 
-        // YouTube（video）：feed 同样不提供可读文本，但「可获取全文」靠视频页抓字幕 +
+        // YouTube（video）：feed 同样不提供可读文本，但「可提取全文」靠视频页抓字幕 +
         // 转录管线，而非 feed 自带。旧逻辑 `kind != .article` 一刀切把 YouTube 也判成
         // summary，导致自动检测永远"仅摘要"退化、没法用 defuddle。这里明确改成返回
         // .defuddle——标记该源走 defuddle 抓取（对视频页抓标题/简介，再交转录管线出稿），
@@ -200,7 +200,7 @@ public final class FullTextFetcher: @unchecked Sendable {
             "UPDATE content SET content_md = ?, fetch_status = 2, fetch_engine = ? WHERE id = ?",
             params: [md, engine, contentId]
         )
-        // 全文抓取完成——发通知刷新 ArticleRow 全文 badge（绿/红）
+        // 全文提取完成——发通知刷新 ArticleRow 全文 badge（绿/红）
         NotificationCenter.default.post(name: .contentUpdated, object: nil)
     }
 
@@ -286,7 +286,7 @@ public final class FullTextFetcher: @unchecked Sendable {
 
         // 关键修复：standardInput 必须在 run() 之前设好——进程启动后再设属性会抛
         // NSException（NOCOPY_SETTER_IMPL，Swift do/catch 抓不住直接 SIGABRT 崩溃）。
-        // 之前把 standardInput 放在 run() 之后导致后台全文抓取崩 App。
+        // 之前把 standardInput 放在 run() 之后导致后台全文提取崩 App。
         let inPipe = Pipe()
         if stdinData != nil {
             proc.standardInput = inPipe
@@ -349,7 +349,7 @@ public final class FullTextFetcher: @unchecked Sendable {
 
 }
 
-// MARK: - 批量重抓全文（右键菜单调用）
+// MARK: - 批量重提全文（右键菜单调用）
 
 extension FullTextFetcher {
     /// 重抓单篇全文

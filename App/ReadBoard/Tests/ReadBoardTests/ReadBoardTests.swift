@@ -78,6 +78,33 @@ final class ParseScoreJSONTests: XCTestCase {
         XCTAssertNil(LLMPipeline.parseScoreJSON("完全不是 JSON"))
         XCTAssertNil(LLMPipeline.parseScoreJSON(""))
     }
+
+    func testCustomWeightsRecomputeTotalFromFixedDimensions() {
+        let text = #"{"depth":20,"quality":20,"readability":20,"total":999,"summary":"x"}"#
+        let result = LLMPipeline.parseScoreJSON(
+            text, weights: ScoreWeights(depth: 60, quality: 20, readability: 20))
+        XCTAssertEqual(result?.total, 57)
+    }
+}
+
+final class ParseTranslateFullJSONTests: XCTestCase {
+    func testValidTranslationIsAccepted() {
+        let text = #"{"title":"译文标题","translation":"完整译文","depth":30,"quality":25,"readability":20,"summary":"摘要"}"#
+        let result = LLMPipeline.parseTranslateFullJSON(text)
+        XCTAssertEqual(result?.translation, "完整译文")
+    }
+
+    func testMissingOrEmptyTranslationIsRejected() {
+        let missing = #"{"title":"标题","depth":30,"quality":25,"readability":20,"summary":"摘要"}"#
+        let empty = #"{"title":"标题","translation":"  \n ","depth":30,"quality":25,"readability":20,"summary":"摘要"}"#
+        XCTAssertNil(LLMPipeline.parseTranslateFullJSON(missing))
+        XCTAssertNil(LLMPipeline.parseTranslateFullJSON(empty))
+    }
+
+    func testObviouslyIncompleteTranslationIsRejectedAgainstSourceLength() {
+        let refusal = #"{"title":"标题","translation":"原文未提供，无法完成翻译。","depth":0,"quality":0,"readability":0,"summary":""}"#
+        XCTAssertNil(LLMPipeline.parseTranslateFullJSON(refusal, sourceLength: 500))
+    }
 }
 
 final class ExportCriteriaTests: XCTestCase {
@@ -108,6 +135,396 @@ final class ExportCriteriaTests: XCTestCase {
     func testGarbageJSONDefaults() {
         let c = ExportRule.Criteria.from(json: "not json")
         XCTAssertNil(c.minScore)
+    }
+}
+
+final class AIPromptSettingsTests: XCTestCase {
+    func testDefaultModeDoesNotInjectCustomInstruction() {
+        withRestoredSettings(keys: [AIPromptSettings.modeKey(for: .score),
+                                    AIPromptSettings.scoreDepthWeightKey]) {
+            AIPromptSettings.setMode(.default, for: .score)
+            UserDefaults.standard.set(80, forKey: AIPromptSettings.scoreDepthWeightKey)
+            XCTAssertEqual(AIPromptSettings.instructionBlock(for: .score), "")
+            XCTAssertEqual(AIPromptSettings.scoreWeights, .default)
+        }
+    }
+
+    func testScoreWeightsAreNormalizedAndStitchedIntoPrompt() {
+        withRestoredSettings(keys: [AIPromptSettings.modeKey(for: .score),
+                                    AIPromptSettings.scoreDepthWeightKey,
+                                    AIPromptSettings.scoreQualityWeightKey,
+                                    AIPromptSettings.scoreReadabilityWeightKey]) {
+            AIPromptSettings.setMode(.custom, for: .score)
+            UserDefaults.standard.set(60, forKey: AIPromptSettings.scoreDepthWeightKey)
+            UserDefaults.standard.set(20, forKey: AIPromptSettings.scoreQualityWeightKey)
+            UserDefaults.standard.set(20, forKey: AIPromptSettings.scoreReadabilityWeightKey)
+            XCTAssertEqual(AIPromptSettings.scoreWeights,
+                           ScoreWeights(depth: 60, quality: 20, readability: 20))
+            let block = AIPromptSettings.instructionBlock(for: .score)
+            XCTAssertTrue(block.contains("内容深度 60%"))
+            XCTAssertTrue(block.contains("信息质量 20%"))
+            XCTAssertTrue(block.contains("不得改变程序规定的输出格式"))
+        }
+    }
+
+    func testSummaryLengthAndStyleBecomeControlledRequirements() {
+        withRestoredSettings(keys: [AIPromptSettings.modeKey(for: .summarize),
+                                    AIPromptSettings.summaryLengthKey,
+                                    AIPromptSettings.summaryStyleKey]) {
+            AIPromptSettings.setMode(.custom, for: .summarize)
+            UserDefaults.standard.set(200, forKey: AIPromptSettings.summaryLengthKey)
+            UserDefaults.standard.set("bullets", forKey: AIPromptSettings.summaryStyleKey)
+            XCTAssertEqual(AIPromptSettings.summaryLength, 200)
+            let block = AIPromptSettings.instructionBlock(for: .summarize)
+            XCTAssertTrue(block.contains("摘要长度控制在 200 字以内。"))
+            XCTAssertTrue(block.contains("Markdown 要点列表"))
+        }
+    }
+
+    func testTranslationFieldsIncludeStyleLanguageAndTerms() {
+        withRestoredSettings(keys: [AIPromptSettings.modeKey(for: .translate),
+                                    AIPromptSettings.translationStyleKey,
+                                    AIPromptSettings.translationLanguageKey,
+                                    AIPromptSettings.translationTermsKey]) {
+            AIPromptSettings.setMode(.custom, for: .translate)
+            UserDefaults.standard.set("faithful", forKey: AIPromptSettings.translationStyleKey)
+            UserDefaults.standard.set("ja", forKey: AIPromptSettings.translationLanguageKey)
+            UserDefaults.standard.set("公司名保留英文", forKey: AIPromptSettings.translationTermsKey)
+            XCTAssertEqual(AIPromptSettings.effectiveTranslationLanguage(), "日文")
+            let block = AIPromptSettings.instructionBlock(for: .translate)
+            XCTAssertTrue(block.contains("输出语言为日文"))
+            XCTAssertTrue(block.contains("准确忠实"))
+            XCTAssertTrue(block.contains("公司名保留英文"))
+        }
+    }
+
+    func testTranscriptOptionsControlSpeechStyleAndTranslation() {
+        withRestoredSettings(keys: [AIPromptSettings.modeKey(for: .transcribe),
+                                    AIPromptSettings.transcriptSpeechStyleKey,
+                                    AIPromptSettings.transcriptTranslateKey]) {
+            AIPromptSettings.setMode(.custom, for: .transcribe)
+            UserDefaults.standard.set("written", forKey: AIPromptSettings.transcriptSpeechStyleKey)
+            UserDefaults.standard.set(false, forKey: AIPromptSettings.transcriptTranslateKey)
+            XCTAssertFalse(AIPromptSettings.transcriptTranslationEnabled)
+            let block = AIPromptSettings.instructionBlock(for: .transcribe)
+            XCTAssertTrue(block.contains("偏书面表达"))
+            XCTAssertTrue(block.contains("不执行翻译"))
+        }
+    }
+
+    private func withRestoredSettings(keys: [String], body: () -> Void) {
+        let defaults = UserDefaults.standard
+        let oldValues = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.object(forKey: $0)) })
+        defer {
+            for key in keys {
+                if let oldValue = oldValues[key] ?? nil { defaults.set(oldValue, forKey: key) }
+                else { defaults.removeObject(forKey: key) }
+            }
+        }
+        body()
+    }
+}
+
+final class MediaTabTests: XCTestCase {
+
+    func testOriginalOnly() {
+        XCTAssertEqual(tabIds(translation: false, transcript: false), [0])
+    }
+
+    func testTranslationOnly() {
+        XCTAssertEqual(tabIds(translation: true, transcript: false), [0, 1])
+    }
+
+    func testTranscriptOnly() {
+        XCTAssertEqual(tabIds(translation: false, transcript: true), [0, 2])
+    }
+
+    func testTranslationAndTranscript() {
+        XCTAssertEqual(tabIds(translation: true, transcript: true), [0, 1, 2])
+    }
+
+    private func tabIds(translation: Bool, transcript: Bool) -> [Int] {
+        ReadingView.mediaTabOptions(hasTranslation: translation, hasTranscript: transcript)
+            .map { $0.0 }
+    }
+}
+
+final class MediaAudioURLResolverTests: XCTestCase {
+    func testLoadedAudioURLWins() {
+        XCTAssertEqual(
+            MediaAudioURLResolver.preferred("https://cdn.example/loaded.mp3", "https://feed.example/item.mp3"),
+            "https://cdn.example/loaded.mp3"
+        )
+    }
+
+    func testFallsBackToItemAudioURL() {
+        XCTAssertEqual(
+            MediaAudioURLResolver.preferred(nil, "https://feed.example/item.mp3"),
+            "https://feed.example/item.mp3"
+        )
+    }
+
+    func testSkipsEmptyAudioURL() {
+        XCTAssertEqual(
+            MediaAudioURLResolver.preferred("  \n", "https://feed.example/item.mp3"),
+            "https://feed.example/item.mp3"
+        )
+    }
+
+    func testAllMissingReturnsNil() {
+        XCTAssertNil(MediaAudioURLResolver.preferred(nil, ""))
+    }
+}
+
+final class PodcastPageResolverTests: XCTestCase {
+    func testApplePodcastID() throws {
+        let url = try XCTUnwrap(URL(string: "https://podcasts.apple.com/cn/podcast/大内密谈/id657765158"))
+        XCTAssertEqual(FeedFetcher.applePodcastID(from: url), "657765158")
+    }
+
+    func testXimalayaCategoryPageBecomesXMLFeed() throws {
+        let url = try XCTUnwrap(URL(string: "https://www.ximalaya.com/yule/8583636/"))
+        XCTAssertEqual(
+            FeedFetcher.ximalayaFeedURL(from: url),
+            "https://www.ximalaya.com/album/8583636.xml"
+        )
+    }
+
+    func testXimalayaAlbumPageBecomesXMLFeed() throws {
+        let url = try XCTUnwrap(URL(string: "https://m.ximalaya.com/album/8583636"))
+        XCTAssertEqual(
+            FeedFetcher.ximalayaFeedURL(from: url),
+            "https://www.ximalaya.com/album/8583636.xml"
+        )
+    }
+
+    func testXimalayaSoundPageIsNotTreatedAsAlbum() throws {
+        let url = try XCTUnwrap(URL(string: "https://www.ximalaya.com/sound/123456"))
+        XCTAssertNil(FeedFetcher.ximalayaFeedURL(from: url))
+    }
+
+    func testLizhiEscapedPageDataBecomesRSSFeed() {
+        let html = #"{\"userInfo\":{\"userId\":\"198\",\"band\":\"14275\"}}"#
+        XCTAssertEqual(
+            FeedFetcher.lizhiFeedURL(fromHTML: html),
+            "https://rss.lizhi.fm/rss/14275.xml"
+        )
+    }
+
+    func testLizhiHTTPFeedIsCanonicalizedToHTTPS() {
+        XCTAssertEqual(
+            FeedFetcher.canonicalPlatformFeedURL("http://rss.lizhi.fm/rss/14275.xml"),
+            "https://rss.lizhi.fm/rss/14275.xml"
+        )
+        XCTAssertEqual(
+            FeedFetcher.canonicalPlatformFeedURL("http://example.com/feed.xml"),
+            "http://example.com/feed.xml"
+        )
+    }
+}
+
+final class ReadStateOverrideTests: XCTestCase {
+    @MainActor
+    func testOptimisticReadStatePrecedesListSnapshot() {
+        let item = makeItem(readAt: nil)
+        let vm = ContentViewModel()
+
+        XCTAssertFalse(vm.effectiveIsRead(item))
+
+        // open() 会即时更新 selectedItem，但行内覆盖为规避表格重入会稍后到达。
+        vm.selectedItem = item.markingRead()
+        XCTAssertTrue(vm.effectiveIsRead(item))
+
+        // 显式覆盖优先级最高，可把列表中的旧“已读”快照即时显示为未读。
+        vm.readMarks[item.id] = false
+        XCTAssertFalse(vm.effectiveIsRead(item))
+        vm.readMarks[item.id] = true
+        XCTAssertTrue(vm.effectiveIsRead(item))
+    }
+
+    private func makeItem(readAt: String?) -> ContentItem {
+        ContentItem(id: 1, ctype: "article", source: "test", title: "test", author: nil,
+                    url: "https://example.com", language: nil, publishedAt: nil, excerpt: nil,
+                    contentMd: nil, llmScore: nil, llmSummary: nil, llmTranslatedMd: nil,
+                    fetchStatus: 0, feedId: nil, audioUrl: nil, readAt: readAt,
+                    starred: false)
+    }
+}
+
+final class WorkerCancellationTests: XCTestCase {
+    private actor JobRecorder {
+        private(set) var records: [(contentId: Int64, ok: Bool, error: String?)] = []
+
+        func append(contentId: Int64, ok: Bool, error: String?) {
+            records.append((contentId, ok, error))
+        }
+
+        var count: Int { records.count }
+    }
+
+    func testRecognizesSwiftCancellation() {
+        XCTAssertTrue(LLMClient.isCancellation(CancellationError()))
+    }
+
+    func testRecognizesURLSessionCancellation() {
+        XCTAssertTrue(LLMClient.isCancellation(URLError(.cancelled)))
+    }
+
+    func testDoesNotTreatOrdinaryNetworkFailureAsCancellation() {
+        XCTAssertFalse(LLMClient.isCancellation(URLError(.timedOut)))
+    }
+
+    func testWorkerTimeoutReturnsPromptlyForCooperativeOperation() async {
+        let started = Date()
+        let result = await PipelineWorker.withTimeout(seconds: 0.05) {
+            do {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+                return true
+            } catch {
+                return false
+            }
+        }
+        XCTAssertNil(result)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
+    }
+
+    func testCancellingExternalProcessReturnsPromptly() async {
+        let pipeline = TranscribePipeline()
+        let started = Date()
+        let task = Task {
+            do {
+                try await pipeline.run("/bin/sleep", ["5"], timeout: 5)
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                return false
+            }
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()
+        let wasCancelled = await task.value
+        XCTAssertTrue(wasCancelled)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
+    }
+
+    func testTranscriptionCancellationErrorDoesNotRecordFailure() async {
+        let recorder = JobRecorder()
+        let pipeline = TranscribePipeline(jobRecorder: { contentId, ok, error in
+            await recorder.append(contentId: contentId, ok: ok, error: error)
+        })
+
+        let result = await pipeline.finishAfterFailure(contentId: 42, error: CancellationError())
+        let recordCount = await recorder.count
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(recordCount, 0)
+    }
+
+    func testCancelledTranscriptionTaskDoesNotRecordOrdinaryErrorAsFailure() async {
+        let recorder = JobRecorder()
+        let pipeline = TranscribePipeline(jobRecorder: { contentId, ok, error in
+            await recorder.append(contentId: contentId, ok: ok, error: error)
+        })
+        let task = Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            return await pipeline.finishAfterFailure(
+                contentId: 43, error: TranscribeError.downloadFailed("测试错误"))
+        }
+
+        task.cancel()
+        let result = await task.value
+        let recordCount = await recorder.count
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(recordCount, 0)
+    }
+
+    func testRealTranscriptionErrorStillRecordsFailure() async {
+        let recorder = JobRecorder()
+        let pipeline = TranscribePipeline(jobRecorder: { contentId, ok, error in
+            await recorder.append(contentId: contentId, ok: ok, error: error)
+        })
+
+        let result = await pipeline.finishAfterFailure(
+            contentId: 44, error: TranscribeError.downloadFailed("真实失败"))
+
+        XCTAssertFalse(result)
+        let records = await recorder.records
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.contentId, 44)
+        XCTAssertEqual(records.first?.ok, false)
+        XCTAssertTrue(records.first?.error?.contains("真实失败") == true)
+    }
+}
+
+final class ContentLanguageTests: XCTestCase {
+    func testNormalizesCommonLanguageCodes() {
+        XCTAssertEqual(ContentLanguage.normalize(" zh_CN "), "zh-cn")
+        XCTAssertEqual(ContentLanguage.normalize("cmn"), "zh")
+        XCTAssertEqual(ContentLanguage.normalize("ENG"), "en")
+        XCTAssertNil(ContentLanguage.normalize("und"))
+    }
+
+    func testChineseTranscriptSkipsTranslationWithoutFeedLanguage() {
+        let transcript = "这是一段中文播客的完整转录内容，讨论科技行业和人工智能的发展趋势。"
+        XCTAssertTrue(ContentLanguage.looksChinese(transcript))
+        XCTAssertFalse(ContentLanguage.shouldTranslateTranscript(declared: nil, transcript: transcript))
+        XCTAssertFalse(ContentLanguage.shouldTranslateTranscript(declared: "zh-CN", transcript: transcript))
+        XCTAssertEqual(ContentLanguage.resolvedAfterTranscription(
+            declared: nil, transcript: transcript), "zh")
+    }
+
+    func testEnglishTranscriptStillNeedsTranslation() {
+        let transcript = "This is a sufficiently long English podcast transcript about technology and markets."
+        XCTAssertTrue(ContentLanguage.shouldTranslateTranscript(declared: "en-US", transcript: transcript))
+    }
+
+    func testJapaneseTextIsNotMisclassifiedAsChinese() {
+        let transcript = "これは日本語のポッドキャストです。今日は人工知能と市場について詳しく話します。"
+        XCTAssertFalse(ContentLanguage.looksChinese(transcript))
+    }
+}
+
+final class TranscriptPostProcessModeTests: XCTestCase {
+    func testDeclaredChineseUsesLLMPolishWithoutTranslation() {
+        XCTAssertEqual(
+            TranscribePipeline.llmPostProcessMode(
+                declaredLanguage: "zh-CN", transcript: "这是一段中文转录稿，需要整理断句和段落。"),
+            .polishOnly)
+    }
+
+    func testDetectedChineseUsesLLMPolishWithoutTranslation() {
+        XCTAssertEqual(
+            TranscribePipeline.llmPostProcessMode(
+                declaredLanguage: nil,
+                transcript: "这是一段没有语言标签的中文视频转录内容，需要进行文本梳理和段落整理。"),
+            .polishOnly)
+    }
+
+    func testEnglishUsesBilingualTranslation() {
+        XCTAssertEqual(
+            TranscribePipeline.llmPostProcessMode(
+                declaredLanguage: "en-US",
+                transcript: "This English transcript should be polished and translated into a bilingual document."),
+            .bilingualTranslation)
+    }
+
+    func testDisablingTranslationStillPolishesEnglishInOriginalLanguage() {
+        XCTAssertEqual(
+            TranscribePipeline.llmPostProcessMode(
+                declaredLanguage: "en-US",
+                transcript: "This transcript should be polished without translation.",
+                translateEnabled: false),
+            .polishOnly)
+    }
+
+    func testLongSingleParagraphIsSplitWithoutLosingTranscript() {
+        let transcript = String(repeating: "中文转录内容", count: 4_000)
+        let chunks = LLMPipeline.splitByParagraph(transcript, maxChars: 12_000)
+        XCTAssertGreaterThan(chunks.count, 1)
+        XCTAssertEqual(chunks.joined(), transcript)
+        XCTAssertTrue(chunks.allSatisfy { $0.count <= 12_000 })
     }
 }
 
@@ -232,6 +649,32 @@ final class FeedParseTests: XCTestCase {
         XCTAssertEqual(entries.count, 1)
         XCTAssertEqual(entries[0].html, "<p>双层转义正文</p>")
     }
+
+    func testRSSChannelLanguageFlowsIntoEntries() throws {
+        let xml = """
+        <?xml version="1.0"?>
+        <rss version="2.0"><channel>
+          <title>中文播客</title><language>zh_CN</language>
+          <item><title>第一期</title><guid>zh-1</guid><link>https://x.com/zh-1</link></item>
+        </channel></rss>
+        """
+        let feed = try XCTUnwrap(FeedFetcher.parseFeedForTest(xml: xml))
+        XCTAssertEqual(feed.language, "zh-cn")
+        XCTAssertEqual(feed.entries.first?.language, "zh-cn")
+    }
+
+    func testAtomRootLanguageFlowsIntoEntries() throws {
+        let xml = """
+        <?xml version="1.0"?>
+        <feed xmlns="http://www.w3.org/2005/Atom" xml:lang="zh-Hans">
+          <title>中文频道</title>
+          <entry><id>yt-1</id><title>中文视频</title><link href="https://x.com/yt-1"/></entry>
+        </feed>
+        """
+        let feed = try XCTUnwrap(FeedFetcher.parseFeedForTest(xml: xml))
+        XCTAssertEqual(feed.language, "zh-hans")
+        XCTAssertEqual(feed.entries.first?.language, "zh-hans")
+    }
 }
 
 // MARK: - Markdown 解析
@@ -296,6 +739,20 @@ final class ResolveBodyTests: XCTestCase {
     func testAllEmpty() {
         let body = PipelineWorker.resolveBody(md: nil, html: "", excerpt: nil)
         XCTAssertEqual(body, "")
+    }
+    func testCaptchaPlaceholderFallsBackToExcerpt() {
+        let placeholder = """
+        ---
+        source: https://example.com/article
+        ---
+
+        Warning: This page maybe requiring CAPTCHA, please make sure you are authorized to access this page.
+
+        Markdown Content:
+
+        """
+        let body = PipelineWorker.resolveBody(md: placeholder, html: nil, excerpt: "真实文章摘要")
+        XCTAssertEqual(body, "真实文章摘要")
     }
 }
 

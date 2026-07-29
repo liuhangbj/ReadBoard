@@ -2,6 +2,19 @@ import SwiftUI
 import WebKit
 import QuartzCore
 
+/// 手动媒体处理统一使用第一个非空音频地址。
+/// 轻量列表项不携带 audioUrl，阅读器打开后或按需查库才能取得真实直链。
+enum MediaAudioURLResolver {
+    nonisolated static func preferred(_ candidates: String?...) -> String? {
+        for candidate in candidates {
+            guard let candidate else { continue }
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
+    }
+}
+
 public struct ContentView: View {
     @StateObject private var vm = ContentViewModel()
     @EnvironmentObject private var appTab: AppTab
@@ -26,7 +39,7 @@ public struct ContentView: View {
         .navigationTitle("ReadBoard")
         .onAppear { vm.loadAll() }
         .background(shortcutHandlers)
-        // 轻提示（取消归档等操作的反馈）
+        // 轻提示（列表操作反馈）
         .overlay(alignment: .bottom) {
             if let toast = vm.toastMessage {
                 Text(toast)
@@ -47,13 +60,12 @@ public struct ContentView: View {
     }
 
     // MARK: 快捷键（隐藏按钮承载键盘事件）
-    // j/k 上下篇, s 星标, a 归档, 空格已读切换, v 开原文, e 全部已读, f 搜索, ? 帮助
+    // j/k 上下篇, s 星标, 空格已读切换, v 开原文, e 全部已读, f 搜索, ? 帮助
     private var shortcutHandlers: some View {
         Group {
             Button("") { vm.selectNext() }.keyboardShortcut("j", modifiers: [])
             Button("") { vm.selectPrev() }.keyboardShortcut("k", modifiers: [])
             Button("") { if let it = vm.selectedItem { vm.toggleStar(it) } }.keyboardShortcut("s", modifiers: [])
-            Button("") { if let it = vm.selectedItem { vm.toggleArchive(it) } }.keyboardShortcut("a", modifiers: [])
             Button("") { vm.shortcutToggleRead() }.keyboardShortcut(.space, modifiers: [])
             Button("") { openOriginal() }.keyboardShortcut("v", modifiers: [])
             Button("") { vm.markAllRead() }.keyboardShortcut("e", modifiers: [])
@@ -87,7 +99,7 @@ public struct ContentView: View {
     /// 展开的文件夹 id 集合（自己控制，DisclosureGroup 的 label 无法响应点击过滤）
     /// 持久化到 UserDefaults——重启恢复上次的展开/收起状态（首次启动默认全展开）。
     @State private var expandedFolders: Set<String> = []
-    /// 开管线后弹「如何处理历史数据」（kind: source/folder，action: pipeline=LLM管线回填 / fulltext=全文重抓）
+    /// 开管线后弹「如何处理历史数据」（kind: source/folder，action: pipeline=LLM管线回填 / fulltext=全文重提）
     @State private var pendingBackfill: (kind: String, id: Int64, name: String, pipelineLabel: String, action: String)? = nil
 
     // MARK: 左栏展开状态持久化
@@ -150,6 +162,8 @@ public struct ContentView: View {
                 LazyVStack(alignment: .leading, spacing: 1) {
                     // ── 全部文章（清空过滤，显示所有内容）──
                     allArticlesRow
+                    // ── 已导出文章 ──
+                    exportedRow
 
                     ForEach(vm.sidebarTree) { node in
                         if node.isFolder {
@@ -237,8 +251,7 @@ public struct ContentView: View {
             get: { pendingBackfill != nil },
             set: { if !$0 { pendingBackfill = nil } }
         )) {
-            // action=pipeline（LLM 管线回填）：按钮文案带 md；action=fulltext（全文重抓）：文案带全文
-            Button(pendingBackfill?.action == "fulltext" ? "重抓所有历史全文" : "处理所有历史并重新生成 Markdown") {
+            Button(pendingBackfill?.action == "fulltext" ? "重提所有历史全文" : "处理所有历史内容") {
                 if let p = pendingBackfill {
                     if p.action == "fulltext" {
                         // detached 后台跑——fetchAndStore spawn node 进程 + 超时轮询 Thread.sleep，
@@ -262,9 +275,9 @@ public struct ContentView: View {
         } message: {
             if let p = pendingBackfill {
                 if p.action == "fulltext" {
-                    Text("「\(p.name)」的全文抓取模式已切换为\(p.pipelineLabel)。\n\n• 重抓历史：存量文章按新模式重新抓取全文（耗时较长）\n• 只处理新增：历史不动，新抓的按新模式抓")
+                    Text("「\(p.name)」的全文提取模式已切换为\(p.pipelineLabel)。\n\n• 重提历史：存量文章按新模式重新提取全文（耗时较长）\n• 只处理新增：历史不动，新抓的按新模式抓")
                 } else {
-                    Text("「\(p.name)」的\(p.pipelineLabel)已开启。\n\n• 处理历史：存量文章补跑管线并刷新已生成的 Markdown 文件（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+                    Text("「\(p.name)」的\(p.pipelineLabel)已开启。\n\n• 处理历史：存量文章补跑管线（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
                 }
             }
         }
@@ -376,6 +389,35 @@ public struct ContentView: View {
         .buttonStyle(.rowHover)
     }
 
+    /// 左栏「已导出」行（点击过滤到已导出文章）
+    private var exportedRow: some View {
+        let scale = uiFontScale
+        let active = vm.selectedFilter == "exported"
+        return Button {
+            vm.selectFilter("exported")
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "square.and.arrow.up.fill")
+                    .foregroundStyle(Color.rbAccent)
+                    .frame(width: 16)
+                Text("已导出")
+                    .font(.system(size: RB.F.sidebar * scale))
+                    .foregroundStyle(Color.rbText)
+                Spacer()
+                Text("\(vm.totalExported)")
+                    .font(.system(size: RB.F.count * scale))
+                    .foregroundStyle(Color.rbText3)
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, 12)
+            .padding(.vertical, 5 * scale)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .rbSelection(active)
+        }
+        .buttonStyle(.rowHover)
+    }
+
     /// 左栏行（点击过滤 + 未读角标 + 右键设置菜单）。
     /// Button 而非 List.tag——List selection 对 DisclosureGroup/自定义行不可靠。
     /// showChevronSlot：是否预留 chevron 占位宽度（子源/无 chevron 的源行用来对齐有 chevron 的文件夹行）
@@ -452,11 +494,11 @@ public struct ContentView: View {
                 } label: {
                     Label("抓取设置", systemImage: "arrow.down.circle")
                 }
-                // 重新抓取全文（该源全部文章重抓）
+                // 重新提取全文（该源全部文章重提）
                 Button {
                     Task { await FullTextFetcher.shared.refetchSourceFulltext(sourceId: sid) }
                 } label: {
-                    Label("重新抓取全文", systemImage: "arrow.triangle.2.circlepath")
+                    Label("重新提取全文", systemImage: "arrow.triangle.2.circlepath")
                 }
                 Divider()
                 Menu {
@@ -494,17 +536,17 @@ public struct ContentView: View {
                     Label("内容处理", systemImage: "gearshape.2")
                 }
             }
-            // 抓取设置（与订阅源统一：获取全文三态 + 抓取频率，打钩反映组内一致性）
+            // 抓取设置（与订阅源统一：提取全文三态 + 抓取频率，打钩反映组内一致性）
             Menu {
                 folderFetchSettingsMenu(folderId: fid)
             } label: {
                 Label("抓取设置", systemImage: "arrow.down.circle")
             }
-            // 重新抓取全文（对文件夹内所有源批量重抓）
+            // 重新提取全文（对文件夹内所有源批量重提）
             Button {
                 Task { await FullTextFetcher.shared.refetchFolderFulltext(folderId: fid) }
             } label: {
-                Label("重新抓取全文", systemImage: "arrow.triangle.2.circlepath")
+                Label("重新提取全文", systemImage: "arrow.triangle.2.circlepath")
             }
             Divider()
             Button(role: .destructive) { sourceStore.removeFolder(id: fid); vm.loadAll() } label: {
@@ -523,18 +565,8 @@ public struct ContentView: View {
                 triggerOn: "manual", target: platform, targetConfig: [:], lastRunAt: nil)
             // 用平台预设配置填充 targetConfig
             switch platform {
-            case "obsidian":
+            case "obsidian", "mddir":
                 rule.targetConfig["dir"] = config.obsidianDir
-            case "notion":
-                rule.targetConfig["token"] = config.notionToken
-                rule.targetConfig["database_id"] = config.notionDatabaseId
-            case "cubox":
-                rule.targetConfig["token"] = config.cuboxToken
-            case "instapaper":
-                rule.targetConfig["username"] = config.instapaperUser
-                rule.targetConfig["password"] = config.instapaperPass
-            case "readwise":
-                rule.targetConfig["token"] = config.readwiseToken
             case "webhook":
                 rule.targetConfig["url"] = config.webhookURL
                 rule.targetConfig["headers"] = config.webhookHeaders
@@ -568,18 +600,27 @@ public struct ContentView: View {
 
     /// 重新处理（右键菜单用，fire-and-forget，无需 UI 状态）
     private func reprocessItem(item: ContentItem) {
+        let loadedAudioUrl = Database.shared.fetchContentBody(id: item.id)?.audioUrl
+        let audioUrl = MediaAudioURLResolver.preferred(item.audioUrl, loadedAudioUrl)
         Task {
             let body = item.contentMd ?? item.excerpt ?? ""
             let policy = sourcePolicy(for: item.id)
             let pipeline = LLMPipeline()
+            let isMedia = item.ctype == "podcast" || item.ctype == "video"
+                || item.ctype == "youtube" || audioUrl != nil
+            let skipMediaTranslation = isMedia && ContentLanguage.isChinese(
+                declared: item.language, fallbackText: item.title + "\n" + body)
             var any = false
             if policy.autoScore, pipeline.isAvailable { any = true; let _ = await pipeline.score(contentId: item.id, title: item.title, body: body) }
-            if policy.autoTranslate, pipeline.isAvailable { any = true; let _ = await pipeline.translate(contentId: item.id, title: item.title, body: body) }
-            if policy.autoSummarize, pipeline.isAvailable { any = true; let _ = await pipeline.summarize(contentId: item.id, title: item.title, body: body) }
-            if policy.autoTranscribe, (item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil) {
-                any = true; let _ = await TranscribePipeline().transcribe(contentId: item.id, title: item.title, audioUrl: item.audioUrl, pageUrl: item.url, language: item.language)
+            if policy.autoTranslate, !skipMediaTranslation, pipeline.isAvailable {
+                any = true
+                let _ = await pipeline.translate(contentId: item.id, title: item.title, body: body)
             }
-            if any { ArchiveService.shared.rearchive(contentId: item.id); NotificationCenter.default.post(name: .contentUpdated, object: nil) }
+            if policy.autoSummarize, pipeline.isAvailable { any = true; let _ = await pipeline.summarize(contentId: item.id, title: item.title, body: body) }
+            if policy.autoTranscribe, (item.ctype == "podcast" || item.ctype == "video" || audioUrl != nil) {
+                any = true; let _ = await TranscribePipeline().transcribe(contentId: item.id, title: item.title, audioUrl: audioUrl, pageUrl: item.url, language: item.language)
+            }
+            if any { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
         }
     }
 
@@ -588,6 +629,8 @@ public struct ContentView: View {
         let pipeline = LLMPipeline()
         let transcriber = TranscribePipeline()
         let body = item.contentMd ?? item.excerpt ?? ""
+        let loadedAudioUrl = type == "transcribe" ? Database.shared.fetchContentBody(id: item.id)?.audioUrl : nil
+        let audioUrl = MediaAudioURLResolver.preferred(item.audioUrl, loadedAudioUrl)
         Task {
             let ok: Bool
             switch type {
@@ -604,13 +647,12 @@ public struct ContentView: View {
                 }
             case "transcribe":
                 ok = await transcriber.transcribe(contentId: item.id, title: item.title,
-                                                  audioUrl: item.audioUrl, pageUrl: item.url,
+                                                  audioUrl: audioUrl, pageUrl: item.url,
                                                   language: item.language)
             default:
                 ok = false
             }
             if ok {
-                ArchiveService.shared.rearchive(contentId: item.id)   // 刷新入库文件
                 await MainActor.run {
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)
                 }
@@ -652,7 +694,7 @@ public struct ContentView: View {
     /// 抓取设置菜单（fetch_mode + 频率）
     @ViewBuilder
     private func fetchSettingsMenu(src: FeedSource) -> some View {
-        Menu("获取全文：\(src.fetchModeAuto ? "自动（\(src.fetchMode.displayName)）" : src.fetchMode.displayName)") {
+        Menu("提取全文：\(src.fetchModeAuto ? "自动（\(src.fetchMode.displayName)）" : src.fetchMode.displayName)") {
             // ── 自动检测 ──
             Button {
                 Task { await sourceStore.setFetchMode(id: src.id, mode: "auto") }
@@ -696,7 +738,7 @@ public struct ContentView: View {
         return intervals.allSatisfy { $0 == first } ? first : nil
     }
 
-    /// 文件夹内所有源的「获取全文」状态是否全一致（设置状态 + 实际模式都一致才算）。
+    /// 文件夹内所有源的「提取全文」状态是否全一致（设置状态 + 实际模式都一致才算）。
     /// 返回 ("auto", 模式) / ("manual", 模式) / ("off", nil) / nil（不一致→「按订阅源设置」）。
     private func folderUniformFetchMode(_ fid: Int64) -> (kind: String, mode: FetchMode?)? {
         let srcs = sourceStore.sources(inFolder: fid)
@@ -713,7 +755,7 @@ public struct ContentView: View {
             guard let first = modes.first, modes.allSatisfy({ $0 == first }) else { return nil }
             return ("manual", first)
         }
-        // 全部仅摘要（fetchMode==.summary——关闭全文获取=summary 兜底，播客显示摘要同此）
+        // 全部仅摘要（fetchMode==.summary——关闭全文提取=summary 兜底，播客显示摘要同此）
         if srcs.allSatisfy({ $0.isFetchOff }) {
             return ("off", nil)
         }
@@ -726,8 +768,8 @@ public struct ContentView: View {
         let uniformMode = folderUniformFetchMode(fid)
         let uniformInterval = folderUniformInterval(fid)
 
-        // ── 获取全文 ──
-        Menu("获取全文：\(folderFetchModeLabel(fid, uniform: uniformMode))") {
+        // ── 提取全文 ──
+        Menu("提取全文：\(folderFetchModeLabel(fid, uniform: uniformMode))") {
             // 自动（打钩：全组都是自动）
             Button {
                 Task { await sourceStore.setFolderFetchModeAuto(folderId: fid) }
@@ -776,7 +818,7 @@ public struct ContentView: View {
         }
     }
 
-    /// 文件夹「获取全文」菜单标题的当前值文本
+    /// 文件夹「提取全文」菜单标题的当前值文本
     private func folderFetchModeLabel(_ fid: Int64, uniform: (kind: String, mode: FetchMode?)?) -> String {
         guard let uniform else { return "按订阅源设置" }
         switch uniform.kind {
@@ -936,7 +978,7 @@ public struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.top, 10)
 
-            // 筛选条行1：评分(输入框) + 标签 + 未读/全部/星标(单选) + 归档
+            // 筛选条行1：评分(输入框) + 未读/全部/星标(单选)
             HStack(spacing: 8) {
                 Text("评分 ≥")
                     .font(.system(size: 11))
@@ -967,7 +1009,7 @@ public struct ContentView: View {
 
                 Spacer()
 
-                // 全部/未读/星标/归档 四选一单选（纸墨分段，替代原生 segmented）
+                // 全部/未读/星标三选一（纸墨分段，替代原生 segmented）
                 RBSegmented(
                     items: ContentViewModel.ReadFilter.allCases.map { ($0, $0.display) },
                     selection: $vm.readFilter
@@ -1048,25 +1090,20 @@ public struct ContentView: View {
             )) {
                 ForEach(vm.items) { item in
                     ArticleRow(item: item, isSelected: vm.selectedItem?.id == item.id,
-                               isReadOverride: vm.readMarks[item.id] == true)
+                               isReadOverride: vm.readMarks[item.id])
                         .tag(item)
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
                         .contextMenu {
                             // ── 状态操作 ──
                             Button { vm.toggleRead(item) } label: {
-                                Label(item.isRead ? "标为未读" : "标为已读",
-                                      systemImage: item.isRead ? "envelope.badge" : "envelope.open")
+                                Label(vm.effectiveIsRead(item) ? "标为未读" : "标为已读",
+                                      systemImage: vm.effectiveIsRead(item) ? "envelope.badge" : "envelope.open")
                             }
                             Button { vm.toggleStar(item) } label: {
                                 Label(item.starred ? "取消星标" : "加星标",
                                       systemImage: item.starred ? "star.slash" : "star")
                             }
-                            Button { vm.toggleArchive(item) } label: {
-                                Label(item.archived ? "取消归档" : "归档",
-                                      systemImage: item.archived ? "tray.and.arrow.up" : "archivebox")
-                            }
-
                             Divider()
 
                             // ── 打开 / 复制 ──
@@ -1120,28 +1157,14 @@ public struct ContentView: View {
                             } label: {
                                 Label("内容处理", systemImage: "gearshape.2")
                             }
-                            // 重新抓取全文（单篇重抓）
+                            // 重新提取全文（单篇重提）
                             Button {
                                 Task { await FullTextFetcher.shared.refetchSingleFulltext(contentId: item.id) }
                             } label: {
-                                Label("重新抓取全文", systemImage: "arrow.triangle.2.circlepath")
+                                Label("重新提取全文", systemImage: "arrow.triangle.2.circlepath")
                             }
 
                             // ── 后处理 ──
-                            Button {
-                                ArchiveService.shared.rearchive(contentId: item.id)
-                            } label: {
-                                Label("重新生成 Markdown 文件", systemImage: "doc.arrow.clockwise")
-                            }
-                            // 在 Finder 中打开 Markdown 文件（已归档的显示，未归档的禁用）
-                            if let archivePath = ArchiveService.shared.archiveFilePath(contentId: item.id),
-                               FileManager.default.fileExists(atPath: archivePath) {
-                                Button {
-                                    NSWorkspace.shared.selectFile(archivePath, inFileViewerRootedAtPath: "")
-                                } label: {
-                                    Label("在 Finder 中打开 md", systemImage: "folder")
-                                }
-                            }
                             Button {
                                 Task { await ExportService.shared.runPending(trigger: "manual", contentId: item.id) }
                             } label: {
@@ -1223,9 +1246,9 @@ public struct ArticleRow: View {
     let item: ContentItem
     let isSelected: Bool
     /// 乐观已读覆盖（open() 点未读后由 vm.readMarks 传入——不碰 items 数据源）
-    var isReadOverride: Bool = false
+    var isReadOverride: Bool? = nil
     /// 有效已读态（覆盖优先，其次 item 字段）
-    private var isRead: Bool { isReadOverride || item.isRead }
+    private var isRead: Bool { isReadOverride ?? item.isRead }
     /// @AppStorage 让设置变化时行自动重建（静态 ReadingLayout 读取不触发刷新）
     @AppStorage("reading.uiFontScale") private var scale: Double = 1.0
     @AppStorage("list.showThumbnails") private var showThumbnails: Bool = true
@@ -1352,6 +1375,9 @@ public struct ArticleRow: View {
                     // 转录（llm_transcript_md，仅媒体项）
                     if item.isMedia && item.hasTranscript {
                         RBadge(text: "转录", color: .rbSummary, scale: scale)
+                    }
+                    if item.hasExport {
+                        RBadge(text: "已导出", color: .rbAccent, scale: scale)
                     }
                     if showDate, let pd = item.publishedAt, pd.count >= 10 {
                         Text(formattedDate(pd))
@@ -1601,15 +1627,6 @@ public struct ReadingView: View {
                 .buttonStyle(.staticQuiet)
                 .help(isRead ? "标为未读" : "标为已读")
 
-                Button { toggleArchive() } label: {
-                    Image(systemName: item.archived ? "tray.and.arrow.up" : "archivebox")
-                        .font(.system(size: 15, weight: .regular))
-                        .frame(width: 24, height: 24)
-                        .foregroundStyle(Color.rbText2)
-                }
-                .buttonStyle(.staticQuiet)
-                .help(item.archived ? "取消归档" : "归档")
-
                 Button { showShareSheet = true } label: {
                     Image(systemName: "square.and.arrow.up")
                         .font(.system(size: 15, weight: .regular))
@@ -1623,23 +1640,12 @@ public struct ReadingView: View {
 
                 // 视图切换：非媒体项「译文/原文」两段；媒体项「原文/译文/转录」三段（同一组件同一位置）
                 if isMediaItem {
-                    // 媒体项三标签：有转录对照稿才显示「转录」段
-                    // （用 translatedText 判定——DB 兜底，不依赖 item 轻列字段的新鲜度）
-                    if translatedText != nil {
-                        RBSegmented(
-                            items: [(0, "原文"), (1, "译文"), (2, "转录")],
-                            selection: $mediaTab
-                        )
-                    } else {
-                        // 无转录稿只两段；mediaTab 持久化值可能=2（上次转录），钳制到 0 防越界
-                        RBSegmented(
-                            items: [(0, "原文"), (1, "译文")],
-                            selection: Binding(
-                                get: { min(mediaTab, 1) },
-                                set: { mediaTab = $0 }
-                            )
-                        )
-                    }
+                    // 媒体标签分别由各自字段决定：译文看 llm_translated_md，
+                    // 转录看 llm_transcript_md；二者互不作为对方的显示条件。
+                    RBSegmented(
+                        items: mediaTabItems,
+                        selection: mediaTabSelection
+                    )
                 // ⚠️ 切标签"点了没反应"根治（09:21 用户直觉定位：在等通知但通知没给到，是个低级问题）：
                 // 原判断 `!= nil` —— llm_translated_md=0KB 的文章 loadedTranslatedMd 是**空字符串 ""（非 nil）**，
                 // `!= nil` 通过 → 标签显示"译文/原文"；但正文 hasTranslated 判断是 `!$0.isEmpty`，
@@ -1730,8 +1736,8 @@ public struct ReadingView: View {
                     // 这套是阅读器唯一的操作按钮组（右上角已只留格式）。
                     // 所有按钮都是单篇手动操作/重操作，不受文件夹/订阅源自动开关限制。
                     HStack(spacing: 8) {
-                        // 获取全文：不需 LLM，任何项都可点（抓正文/重抓）
-                        StaticCapsuleButton(title: "获取全文", icon: "doc.text", disabled: busy) { runFulltext() }
+                        // 提取全文：不需 LLM，任何项都可点（抓正文/重抓）
+                        StaticCapsuleButton(title: "提取全文", icon: "doc.text", disabled: busy) { runFulltext() }
                         // 内容处理：按源开关重新跑已开启管线（一次点击跑全部）
                         StaticCapsuleButton(title: "内容处理", icon: "gearshape.2", disabled: busy) {
                             reprocessFromReadingView()
@@ -1815,7 +1821,7 @@ public struct ReadingView: View {
                 .frame(maxWidth: .infinity)   // 内容限宽后居中
             }
             // 切标签连同 ScrollView 一起重建（实测确认的稳定路径，代价是滚动位置回顶）
-            .id("reading-body-\(viewMode)-\(mediaTab)")
+            .id("reading-body-\(viewMode)-\(effectiveMediaTab)")
             .background(p.background)   // 主题底色
         }
         // 视图随 .id(item.id) 重建，onAppear 即切文章——刷新有效开关与本地状态
@@ -1960,21 +1966,35 @@ public struct ReadingView: View {
     // MARK: 快捷操作（本地即时反馈 + 通知列表刷新）
 
     private func toggleStar() {
-        Database.shared.toggleStar(contentId: item.id)
-        isStarred.toggle()
-        NotificationCenter.default.post(name: .contentUpdated, object: nil)
+        let target = Database.shared.toggleStar(contentId: item.id) { ok, starred in
+            if ok {
+                if starred {
+                    Task { await ExportService.shared.runPending(trigger: "starred", contentId: item.id) }
+                }
+                NotificationCenter.default.post(name: .contentUpdated, object: nil)
+            } else {
+                isStarred.toggle()
+            }
+        }
+        isStarred = target
     }
 
     private func toggleRead() {
-        if isRead { Database.shared.markUnread(contentId: item.id) }
-        else { Database.shared.markRead(contentId: item.id) }
-        isRead.toggle()
-        NotificationCenter.default.post(name: .contentUpdated, object: nil)
-    }
-
-    private func toggleArchive() {
-        Database.shared.toggleArchive(contentId: item.id)
-        NotificationCenter.default.post(name: .contentUpdated, object: nil)
+        let targetRead = !isRead
+        isRead = targetRead
+        let completion: @MainActor @Sendable (Bool) -> Void = { ok in
+            if ok {
+                // 写入确认后再通知列表刷新，避免 observer 读到旧状态。
+                NotificationCenter.default.post(name: .contentUpdated, object: nil)
+            } else {
+                isRead.toggle()
+            }
+        }
+        if targetRead {
+            Database.shared.markRead(contentId: item.id, completion: completion)
+        } else {
+            Database.shared.markUnread(contentId: item.id, completion: completion)
+        }
     }
 
     /// 正文视图模式：0=双语对照 / 1=仅原文 / 2=仅译文。
@@ -2032,6 +2052,36 @@ public struct ReadingView: View {
 
     // MARK: 媒体项三标签（原文/译文/转录）
 
+    /// 媒体标签动态组合：原文始终存在，译文和转录分别检查自己的字段。
+    private var mediaTabItems: [(Int, String)] {
+        Self.mediaTabOptions(hasTranslation: translatedText != nil, hasTranscript: hasTranscript)
+    }
+
+    /// 纯逻辑入口，供回归测试验证四种译文/转录组合。
+    nonisolated static func mediaTabOptions(hasTranslation: Bool, hasTranscript: Bool) -> [(Int, String)] {
+        var tabs: [(Int, String)] = [(0, "原文")]
+        if hasTranslation { tabs.append((1, "译文")) }
+        if hasTranscript { tabs.append((2, "转录")) }
+        return tabs
+    }
+
+    private var hasTranscript: Bool {
+        guard let text = loadedTranscriptMd else { return false }
+        return !text.isEmpty
+    }
+
+    /// mediaTab 用 @AppStorage 记住上次选择；切到不具备该内容的媒体时安全回退原文。
+    private var effectiveMediaTab: Int {
+        mediaTabItems.contains(where: { $0.0 == mediaTab }) ? mediaTab : 0
+    }
+
+    private var mediaTabSelection: Binding<Int> {
+        Binding(
+            get: { effectiveMediaTab },
+            set: { mediaTab = $0 }
+        )
+    }
+
     /// feed 简介原文（excerpt 已是剥标签纯文本——播客简介存摘要字段；兜底 content_html 剥标签兼容旧数据）
     private var excerptPlainText: String {
         if let ex = item.excerpt, !ex.isEmpty { return ex }
@@ -2048,16 +2098,13 @@ public struct ReadingView: View {
     /// 切标签 = 换分支 = 子树换类型重建 → 与 .id 相同的「首次渲染被推迟」隐患。
     /// 改为计算属性出 markdown + 单一 MarkdownBodyView（身份稳定，就地更新，同事务上屏）。
     private var mediaBodyMarkdown: String {
-        // 无转录对照稿时，mediaTab=2（上次记住的转录）无内容，钳制回原文
-        let hasTranscript = translatedText != nil
-        let tab = (mediaTab == 2 && !hasTranscript) ? 0 : mediaTab
-        switch tab {
+        switch effectiveMediaTab {
         case 0:
             // 原文：defuddle 抓到的全文（content_md），兜底 feed 简介
             if let md = loadedContentMd, !md.isEmpty { return md }
             return excerptPlainText
         case 1:
-            // 译文：全文翻译的中英对照（llm_translated_md），与「转录」标签同数据源。
+            // 译文：全文/简介翻译（llm_translated_md），与转录稿字段彼此独立。
             // 原用 effectiveExcerptTranslated（简介翻译 llm_excerpt_translated），
             // 但翻译全文（translate）只写 llm_translated_md 不写 llm_excerpt_translated，
             // 导致简介翻译永远空 → 「译文」标签永远「尚无译文」。
@@ -2195,16 +2242,20 @@ public struct ReadingView: View {
             return PipelinePolicy.from(configJson: cfg)
         }()
         let body = loadedContentMd ?? item.contentMd ?? item.excerpt ?? ""
+        let audioUrl = MediaAudioURLResolver.preferred(loadedAudioUrl, item.audioUrl)
+        let skipMediaTranslation = isMediaItem && ContentLanguage.isChinese(
+            declared: item.language, fallbackText: item.title + "\n" + body)
         busy = true; busyForId = cid; statusMsg = "内容处理中…"
         Task {
             var results: [String] = []
             if policy.autoScore, pipeline.isAvailable { results.append(await pipeline.score(contentId: cid, title: item.title, body: body) ? "评分✅" : "评分❌") }
-            if policy.autoTranslate, pipeline.isAvailable { results.append(await pipeline.translate(contentId: cid, title: item.title, body: body) ? "翻译✅" : "翻译❌") }
-            if policy.autoSummarize, pipeline.isAvailable { results.append(await pipeline.summarize(contentId: cid, title: item.title, body: body) ? "摘要✅" : "摘要❌") }
-            if policy.autoTranscribe, (item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil) {
-                results.append(await transcriber.transcribe(contentId: cid, title: item.title, audioUrl: item.audioUrl, pageUrl: item.url, language: item.language) ? "转录✅" : "转录❌")
+            if policy.autoTranslate, !skipMediaTranslation, pipeline.isAvailable {
+                results.append(await pipeline.translate(contentId: cid, title: item.title, body: body) ? "翻译✅" : "翻译❌")
             }
-            if !results.isEmpty { ArchiveService.shared.rearchive(contentId: cid) }
+            if policy.autoSummarize, pipeline.isAvailable { results.append(await pipeline.summarize(contentId: cid, title: item.title, body: body) ? "摘要✅" : "摘要❌") }
+            if policy.autoTranscribe, isMediaItem {
+                results.append(await transcriber.transcribe(contentId: cid, title: item.title, audioUrl: audioUrl, pageUrl: item.url, language: item.language) ? "转录✅" : "转录❌")
+            }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 guard busyForId == cid else { return }
@@ -2224,7 +2275,7 @@ public struct ReadingView: View {
         }
         busy = true
         busyForId = cid
-        statusMsg = "获取全文中…"
+        statusMsg = "提取全文中…"
         Task {
             // 从源 config 解析 fetch_mode + 获取 feed html（feed_full 模式需要）
             let row = Database.shared.queryRows("""
@@ -2239,12 +2290,11 @@ public struct ReadingView: View {
                let m = FetchMode(rawValue: raw) { mode = m }
             let ok = await FullTextFetcher.shared.fetchAndStore(
                 contentId: cid, url: item.url, feedHtml: feedHtml, mode: mode)
-            if ok { ArchiveService.shared.rearchive(contentId: cid) }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 guard busyForId == cid else { return }
                 busy = false
-                statusMsg = ok ? "✅ 全文获取完成" : "❌ 全文获取失败"
+                statusMsg = ok ? "✅ 全文提取完成" : "❌ 全文提取失败"
                 if ok {
                     refreshLoadedBody()
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)
@@ -2265,7 +2315,6 @@ public struct ReadingView: View {
         statusMsg = "AI 评分中…"
         Task {
             let ok = await pipeline.score(contentId: cid, title: item.title, body: contentBody)
-            if ok { ArchiveService.shared.rearchive(contentId: cid) }   // 手动重处理 → 刷新归档文件
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 guard busyForId == cid else { return }   // 已切走，不覆盖新文章状态
@@ -2289,7 +2338,7 @@ public struct ReadingView: View {
         busyForId = cid
         statusMsg = "翻译中…"
         Task {
-            // 媒体项：翻译 defuddle 全文（loadedContentMd）→ llm_translated_md（「转录」标签可显示中英对照）；
+            // 媒体项：翻译 defuddle 全文（loadedContentMd）→ llm_translated_md（「译文」标签）；
             // 兜底走 feed 简介翻译（translateExcerpt），简介空则返回 false 不浪费 LLM 调用。
             // 非媒体项：翻译正文 → llm_translated_md（译文/原文切换）
             let ok: Bool
@@ -2303,7 +2352,6 @@ public struct ReadingView: View {
             } else {
                 ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
             }
-            if ok { ArchiveService.shared.rearchive(contentId: cid) }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 guard busyForId == cid else { return }
@@ -2331,7 +2379,6 @@ public struct ReadingView: View {
         statusMsg = "摘要中…"
         Task {
             let ok = await pipeline.summarize(contentId: cid, title: item.title, body: contentBody)
-            if ok { ArchiveService.shared.rearchive(contentId: cid) }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 guard busyForId == cid else { return }
@@ -2354,10 +2401,10 @@ public struct ReadingView: View {
         busy = true
         busyForId = cid
         statusMsg = "转录中（下载+识别，较长）…"
+        let audioUrl = MediaAudioURLResolver.preferred(loadedAudioUrl, item.audioUrl)
         Task {
             let ok = await transcriber.transcribe(
-                contentId: cid, title: item.title, audioUrl: item.audioUrl, pageUrl: item.url, language: item.language)
-            if ok { ArchiveService.shared.rearchive(contentId: cid) }
+                contentId: cid, title: item.title, audioUrl: audioUrl, pageUrl: item.url, language: item.language)
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 guard busyForId == cid else { return }
@@ -2429,10 +2476,6 @@ public struct ShareSheet: View {
             Hairline()
 
             VStack(alignment: .leading, spacing: 2) {
-                shareActionRow("重新生成 Markdown 文件", icon: "arrow.clockwise.doc") {
-                    ArchiveService.shared.rearchive(contentId: item.id)
-                    message = "✅ 已重新生成 Markdown 文件"
-                }
                 shareActionRow("触发导出规则（Obsidian / webhook）", icon: "square.and.arrow.up.on.square") {
                     Task {
                         await ExportService.shared.runPending(trigger: "manual", contentId: item.id)
@@ -2501,7 +2544,6 @@ struct ShortcutHelpView: View {
         ("文章操作", [
             ("空格", "已读 / 未读切换"),
             ("s", "星标 / 取消星标"),
-            ("a", "归档 / 取消归档"),
             ("e", "当前筛选范围全部标已读"),
             ("v", "浏览器打开原文"),
         ]),

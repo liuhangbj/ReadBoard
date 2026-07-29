@@ -620,42 +620,12 @@ struct BilingualBodyView: View {
     let fontChoice: ReadingFont
     let fontSize: Double
     let lineSpacing: Double
-    /// 内容 ID——读归档 Markdown 文件直接渲染（已配对的双语版本，不再实时合成）
-    var contentId: Int64? = nil
 
     private var p: ThemePalette { theme.palette(for: mode) }
 
-    /// 归档 Markdown 文件内容（已配对的双语版本）——@State 缓存
-    @State private var archivedMd: String? = nil
+    var body: some View { legacyBilingualView }
 
-    /// 读归档 Markdown 文件——ArchiveService.renderBilingual 已配对（译文 + --- + ## 原文 + 原文）
-    private func loadArchivedMd() {
-        guard let cid = contentId, archivedMd == nil else { return }
-        if let path = ArchiveService.shared.archiveFilePath(contentId: cid),
-           FileManager.default.fileExists(atPath: path),
-           let content = try? String(contentsOfFile: path, encoding: .utf8) {
-            Trace.i("读归档 md 完成 id=\(cid) 大小=\(content.count)字符（约 \(content.count/1024)KB）mem=\(Trace.mb())MB", category: "read")
-            archivedMd = content
-        } else if let cid = contentId {
-            Trace.d("无归档文件，回退实时合成 id=\(cid) mem=\(Trace.mb())MB", category: "read")
-        }
-    }
-
-    var body: some View {
-        Group {
-            if let md = archivedMd {
-                // 直接渲染归档 Markdown 文件（已配对的双语版本）
-                MarkdownBodyView(markdown: md, theme: theme, mode: mode,
-                                 fontChoice: fontChoice, fontSize: fontSize, lineSpacing: lineSpacing)
-            } else {
-                // 归档文件不存在（未入库/已删除）——回退实时合成（兼容旧数据）
-                legacyBilingualView
-            }
-        }
-        .onAppear { loadArchivedMd() }
-    }
-
-    /// 兼容旧数据：实时合成双语（归档文件不存在时用）
+    /// 直接使用数据库提供的原文和译文实时合成双语。
     private var legacyBilingualView: some View {
         let cleanedOriginal = Self.stripFrontmatterText(original)
         let origParas = cleanedOriginal.components(separatedBy: "\n\n")

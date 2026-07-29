@@ -89,6 +89,8 @@ public final class LLMPipeline: @unchecked Sendable {
       * 纯情绪化宣泄，无任何事实或逻辑支撑
       * 内容明显未完成或截断
 
+    {custom_instruction}
+
     文章标题：{title}
 
     文章内容：
@@ -107,11 +109,14 @@ public final class LLMPipeline: @unchecked Sendable {
         let prompt = Self.scorePromptTemplate
             .replacingOccurrences(of: "{title}", with: title)
             .replacingOccurrences(of: "{content}", with: truncated)
+            .replacingOccurrences(of: "{custom_instruction}",
+                                  with: AIPromptSettings.instructionBlock(for: .score))
         do {
             let (text, model) = try await client.chat(
                 messages: [ChatMessage(role: "user", content: prompt)],
                 maxTokens: 1024)
-            guard let result = Self.parseScoreJSON(text) else {
+            guard !Task.isCancelled else { setError("任务已取消"); return false }
+            guard let result = Self.parseScoreJSON(text, weights: AIPromptSettings.scoreWeights) else {
                 setError("评分结果解析失败（LLM 输出非预期 JSON）")
                 return false
             }
@@ -126,6 +131,7 @@ public final class LLMPipeline: @unchecked Sendable {
 
     /// 把 LLM 调用错误转成可读诊断（区分 key 失效/限流/超时/网络/解析——决定该不该重试）
     static func describeError(_ error: Error) -> String {
+        if LLMClient.isCancellation(error) { return "任务已取消" }
         if let e = error as? LLMError {
             switch e {
             case .noProvider: return "无可用 LLM 配置（模型配置页未填写任何有效模型）"
@@ -142,7 +148,7 @@ public final class LLMPipeline: @unchecked Sendable {
         return "网络/未知错误：\(error.localizedDescription)"
     }
 
-    static func parseScoreJSON(_ text: String) -> ScoreResult? {
+    static func parseScoreJSON(_ text: String, weights: ScoreWeights = .default) -> ScoreResult? {
         // 提取第一个 {...} 块（LLM 可能包裹多余文本）
         guard let start = text.firstIndex(of: "{"),
               let end = text.lastIndex(of: "}") else { return nil }
@@ -155,11 +161,11 @@ public final class LLMPipeline: @unchecked Sendable {
         let depth = min(max(int("depth"), 0), 40)
         let quality = min(max(int("quality"), 0), 35)
         let readability = min(max(int("readability"), 0), 25)
-        var total = int("total")
-        // total 不可信（可能超 100 或与分项不符）时以分项之和为准
-        let sum = depth + quality + readability
-        if total <= 0 || total > 100 || abs(total - sum) > 10 { total = sum }
-        total = min(max(total, 0), 100)
+        // 三维量表保持固定（40/35/25），最终总分由程序按用户权重重算，不信任模型 total。
+        let weightedTotal = Double(depth) / 40.0 * Double(weights.depth)
+            + Double(quality) / 35.0 * Double(weights.quality)
+            + Double(readability) / 25.0 * Double(weights.readability)
+        let total = min(max(Int(weightedTotal.rounded()), 0), 100)
         let summary = (obj["summary"] as? String) ?? ""
         return ScoreResult(depth: depth, quality: quality, readability: readability, total: total, summary: summary)
     }
@@ -213,10 +219,12 @@ public final class LLMPipeline: @unchecked Sendable {
         let truncated = Self.truncateKeepEnds(body, maxChars: 12000)
         let prompt = """
         你是一位专注能源、矿业、宏观经济的独立研究者，同时对影视音乐、人文历史、科学科技有广泛兴趣。
-        请为以下内容写一段中文摘要，要求：
-        - 150 字以内
+        请为以下内容生成中文摘要，要求：
+        - \(AIPromptSettings.summaryLength) 字以内
         - 提炼核心观点和关键数据，不要复述背景
-        - 直接输出摘要正文，不要"本文讲述了"这类开头
+        - 直接输出摘要内容，不要"本文讲述了"这类开头
+
+        \(AIPromptSettings.instructionBlock(for: .summarize))
 
         标题：\(title)
 
@@ -227,6 +235,7 @@ public final class LLMPipeline: @unchecked Sendable {
             let (out, _) = try await client.chat(
                 messages: [ChatMessage(role: "user", content: prompt)],
                 maxTokens: 512)
+            guard !Task.isCancelled else { setError("任务已取消"); return nil }
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { setError("摘要返回空"); return nil }
             setError(nil)
@@ -250,11 +259,14 @@ public final class LLMPipeline: @unchecked Sendable {
 
     /// 单次翻译（<=15000 字）
     private func translateSingle(_ text: String, targetLang: String) async -> String? {
+        let outputLanguage = AIPromptSettings.effectiveTranslationLanguage(fallback: targetLang)
         let prompt = """
-        你是一位专业的翻译。请将以下内容完整翻译成\(targetLang)，要求：
+        你是一位专业的翻译。请将以下内容完整翻译成\(outputLanguage)，要求：
         - 保留原文的段落结构、数据、专有名词
-        - 语言流畅自然，符合中文表达习惯，不是逐字直译
+        - 语言流畅自然，符合\(outputLanguage)表达习惯，不是逐字直译
         - 直接输出译文，不要任何解释或"以下是翻译"之类的话
+
+        \(AIPromptSettings.instructionBlock(for: .translate))
 
         内容：
         \(text)
@@ -263,6 +275,7 @@ public final class LLMPipeline: @unchecked Sendable {
                 let (out, _) = try await client.chat(
                     messages: [ChatMessage(role: "user", content: prompt)],
                     maxTokens: 16384)
+                guard !Task.isCancelled else { return nil }
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         } catch {
@@ -270,9 +283,9 @@ public final class LLMPipeline: @unchecked Sendable {
         }
     }
 
-    // MARK: - 中英文对照翻译（转录稿专用）
+    // MARK: - 原文与译文对照（转录稿专用）
 
-    /// 把英文转录稿翻译成「中英文对照」md：英段+中段交替，空行分隔。
+    /// 把非中文转录稿翻译成原文与目标语言对照 Markdown。
     /// 转录稿是 whisper 碎句，让 LLM 先合并成通顺段落再对照——顺带提升可读性。
     /// 长文本（>12000 字）分块处理，逐块对照后拼接。
     /// 块大小/token 权衡：单块 12000 字对照 ~15000 字符 ≈ 5000 token，配 maxTokens 16384
@@ -286,6 +299,7 @@ public final class LLMPipeline: @unchecked Sendable {
             var parts: [String] = []
             var anyOK = false
             for chunk in chunks {
+                guard !Task.isCancelled else { return nil }
                 if let t = await translateBilingualSingle(chunk) {
                     parts.append(t); anyOK = true
                 } else {
@@ -299,13 +313,16 @@ public final class LLMPipeline: @unchecked Sendable {
 
     /// 单块中英对照（<=12000 字）。prompt 已实测：英文普通段落 + 中文 `> ` 引用块，格式稳定。
     private func translateBilingualSingle(_ text: String) async -> String? {
+        let outputLanguage = AIPromptSettings.effectiveTranslationLanguage()
         let prompt = """
-        你是一位专业的翻译。下面是一段英文播客转录稿。请输出**中英文对照**版本，要求：
+        你是一位专业的翻译。下面是一段非中文音视频转录稿。请输出**原文与\(outputLanguage)对照**版本，要求：
         - 按语义把转录稿组织成自然段落（转录稿是碎句，先合并成通顺的句子再分段）
-        - 每段先英文原文（普通段落），紧接一段中文译文
-        - 中文译文必须用 markdown 引用块语法：每行以 `> ` 开头（大于号+空格），英文原文不用引用块
-        - 英文段和中文段之间空一行，段与段之间空一行
+        - 每段先输出原文（普通段落），紧接一段\(outputLanguage)译文
+        - \(outputLanguage)译文必须用 markdown 引用块语法：每行以 `> ` 开头（大于号+空格），原文不用引用块
+        - 原文段和译文段之间空一行，段与段之间空一行
         - 不要代码块包裹，不要任何解释或开场白，直接输出对照内容
+
+        \(AIPromptSettings.instructionBlock(for: .transcribe))
 
         转录稿：
         \(text)
@@ -314,6 +331,59 @@ public final class LLMPipeline: @unchecked Sendable {
             let (out, _) = try await client.chat(
                 messages: [ChatMessage(role: "user", content: prompt)],
                 maxTokens: 16384)
+            guard !Task.isCancelled else { return nil }
+            let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        } catch {
+            return nil
+        }
+    }
+
+    // MARK: - 原语言转录稿整理
+
+    /// 转录稿交给 LLM 用原语言整理，但不翻译、不总结、不删减信息。
+    /// 长稿沿用分块策略；单块失败保留 Whisper 原稿，不让后处理失败拖垮整次转录。
+    func polishTranscript(_ text: String) async -> String? {
+        guard isAvailable else { return nil }
+        if text.count > 12000 {
+            let chunks = Self.splitByParagraph(text, maxChars: 12000)
+            guard !chunks.isEmpty else { return nil }
+            var parts: [String] = []
+            var anyOK = false
+            for chunk in chunks {
+                guard !Task.isCancelled else { return nil }
+                if let polished = await polishTranscriptSingle(chunk) {
+                    parts.append(polished)
+                    anyOK = true
+                } else {
+                    parts.append(chunk)
+                }
+            }
+            return anyOK ? parts.joined(separator: "\n\n") : nil
+        }
+        return await polishTranscriptSingle(text)
+    }
+
+    private func polishTranscriptSingle(_ text: String) async -> String? {
+        let prompt = """
+        你是一位严谨的口述稿编辑。请使用原稿语言整理下面的音视频转录稿，要求：
+        - 只做原语言文本整理，绝对不要翻译成其他语言
+        - 修复明显的断句和标点，把 Whisper 产生的碎句合并成通顺句子
+        - 按语义组织成自然段落，保留原有叙述顺序
+        - 保留全部观点、事实、数字、专有名词和语气；不要总结、扩写或添加原文没有的信息
+        - 仅删除明确的识别重复和无意义口头语，不要删减有效内容
+        - 不要代码块、标题、解释或开场白，直接输出整理后的中文稿
+
+        \(AIPromptSettings.instructionBlock(for: .transcribe))
+
+        转录稿：
+        \(text)
+        """
+        do {
+            let (out, _) = try await client.chat(
+                messages: [ChatMessage(role: "user", content: prompt)],
+                maxTokens: 16384)
+            guard !Task.isCancelled else { return nil }
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         } catch {
@@ -330,6 +400,7 @@ public final class LLMPipeline: @unchecked Sendable {
         var parts: [String] = []
         var anyOK = false
         for (i, chunk) in chunks.enumerated() {
+            guard !Task.isCancelled else { return nil }
             if let t = await translateSingle(chunk, targetLang: targetLang) {
                 parts.append(t)
                 anyOK = true
@@ -341,8 +412,9 @@ public final class LLMPipeline: @unchecked Sendable {
         return anyOK ? parts.joined(separator: "\n\n") : nil
     }
 
-    /// 按段落（空行）切分，每块不超过 maxChars；单段超限则硬截（保头尾）
+    /// 按段落（空行）切分，每块不超过 maxChars；单段超限时连续切块，保证全文不丢。
     static func splitByParagraph(_ text: String, maxChars: Int) -> [String] {
+        guard maxChars > 0 else { return text.isEmpty ? [] : [text] }
         let paras = text.components(separatedBy: "\n\n")
         var chunks: [String] = []
         var cur = ""
@@ -350,9 +422,14 @@ public final class LLMPipeline: @unchecked Sendable {
             let candidate = cur.isEmpty ? p : cur + "\n\n" + p
             if candidate.count > maxChars {
                 if !cur.isEmpty { chunks.append(cur); cur = "" }
-                // 单段就超限：按 truncateKeepEnds 收进一块
+                // Whisper 常输出没有空行的超长单段；必须连续切块，不能截断中间内容。
                 if p.count > maxChars {
-                    chunks.append(truncateKeepEnds(p, maxChars: maxChars))
+                    var start = p.startIndex
+                    while start < p.endIndex {
+                        let end = p.index(start, offsetBy: maxChars, limitedBy: p.endIndex) ?? p.endIndex
+                        chunks.append(String(p[start..<end]))
+                        start = end
+                    }
                 } else {
                     cur = p
                 }
@@ -370,23 +447,31 @@ public final class LLMPipeline: @unchecked Sendable {
     /// 但省掉一次独立 score 调用（~12000 token input），净省 90%+ 重复输入开销。
     static let translateFullPromptTemplate = """
     你是一位专业的翻译兼独立研究者。请对以下文章完成三件事：
-    1. 全文翻译成中文（保留 markdown 格式、段落结构、数据、专有名词）
+    1. 全文翻译成{translation_language}（保留 markdown 格式、段落结构、数据、专有名词）
     2. 按给定维度评分
-    3. 提炼 150 字以内中文摘要
+    3. 提炼 {summary_length} 字以内中文摘要
 
     翻译要求：
     - 保留原文 markdown 格式（## 标题、**加粗**、- 列表、> 引用等）
-    - 保留图片链接 (![alt](url))，不翻译 alt 文���
+    - 保留图片链接 (![alt](url))，不翻译 alt 文本
     - 语言流畅自然，不是逐字直译
     - 标题放在第一行（只输出译文标题，不要"标题："前缀）
+
+    {translation_custom_instruction}
 
     评分维度（总分 100）：
     - depth 0-40：分析框架是否清晰
     - quality 0-35：论证逻辑是否完整
     - readability 0-25：信息组织是否有条理
 
+    {score_custom_instruction}
+
+    摘要要求：提炼核心观点和关键数据，控制在 {summary_length} 字以内。
+
+    {summary_custom_instruction}
+
     严格输出 JSON（不要 markdown 代码块，不要其他文字）：
-    {"title": "中文标题", "translation": "翻译全文(含 markdown)", "depth": 0-40, "quality": 0-35, "readability": 0-25, "total": 0-100, "summary": "150字以内中文摘要"}
+    {"title": "{translation_language}标题", "translation": "翻译全文(含 markdown)", "depth": 0-40, "quality": 0-35, "readability": 0-25, "total": 0-100, "summary": "{summary_length}字以内中文摘要"}
 
     标题：{title}
 
@@ -404,12 +489,27 @@ public final class LLMPipeline: @unchecked Sendable {
         let prompt = Self.translateFullPromptTemplate
             .replacingOccurrences(of: "{title}", with: title)
             .replacingOccurrences(of: "{content}", with: body)
+            .replacingOccurrences(of: "{summary_length}",
+                                  with: String(AIPromptSettings.summaryLength))
+            .replacingOccurrences(of: "{translation_language}",
+                                  with: AIPromptSettings.effectiveTranslationLanguage())
+            .replacingOccurrences(of: "{translation_custom_instruction}",
+                                  with: AIPromptSettings.instructionBlock(for: .translate))
+            .replacingOccurrences(of: "{score_custom_instruction}",
+                                  with: policy.autoScore
+                                    ? AIPromptSettings.instructionBlock(for: .score) : "")
+            .replacingOccurrences(of: "{summary_custom_instruction}",
+                                  with: policy.autoSummarize
+                                    ? AIPromptSettings.instructionBlock(for: .summarize) : "")
         do {
             let (text, model) = try await client.chat(
                 messages: [ChatMessage(role: "user", content: prompt)],
                 maxTokens: 16384)
-            guard let result = Self.parseTranslateFullJSON(text) else {
-                setError("整合翻译结果解析失败（LLM 输出非预期 JSON）")
+            guard !Task.isCancelled else { setError("任务已取消"); return false }
+            guard let result = Self.parseTranslateFullJSON(
+                text, weights: AIPromptSettings.scoreWeights,
+                sourceLength: body.count) else {
+                setError("整合翻译结果无效（JSON 异常、译文为空或明显不完整）")
                 return false
             }
             return saveTranslateFull(contentId: contentId, result: result, model: model, policy: policy)
@@ -422,16 +522,21 @@ public final class LLMPipeline: @unchecked Sendable {
     /// 长文降级：分块翻译（不走整合 prompt），再按开关分开跑评分/摘要
     private func translateLongWithPolicy(contentId: Int64, title: String, body: String, policy: PipelinePolicy) async -> Bool {
         let translated = await translate(contentId: contentId, title: title, body: body)
+        guard !Task.isCancelled else { setError("任务已取消"); return false }
         if policy.autoScore {
             let _ = await score(contentId: contentId, title: title, body: body)
         }
+        guard !Task.isCancelled else { setError("任务已取消"); return false }
         if policy.autoSummarize {
             let _ = await summarize(contentId: contentId, title: title, body: body)
         }
         return translated
     }
 
-    static func parseTranslateFullJSON(_ text: String) -> TranslateFullResult? {
+    static func parseTranslateFullJSON(
+        _ text: String, weights: ScoreWeights = .default,
+        sourceLength: Int? = nil
+    ) -> TranslateFullResult? {
         guard let start = text.firstIndex(of: "{"),
               let end = text.lastIndex(of: "}") else { return nil }
         let jsonStr = String(text[start...end])
@@ -442,13 +547,25 @@ public final class LLMPipeline: @unchecked Sendable {
         let depth = min(max(int("depth"), 0), 40)
         let quality = min(max(int("quality"), 0), 35)
         let readability = min(max(int("readability"), 0), 25)
-        var total = int("total")
-        let sum = depth + quality + readability
-        if total <= 0 || total > 100 || abs(total - sum) > 10 { total = sum }
-        total = min(max(total, 0), 100)
+        let weightedTotal = Double(depth) / 40.0 * Double(weights.depth)
+            + Double(quality) / 35.0 * Double(weights.quality)
+            + Double(readability) / 25.0 * Double(weights.readability)
+        let total = min(max(Int(weightedTotal.rounded()), 0), 100)
+        guard let translation = obj["translation"] as? String,
+              !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        if let sourceLength {
+            // 完整译文不应短到只剩一句拒绝或说明。10% 且封顶 1000 字是保守下限，
+            // 用于挡住占位答复，同时兼容中英日韩之间正常的字符数差异。
+            let minimumLength = min(max(sourceLength / 10, 20), 1_000)
+            if translation.trimmingCharacters(in: .whitespacesAndNewlines).count < minimumLength {
+                return nil
+            }
+        }
         return TranslateFullResult(
             title: (obj["title"] as? String) ?? "",
-            translation: (obj["translation"] as? String) ?? "",
+            translation: translation,
             depth: depth, quality: quality, readability: readability,
             total: total, summary: (obj["summary"] as? String) ?? "")
     }
@@ -482,30 +599,33 @@ public final class LLMPipeline: @unchecked Sendable {
         return allOK
     }
 
-    /// 把内容全文翻译成中文，写入 llm_translated_md
+    /// 把内容全文翻译成配置的目标语言，写入 llm_translated_md
     /// 长文（>15000 字）走分块翻译，不再静默截断丢尾部（此前 truncateKeepEnds(15000) 会丢超长文的后半）
     @discardableResult
     func translate(contentId: Int64, title: String, body: String, targetLang: String = "中文") async -> Bool {
         guard isAvailable else { return false }
+        let outputLanguage = AIPromptSettings.effectiveTranslationLanguage(fallback: targetLang)
         var translated: String?
         var usedModel = ""
         var partial = false   // 分块翻译有块失败保留原文 → 译文不完整，标记到 meta 供 UI/导出判断
         if body.count > 15000 {
             // 分块：先翻标题（短），正文按段落切块逐块翻
-            let titleT = await translateSingle(title, targetLang: targetLang) ?? title
-            guard let bodyT = await translateChunked(body, targetLang: targetLang) else { return false }
+            let titleT = await translateSingle(title, targetLang: outputLanguage) ?? title
+            guard let bodyT = await translateChunked(body, targetLang: outputLanguage) else { return false }
             translated = titleT + "\n\n" + bodyT
             partial = bodyT.contains("[第 ") && bodyT.contains(" 段翻译失败，保留原文]")
         } else {
             // 翻译不截断——完整正文进 prompt（截断的 [中段已省略] 会被 LLM 翻译进去）
             // 输出保留原格式的译文（markdown）——阅读器译文/原文两个标签，译文保持原有格式
             let prompt = """
-            你是一位专业的翻译。请将以下文章完整翻译成\(targetLang)，要求：
+            你是一位专业的翻译。请将以下文章完整翻译成\(outputLanguage)，要求：
             - 保留原文的段落结构、数据、专有名词、图片链接（![alt](url) 格式保留，不翻译 alt 文本）
             - 保留原文的 markdown 格式（## 标题、**加粗**、*斜体*、- 列表、> 引用等）
-            - 语言流畅自然，符合中文表达习惯，不是逐字直译
+            - 语言流畅自然，符合\(outputLanguage)表达习惯，不是逐字直译
             - 标题也一并翻译，放在第一行（只输出译文标题，不输出原文标题，不要"标题："前缀）
             - 直接输出译文，不要任何解释或"以下是翻译"之类的话
+
+            \(AIPromptSettings.instructionBlock(for: .translate))
 
             标题：\(title)
 
@@ -516,6 +636,7 @@ public final class LLMPipeline: @unchecked Sendable {
                 let (text, model) = try await client.chat(
                     messages: [ChatMessage(role: "user", content: prompt)],
                     maxTokens: 16384)
+                guard !Task.isCancelled else { setError("任务已取消"); return false }
                 let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 translated = t.isEmpty ? nil : t
                 usedModel = model
@@ -528,6 +649,7 @@ public final class LLMPipeline: @unchecked Sendable {
             if lastError == nil { setError("翻译结果为空") }
             return false
         }
+        guard !Task.isCancelled else { setError("任务已取消"); return false }
         // 提取译文第一行作为标题译文（llm_title_translated），供阅读栏中文标题展示。
         // prompt 明确要求「标题也一并翻译，放在第一行」，首行即为译文标题。
         let titleLine = final.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespaces) ?? ""
@@ -549,11 +671,12 @@ public final class LLMPipeline: @unchecked Sendable {
         return ok
     }
 
-    /// 翻译播客 feed 简介（content_html 剥标签）→ 写 llm_excerpt_translated（播客「译文」标签）。
-    /// 与转录对照（llm_translated_md）分开存——简介译文和转录对照是两个独立内容。
+    /// 翻译播客 feed 简介（content_html 剥标签）→ 写 llm_translated_md（播客「译文」标签）。
+    /// 与转录稿（llm_transcript_md）分开存——简介译文和转录稿是两个独立内容。
     @discardableResult
     func translateExcerpt(contentId: Int64, title: String, contentHtml: String) async -> Bool {
         guard isAvailable else { return false }
+        let outputLanguage = AIPromptSettings.effectiveTranslationLanguage()
         // 剥标签成纯文本
         var text = contentHtml.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
         text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
@@ -562,11 +685,13 @@ public final class LLMPipeline: @unchecked Sendable {
         // 一次调用翻标题+简介，用固定分隔符拆开分存两字段（标题→llm_title_translated 供中栏/标题栏，
         // 简介→llm_excerpt_translated 供「译文」标签）
         let prompt = """
-        你是一位专业的翻译。请将以下播客/视频的标题和简介翻译成中文，严格按格式输出：
-        第一行只输出中文标题（不要"标题："前缀，不要原文标题），
+        你是一位专业的翻译。请将以下播客/视频的标题和简介翻译成\(outputLanguage)，严格按格式输出：
+        第一行只输出\(outputLanguage)标题（不要"标题："前缀，不要原文标题），
         第二行只输出四个等号 ==== （作为分隔符），
-        第三行起输出简介的中文译文。
-        语言流畅自然，符合中文表达习惯，不是逐字直译。不要任何解释或"以下是翻译"之类的话。
+        第三行起输出简介的\(outputLanguage)译文。
+        语言流畅自然，符合\(outputLanguage)表达习惯，不是逐字直译。不要任何解释或"以下是翻译"之类的话。
+
+        \(AIPromptSettings.instructionBlock(for: .translate))
 
         标题：\(title)
 
@@ -577,6 +702,7 @@ public final class LLMPipeline: @unchecked Sendable {
             let (out, _) = try await client.chat(
                 messages: [ChatMessage(role: "user", content: prompt)],
                 maxTokens: 4096)
+            guard !Task.isCancelled else { setError("任务已取消"); return false }
             let t = out.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty else { return false }
             // 按 ==== 分隔符拆标题/简介

@@ -74,6 +74,10 @@ public struct ExportRule: Identifiable {
     var overwrite: Bool = true     // 覆盖原文件（true）vs 生成新文件（false，加时间戳）
     /// frontmatter 包含的字段（nil = 默认全部：title/source/author/url/score/published/archived）
     var frontmatterFields: [String]? = nil
+    /// 字段名自定义映射（db_field -> YAML key）；nil 时用默认名。
+    var frontmatterLabels: [String: String]? = nil
+    /// 导出时标题优先使用中文译文（llm_title_translated）。
+    var useTranslatedTitle: Bool = false
     /// 标题命名模板（{title}/{date}/{id} 占位符，默认 "{title}-{id}"）
     var titleTemplate: String = "{title}-{id}"
     var lastRunAt: String?

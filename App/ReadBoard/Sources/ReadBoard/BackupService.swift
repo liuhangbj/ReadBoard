@@ -27,8 +27,8 @@ public final class BackupService: ObservableObject {
     @Published var lastBackupAt: String? = nil
     @Published var lastBackupError: String? = nil
 
-    private let dbPath = NSHomeDirectory() + "/readboard/Data/readboard.db"
-    private let backupDir = NSHomeDirectory() + "/readboard/Data/backups"
+    private let dbPath = Database.databasePath
+    private let backupDir = Database.dataDirectory + "/backups"
     /// 保留份数统一由 CacheCleanupService 持有（UserDefaults 持久化，设置页可调），这里只读透传
     private var keepCount: Int { CacheCleanupService.shared.backupKeepCount }
     /// 备份间隔（每日）

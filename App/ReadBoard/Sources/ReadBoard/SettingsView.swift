@@ -4,7 +4,7 @@ import AppKit
 // MARK: - 独立设置窗口（⌘, 打开，手写侧栏+详情分页）
 
 public enum SettingsPage: String, CaseIterable, Identifiable {
-    case general, reader, llm, deps, boards, sources, fetch, content, pipeline, cleanup
+    case general, reader, llm, deps, boards, sources, fetch, content, export, pipeline, cleanup
     public var id: String { rawValue }
 
     var title: String {
@@ -13,10 +13,11 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .reader:   return "阅读器"
         case .llm:      return "LLM模型"
         case .deps:     return "依赖"
-        case .boards:   return "功能总开关"
-        case .sources:  return "多类型源"
-        case .fetch:    return "全文抓取"
-        case .content:  return "内容处理"
+        case .boards:   return "功能开关"
+        case .sources:  return "多平台订阅"
+        case .fetch:    return "全文提取"
+        case .content:  return "AI内容处理"
+        case .export:   return "导出平台"
         case .pipeline: return "导出规则"
         case .cleanup:  return "缓存清理"
         }
@@ -32,6 +33,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
         case .sources:  return "antenna.radiowaves.left.and.right"
         case .fetch:    return "doc.viewfinder"
         case .content:  return "text.badge.plus"
+        case .export:   return "square.and.arrow.up"
         case .pipeline: return "arrow.triangle.branch"
         case .cleanup:  return "trash"
         }
@@ -66,6 +68,7 @@ public struct SettingsView: View {
                 case .sources:  TypeSwitchPane()
                 case .fetch:    FetchPane()
                 case .content:  ContentPane()
+                case .export:   ExportPlatformPane()
                 case .pipeline: ExportRulePane()
                 case .cleanup:  CleanupPane()
                 }
@@ -102,8 +105,6 @@ public struct GeneralPane: View {
     @State private var autoSyncOn: Bool = SourceStore.shared.autoSyncEnabled
     @State private var proxyEnabled: Bool = FeedFetcher.globalProxy != nil
     @State private var proxyInput: String = FeedFetcher.globalProxy ?? ""
-    @State private var archiveDirInput: String = ""
-    @State private var archivedCount = 0
 
     public var body: some View {
         Form {
@@ -133,29 +134,6 @@ public struct GeneralPane: View {
                         .frame(width: 110)
                     }
                 }
-            }
-            Section("Markdown 文件存储位置") {
-                HStack {
-                    Text(archiveDirInput.isEmpty ? "默认：~/readboard/archive" : archiveDirInput)
-                        .font(.callout)
-                        .foregroundStyle(archiveDirInput.isEmpty ? Color.rbText3 : Color.rbText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
-                    Button("选择目录…") { pickArchiveDir() }
-                        .controlSize(.small)
-                    if !archiveDirInput.isEmpty {
-                        Button("恢复默认") {
-                            archiveDirInput = ""
-                            UserDefaults.standard.removeObject(forKey: "archive.dir")
-                            refreshArchiveStats()
-                        }
-                        .controlSize(.small)
-                        .buttonStyle(.quiet)
-                    }
-                }
-                Text("已生成 \(archivedCount) 个文件")
-                    .font(.caption.monospacedDigit()).foregroundStyle(Color.rbText3)
             }
             Section("网络代理") {
                 Toggle("启用网络代理", isOn: $proxyEnabled.animation())
@@ -200,30 +178,6 @@ public struct GeneralPane: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            archiveDirInput = UserDefaults.standard.string(forKey: "archive.dir") ?? ""
-            refreshArchiveStats()
-        }
-    }
-
-    private func refreshArchiveStats() {
-        archivedCount = ArchiveService.shared.archivedFileCount()
-    }
-
-    /// 系统文件夹选择器选 md 保存目录
-    private func pickArchiveDir() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = true
-        panel.prompt = "选择"
-        panel.message = "选择 Markdown 文件保存目录"
-        if panel.runModal() == .OK, let url = panel.url {
-            archiveDirInput = url.path
-            UserDefaults.standard.set(url.path, forKey: "archive.dir")
-            refreshArchiveStats()
-        }
     }
 }
 
@@ -300,7 +254,7 @@ public struct LLMPane: View {
     }
 }
 
-// MARK: - 全文抓取
+// MARK: - 全文提取
 
 public struct FetchPane: View {
 
@@ -310,9 +264,7 @@ public struct FetchPane: View {
     public var body: some View {
         Form {
             // ── defuddle 本地 ──
-            Section("defuddle（本地正文提取）") {
-                Text("基于 Node.js 的本地网页正文提取引擎，无需联网。fetch_engine.js 随 App 打包。")
-                    .font(.caption).foregroundStyle(Color.rbText3)
+            Section {
                 HStack {
                     Toggle("启用 defuddle", isOn: Binding(
                         get: { UserDefaults.standard.bool(forKey: "defuddle.enabled") },
@@ -326,6 +278,9 @@ public struct FetchPane: View {
                     Text(UserDefaults.standard.bool(forKey: "defuddle.enabled") ? "已开启" : "已关闭")
                         .font(.caption).foregroundStyle(Color.rbText3)
                 }
+            } footer: {
+                Text("基于 Node.js 的本地网页正文提取引擎，与 Obsidian Web Clipper 效果类似")
+                    .font(.caption).foregroundStyle(Color.rbText3)
             }
         }
         .formStyle(.grouped)
@@ -389,19 +344,168 @@ public struct FetchPane: View {
 public struct ContentPane: View {
     public var body: some View {
         Form {
-            Section("AI 子管线开关（需 AI 板块总开关开启）") {
+            Section("AI 内容处理开关") {
                 ForEach(AIPipeline.allCases) { p in
-                    Toggle(p.displayName, isOn: Binding(
-                        get: { p.enabled },
-                        set: { AIPipeline.setEnabled(p, $0) }
-                    ))
-                    .tint(Color.rbAccent)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle(p.displayName, isOn: Binding(
+                            get: { p.enabled },
+                            set: { AIPipeline.setEnabled(p, $0) }
+                        ))
+                        .tint(Color.rbAccent)
+                        AIPromptEditor(pipeline: p)
+                    }
+                    .padding(.vertical, 5)
                 }
-                Text("这些开关与「功能总开关」页的 AI 总开关叠加生效；源/文件夹级还有第三层开关。")
+                Text("开关开启后，文件夹/订阅源可单独设定是否开启，对单个条目可手动执行")
                     .font(.caption).foregroundStyle(Color.rbText3)
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct AIPromptEditor: View {
+    let pipeline: AIPipeline
+    @AppStorage private var modeRaw: String
+    @AppStorage(AIPromptSettings.scoreDepthWeightKey) private var scoreDepthWeight = 40
+    @AppStorage(AIPromptSettings.scoreQualityWeightKey) private var scoreQualityWeight = 35
+    @AppStorage(AIPromptSettings.scoreReadabilityWeightKey) private var scoreReadabilityWeight = 25
+    @AppStorage(AIPromptSettings.summaryLengthKey) private var summaryLength = 150
+    @AppStorage(AIPromptSettings.summaryStyleKey) private var summaryStyle = "concise"
+    @AppStorage(AIPromptSettings.translationStyleKey) private var translationStyle = "natural"
+    @AppStorage(AIPromptSettings.translationLanguageKey) private var translationLanguage = "zh"
+    @AppStorage(AIPromptSettings.translationTermsKey) private var translationTerms = ""
+    @AppStorage(AIPromptSettings.transcriptSpeechStyleKey) private var transcriptSpeechStyle = "standard"
+    @AppStorage(AIPromptSettings.transcriptTranslateKey) private var transcriptTranslate = true
+
+    init(pipeline: AIPipeline) {
+        self.pipeline = pipeline
+        _modeRaw = AppStorage(wrappedValue: AIPromptMode.default.rawValue,
+                              AIPromptSettings.modeKey(for: pipeline))
+    }
+
+    private var isCustom: Bool { modeRaw == AIPromptMode.custom.rawValue }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text("提示词")
+                    .font(.caption)
+                    .foregroundStyle(Color.rbText2)
+                Spacer()
+                Picker("", selection: $modeRaw) {
+                    Text("使用默认").tag(AIPromptMode.default.rawValue)
+                    Text("使用自定义").tag(AIPromptMode.custom.rawValue)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 190)
+            }
+
+            if isCustom {
+                customFields
+                Text("程序会把这些字段拼入固定提示词；输出格式和语言分流保持不变。")
+                    .font(.caption2)
+                    .foregroundStyle(Color.rbText3)
+            }
+        }
+        .padding(.leading, 20)
+    }
+
+    @ViewBuilder
+    private var customFields: some View {
+        switch pipeline {
+        case .score:
+            weightRow("内容深度", value: $scoreDepthWeight)
+            weightRow("信息质量", value: $scoreQualityWeight)
+            weightRow("可读性", value: $scoreReadabilityWeight)
+            let weights = ScoreWeights(normalizingDepth: scoreDepthWeight,
+                                       quality: scoreQualityWeight,
+                                       readability: scoreReadabilityWeight)
+            Text("实际权重：\(weights.depth)% / \(weights.quality)% / \(weights.readability)%（自动归一化为 100%）")
+                .font(.caption2).foregroundStyle(Color.rbText3)
+        case .summarize:
+            HStack {
+                Text("摘要长度").font(.caption).foregroundStyle(Color.rbText2)
+                Spacer()
+                Picker("", selection: $summaryLength) {
+                    Text("100 字").tag(100)
+                    Text("150 字").tag(150)
+                    Text("200 字").tag(200)
+                    Text("300 字").tag(300)
+                }
+                .labelsHidden().pickerStyle(.menu).frame(width: 110)
+            }
+            HStack {
+                Text("输出风格").font(.caption).foregroundStyle(Color.rbText2)
+                Spacer()
+                Picker("", selection: $summaryStyle) {
+                    Text("精简概括").tag("concise")
+                    Text("完整叙述").tag("narrative")
+                    Text("要点列表").tag("bullets")
+                }
+                .labelsHidden().pickerStyle(.menu).frame(width: 120)
+            }
+        case .translate:
+            HStack {
+                Text("翻译文风").font(.caption).foregroundStyle(Color.rbText2)
+                Spacer()
+                Picker("", selection: $translationStyle) {
+                    Text("准确忠实").tag("faithful")
+                    Text("自然流畅").tag("natural")
+                    Text("简洁凝练").tag("concise")
+                }
+                .labelsHidden().pickerStyle(.menu).frame(width: 120)
+            }
+            HStack {
+                Text("输出语言").font(.caption).foregroundStyle(Color.rbText2)
+                Spacer()
+                Picker("", selection: $translationLanguage) {
+                    Text("中文").tag("zh")
+                    Text("英文").tag("en")
+                    Text("日文").tag("ja")
+                }
+                .labelsHidden().pickerStyle(.menu).frame(width: 120)
+            }
+            fieldRow("术语要求", placeholder: "如：公司名保留英文，首次出现补中文", text: $translationTerms)
+        case .transcribe:
+            HStack {
+                Text("口语程度").font(.caption).foregroundStyle(Color.rbText2)
+                Spacer()
+                Picker("", selection: $transcriptSpeechStyle) {
+                    Text("保留口语").tag("spoken")
+                    Text("适度整理").tag("standard")
+                    Text("偏书面化").tag("written")
+                }
+                .labelsHidden().pickerStyle(.menu).frame(width: 110)
+            }
+            Toggle("翻译非中文转录稿", isOn: $transcriptTranslate)
+                .font(.caption)
+                .tint(Color.rbAccent)
+        }
+    }
+
+    private func weightRow(_ label: String, value: Binding<Int>) -> some View {
+        Stepper(value: value, in: 5...80, step: 5) {
+            HStack {
+                Text(label).font(.caption).foregroundStyle(Color.rbText2)
+                Spacer()
+                Text("\(value.wrappedValue)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(Color.rbText)
+            }
+        }
+    }
+
+    private func fieldRow(_ label: String, placeholder: String,
+                          text: Binding<String>) -> some View {
+        HStack {
+            Text(label).font(.caption).foregroundStyle(Color.rbText2)
+            Spacer()
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 310)
+        }
     }
 }
 
@@ -774,6 +878,9 @@ public struct DepsPane: View {
     @ObservedObject private var downloader = ModelDownloader.shared
     @State private var copiedId: String? = nil
     @State private var installingId: String? = nil
+    /// 检查更新状态：nil=未查, true=有更新(值为最新版本), false=已是最新
+    @State private var updateAvailable: [String: String?] = [:]
+    @State private var checkingIds: Set<String> = []
 
     public var body: some View {
         Form {
@@ -809,9 +916,17 @@ public struct DepsPane: View {
                                     Text(item.displayName)
                                         .font(.system(size: 13, weight: .semibold))
                                         .foregroundStyle(Color.rbText)
-                                    if item.installed, let v = item.version, !v.isEmpty {
-                                        Text(v).font(.caption).foregroundStyle(Color.rbText2)
-                                            .lineLimit(1).truncationMode(.middle)
+                                    if item.installed {
+                                        HStack(spacing: 4) {
+                                            if let v = item.version, !v.isEmpty {
+                                                Text(v).font(.caption).foregroundStyle(Color.rbText2)
+                                            }
+                                            if let upd = updateAvailable[item.id], let latest = upd {
+                                                Text("→ 可更新至 \(latest)").font(.caption).foregroundStyle(Color.rbScoreMid)
+                                            } else if updateAvailable.keys.contains(item.id) {
+                                                Text("已是最新").font(.caption).foregroundStyle(Color.rbScoreHigh)
+                                            }
+                                        }
                                     }
                                     Text(item.installed ? item.path : item.installHint)
                                         .font(.caption)
@@ -819,33 +934,43 @@ public struct DepsPane: View {
                                         .lineLimit(1).truncationMode(.middle)
                                 }
                                 Spacer()
-                                // whisper 模型特殊处理优先——有 installCommand 但走下载/下拉，不是复制命令
+                                // whisper 模型：统一下拉选单（已下载=切换，未下载=开始下载）
                                 if item.id == DependencyPaths.Kind.whisperModel.rawValue {
-                                    if item.installed {
-                                        Menu {
-                                            ForEach([item.path] + item.alternatePaths, id: \.self) { p in
-                                                Button((p as NSString).lastPathComponent) {
-                                                    DependencyPaths.setCustom(.whisperModel, p)
+                                    Menu {
+                                        ForEach(ModelDownloader.availableModels, id: \.name) { model in
+                                            let (exists, size) = ModelDownloader.modelExists(name: model.name)
+                                            if exists {
+                                                Button {
+                                                    DependencyPaths.setCustom(.whisperModel, ModelDownloader.modelPath(for: model.name))
                                                     redetect()
+                                                } label: {
+                                                    Label("ggml-\(model.name)（已下载，\(ModelDownloader.formatSize(size))）", systemImage: "checkmark")
                                                 }
+                                            } else {
+                                                Button {
+                                                    Task { await downloader.download(modelName: model.name) }
+                                                } label: {
+                                                    Label("ggml-\(model.name)（~\(model.approxSize)）", systemImage: "arrow.down.circle")
+                                                }
+                                                .disabled(downloader.isDownloading)
                                             }
-                                        } label: {
-                                            Label("模型", systemImage: "cpu")
                                         }
-                                        .menuStyle(.borderlessButton)
-                                        .controlSize(.small)
-                                        .fixedSize()
-                                        Button("重下载") {
-                                            Task { await downloader.download() }
+                                    } label: {
+                                        let curName: String = {
+                                            if let p = DependencyPaths.resolve(.whisperModel) {
+                                                return (p as NSString).lastPathComponent
+                                            }
+                                            return "选择模型"
+                                        }()
+                                        if downloader.isDownloading {
+                                            Label("下载中…", systemImage: "arrow.down.circle")
+                                        } else {
+                                            Label(curName, systemImage: "cpu")
                                         }
-                                        .controlSize(.small)
-                                        .disabled(downloader.isDownloading)
-                                    } else {
-                                        Button(downloader.isDownloading ? "下载中…" : "自动下载") {
-                                            Task { await downloader.download() }
-                                        }
-                                        .controlSize(.small).disabled(downloader.isDownloading)
                                     }
+                                    .menuStyle(.borderlessButton)
+                                    .controlSize(.small)
+                                    .fixedSize()
                                 } else if let cmd = item.installCommand {
                                     Button(copiedId == item.id ? "已复制" : "复制命令") {
                                         NSPasteboard.general.clearContents()
@@ -881,19 +1006,41 @@ public struct DepsPane: View {
                                     .disabled(item.installed || installingId == item.id)
                                 }
 
-                                // 更新（已安装且有升级命令时显示）
+                                // 检查更新 / 立即更新（已安装且有升级命令时显示）
                                 if item.installed, let ucmd = item.upgradeCommand {
-                                    Button {
-                                        if ucmd.hasPrefix("readboard:") {
-                                            handleSpecialInstall(ucmd, id: item.id + "-upgrade")
-                                        } else {
-                                            installDependency(ucmd, id: item.id + "-upgrade")
+                                    let updState = updateAvailable[item.id] ?? nil
+                                    let isInstalling = installingId == item.id + "-upgrade"
+                                    if isInstalling {
+                                        HStack(spacing: 4) {
+                                            ProgressView().scaleEffect(0.5)
+                                            Text("更新中…").font(.caption2).foregroundStyle(Color.rbText3)
                                         }
-                                    } label: {
-                                        Label("更新", systemImage: "arrow.triangle.2.circlepath")
+                                    } else if updState != nil {
+                                        // 有更新 → 「立即更新」
+                                        Button {
+                                            if ucmd.hasPrefix("readboard:") {
+                                                handleSpecialInstall(ucmd, id: item.id + "-upgrade")
+                                            } else {
+                                                installDependency(ucmd, id: item.id + "-upgrade")
+                                            }
+                                        } label: {
+                                            Label("立即更新", systemImage: "arrow.triangle.2.circlepath")
+                                        }
+                                        .controlSize(.small)
+                                        .disabled(installingId == item.id + "-upgrade")
+                                    } else if updState == nil && updateAvailable.keys.contains(item.id) {
+                                        // 已检查，无更新——不显示额外文字，版本行已有「已是最新」
+                                    } else {
+                                        // 未检查
+                                        Button {
+                                            checkForUpdate(item: item)
+                                        } label: {
+                                            Label(checkingIds.contains(item.id) ? "检查中…" : "检查更新",
+                                                  systemImage: "arrow.triangle.2.circlepath")
+                                        }
+                                        .controlSize(.small)
+                                        .disabled(checkingIds.contains(item.id))
                                     }
-                                    .controlSize(.small)
-                                    .disabled(installingId == item.id + "-upgrade")
                                 }
 
                                 Button {
@@ -936,6 +1083,96 @@ public struct DepsPane: View {
     }
 
     /// 强制重检测所有依赖（清除缓存重新 resolve）
+    /// 检查依赖是否有可用的更新版本
+    private func checkForUpdate(item: DependencyItem) {
+        guard !checkingIds.contains(item.id) else { return }
+        checkingIds.insert(item.id)
+        Task {
+            let latest: String?
+            if item.installCommand?.hasPrefix("brew install") == true {
+                latest = await brewLatestVersion(pkg: item.id)
+            } else if item.installCommand?.hasPrefix("npm install") == true {
+                latest = await npmLatestVersion(pkg: item.id)
+            } else if item.id == DependencyPaths.Kind.whisperModel.rawValue {
+                latest = await modelUpdateAvailable()
+            } else {
+                latest = nil
+            }
+            await MainActor.run {
+                updateAvailable[item.id] = latest
+                checkingIds.remove(item.id)
+            }
+        }
+    }
+
+    private func brewLatestVersion(pkg rawId: String) async -> String? {
+        let pkg: String
+        switch rawId {
+        case DependencyPaths.Kind.whisperCLI.rawValue: pkg = "whisper-cpp"
+        case DependencyPaths.Kind.ytdlp.rawValue: pkg = "yt-dlp"
+        default: pkg = rawId
+        }
+        let proc = Process()
+        let brewBin = DependencyPaths.resolve(.node)?.replacingOccurrences(of: "/node", with: "/brew") ?? "/opt/homebrew/bin/brew"
+        proc.executableURL = URL(fileURLWithPath: brewBin)
+        proc.arguments = ["info", "--json", pkg]
+        let pipe = Pipe()
+        proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
+        guard (try? proc.run()) != nil else { return nil }
+        proc.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              let first = json.first else { return nil }
+        let installed = (first["installed"] as? [[String: Any]])?.first?["version"] as? String ?? ""
+        let latest: String
+        if let versions = first["versions"] as? [String: Any],
+           let stable = versions["stable"] as? String, !stable.isEmpty {
+            latest = stable
+        } else {
+            latest = first["version"] as? String ?? ""
+        }
+        // 标准化后比较
+        let k = DependencyPaths.Kind(rawValue: rawId) ?? .ffmpeg
+        let iv = DependencyChecker.extractVersion(installed, kind: k) ?? installed
+        let lv = DependencyChecker.extractVersion(latest, kind: k) ?? latest
+        if iv == lv { return nil }
+        return lv
+    }
+
+    private func npmLatestVersion(pkg rawId: String) async -> String? {
+        // defuddle 等 npm 包
+        let pkg = rawId == DependencyPaths.Kind.defuddleEngine.rawValue ? "defuddle" : rawId
+        let proc = Process()
+        let nodeBin = DependencyPaths.resolve(.node) ?? "/opt/homebrew/bin/node"
+        proc.executableURL = URL(fileURLWithPath: nodeBin)
+        proc.arguments = ["-e", "const e=require('child_process');e.exec('npm view \(pkg) version',(_,o)=>console.log((o||'').trim()))"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
+        guard (try? proc.run()) != nil else { return nil }
+        proc.waitUntilExit()
+        let ver = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return ver.isEmpty ? nil : ver
+    }
+
+    /// 检查当前使用的 whisper 模型是否有新版本（比较远程文件大小）
+    private func modelUpdateAvailable() async -> String? {
+        guard let modelPath = DependencyPaths.resolve(.whisperModel),
+              FileManager.default.fileExists(atPath: modelPath) else { return nil }
+        let modelName = (modelPath as NSString).lastPathComponent.replacingOccurrences(of: "ggml-", with: "").replacingOccurrences(of: ".bin", with: "")
+        guard let url = ModelDownloader.modelURL(for: modelName) else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "HEAD"
+        guard let (_, resp) = try? await URLSession.shared.data(for: req),
+              let http = resp as? HTTPURLResponse,
+              let remoteLen = http.allHeaderFields["Content-Length"] as? String,
+              let remoteSize = Int64(remoteLen) else { return nil }
+        let localAttrs = try? FileManager.default.attributesOfItem(atPath: modelPath)
+        let localSize = (localAttrs?[.size] as? Int64) ?? 0
+        if localSize == remoteSize { return nil }
+        return ModelDownloader.formatSize(remoteSize)
+    }
+
     private func redetect() {
         groups = DependencyChecker.shared.checkAllGroups()
     }
@@ -950,13 +1187,14 @@ public struct DepsPane: View {
                 await downloader.download()
                 await MainActor.run {
                     installingId = nil
+                    updateAvailable.removeValue(forKey: id.replacingOccurrences(of: "-upgrade", with: ""))
                     redetect()
                 }
             }
         }
     }
 
-    /// 一键安装：在终端里跑 brew install / pip install
+    /// 一键安装/更新：跑 brew/npm 命令，完成后刷新版本
     private func installDependency(_ cmd: String, id: String) {
         installingId = id
         Task.detached {
@@ -969,6 +1207,7 @@ public struct DepsPane: View {
             proc.waitUntilExit()
             await MainActor.run {
                 installingId = nil
+                updateAvailable.removeValue(forKey: id.replacingOccurrences(of: "-upgrade", with: ""))
                 redetect()
             }
         }
@@ -1008,8 +1247,6 @@ public struct BoardsPane: View {
                                 .foregroundStyle(Color.rbText)
                             Text(board.subtitle)
                                 .font(.caption).foregroundStyle(Color.rbText2)
-                            Text(board.subFeatures.joined(separator: " · "))
-                                .font(.caption2).foregroundStyle(Color.rbText3)
                         }
                         Spacer()
                         Toggle("", isOn: Binding(
@@ -1022,9 +1259,9 @@ public struct BoardsPane: View {
                     .padding(.vertical, 4)
                 }
             } header: {
-                Text("板块总开关")
+                Text("功能开关")
             } footer: {
-                Text("关掉板块 = 该板块下所有功能全停（无论源级/文件夹级开关怎么开）。AI 子管线细开关在「内容处理」页。")
+                Text("关闭板块 = 该板块下所有功能不可用")
                     .font(.caption)
             }
         }
@@ -1039,10 +1276,8 @@ public struct BoardsPane: View {
 
 public struct CleanupPane: View {
     @ObservedObject private var cleanup = CacheCleanupService.shared
-    @State private var archiveDays = 30
     @State private var deleteDays = 90
     @State private var keepCount = 5
-    @State private var archiveEnabled = true
     @State private var deleteEnabled = true
     @State private var backupKeepEnabled = true
     @State private var cleanHtml = true
@@ -1070,6 +1305,7 @@ public struct CleanupPane: View {
             Text(unit)
                 .font(.callout)
                 .foregroundStyle(enabled.wrappedValue ? Color.rbText2 : Color.rbText3)
+                .frame(width: 58, alignment: .center)
         }
     }
 
@@ -1107,21 +1343,19 @@ public struct CleanupPane: View {
                     }
                 }
                 .font(.callout)
-                Button("刷新占用") { cleanup.refreshStats() }
+                HStack {
+                    Spacer()
+                    Button(action: { cleanup.refreshStats() }) {
+                        Text("刷新占用")
+                    }
                     .controlSize(.small)
-                    .buttonStyle(.quiet)
+                }
             }
 
             Section("清理策略") {
                 // 每项：开关（可关闭）+ 天数自填（TextField 数字）
                 cleanupDayRow(
-                    title: "已读自动归档", unit: "天后归档",
-                    enabled: $archiveEnabled, days: $archiveDays,
-                    onEnable: { cleanup.archiveEnabled = $0 },
-                    onDays: { cleanup.archiveAfterDays = $0 }
-                )
-                cleanupDayRow(
-                    title: "归档自动删除", unit: "天后删除",
+                    title: "已读自动删除", unit: "天后删除",
                     enabled: $deleteEnabled, days: $deleteDays,
                     onEnable: { cleanup.deleteEnabled = $0 },
                     onDays: { cleanup.deleteAfterDays = $0 }
@@ -1133,7 +1367,7 @@ public struct CleanupPane: View {
                     onDays: { cleanup.backupKeepCount = $0 }
                 )
                 cleanupDayRow(
-                    title: "清理已转 Markdown 的全文 HTML", unit: "天后清理",
+                    title: "清理已提取内容的全文 HTML", unit: "天后清理",
                     enabled: $cleanHtml, days: $cleanHtmlDays,
                     onEnable: { cleanup.cleanContentHtml = $0 },
                     onDays: { cleanup.cleanHtmlAfterDays = $0 }
@@ -1142,6 +1376,7 @@ public struct CleanupPane: View {
 
             Section {
                 HStack {
+                    Spacer()
                     Button(cleanup.isRunning ? "清理中…" : "立即清理") {
                         showCleanConfirm = true
                     }
@@ -1153,13 +1388,13 @@ public struct CleanupPane: View {
                     Button("取消", role: .cancel) {}
                     Button("开始清理") { Task { await cleanup.runAll() } }
                 } message: {
-                    Text("将按上方策略归档/删除内容、清理 HTML 和临时文件。\n删除的内容会先备份到回收站（下方可恢复）。")
+                    Text("将按上方策略删除超期已读内容，并清理 HTML 和临时文件。\n星标和带标签的内容不会自动删除。")
                 }
                 if !cleanup.lastRunSummary.isEmpty {
                     Text(cleanup.lastRunSummary)
                         .font(.caption).foregroundStyle(Color.rbScoreHigh)
                 }
-                Text("星标 / 有标签的内容任何清理都不动。物理删除前会导出 JSONL 到 Data/trash/ 回收站。")
+                Text("自动删除会先写入 JSONL 回收站，再清除数据库中的正文和 AI 结果；仅保留防重复抓取所需的最小元数据。备份失败时不会删除。星标和带标签的内容不动。")
                     .font(.caption).foregroundStyle(Color.rbText3)
             }
 
@@ -1177,10 +1412,8 @@ public struct CleanupPane: View {
         }
         .formStyle(.grouped)
         .onAppear {
-            archiveDays = cleanup.archiveAfterDays
             deleteDays = cleanup.deleteAfterDays
             keepCount = cleanup.backupKeepCount
-            archiveEnabled = cleanup.archiveEnabled
             deleteEnabled = cleanup.deleteEnabled
             backupKeepEnabled = cleanup.backupKeepEnabled
             cleanHtml = cleanup.cleanContentHtml
@@ -1302,7 +1535,7 @@ public struct TrashRestoreView: View {
                             if r.restored + r.skipped > 0 {
                                 CacheCleanupService.shared.deleteTrash(batch: b)
                             }
-                            message = "✅ 恢复 \(r.restored) 条（跳过已存在 \(r.skipped)），已放回归档，备份文件已清理"
+                            message = "✅ 恢复 \(r.restored) 条（跳过已存在 \(r.skipped)），已放回文章列表，备份文件已清理"
                             reload()
                         }
                         .controlSize(.small)
@@ -1323,7 +1556,7 @@ public struct TrashRestoreView: View {
                         .controlSize(.small)
                 }
             }
-            Text("恢复后内容放回「归档」，可在阅读区归档筛选里查看/取消归档。")
+            Text("恢复后内容会重新出现在普通文章列表中。")
                 .font(.caption2).foregroundStyle(Color.rbText3)
         }
         .onAppear(perform: reload)
@@ -1539,7 +1772,7 @@ public struct ReaderPane: View {
     }
 }
 
-// MARK: - 多类型源（类型总开关）
+// MARK: - 多平台订阅
 
 /// 设置「多类型源」页：四大内容类型的总开关（文章/RSS、播客、视频、微信）。
 /// 当前仅 UI 与计数，开关持久化于 UserDefaults；拦截接入见下方 footer 说明。
@@ -1550,7 +1783,7 @@ public struct TypeSwitchPane: View {
     public var body: some View {
         Form {
             Section {
-                ForEach(ContentType.allCases) { t in
+                ForEach(ContentType.allCases.filter { $0 != .wechat }) { t in
                     HStack(spacing: 12) {
                         Image(systemName: t.icon)
                             .font(.system(size: 16))
@@ -1578,16 +1811,16 @@ public struct TypeSwitchPane: View {
                     .padding(.vertical, 4)
                 }
             } header: {
-                Text("内容类型总开关")
+                Text("订阅平台开关")
             } footer: {
-                Text("关闭某类型 = readboard 不再抓取/识别该类型的内容（文章/RSS 关掉则只收媒体，反之只收文章）。拦截逻辑后续接入抓取管线，本期仅做开关 UI 与各类型源计数。")
+                Text("关闭某平台订阅 = ReadBoard 不再识别 / 刷新该类型的订阅内容")
                     .font(.caption)
             }
         }
         .formStyle(.grouped)
         .onAppear {
             let srcs = SourceStore.shared.sources
-            for t in ContentType.allCases {
+            for t in ContentType.allCases where t != .wechat {
                 enabled[t] = t.enabled
                 counts[t] = srcs.filter { $0.stype == t.sourceStype }.count
             }

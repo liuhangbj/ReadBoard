@@ -29,5 +29,14 @@
     </dict>
     <key>NSLocalNetworkUsageDescription</key>
     <string>ReadBoard 需要访问本地网络以连接 NAS 上的 RSS 服务（FreshRSS/wechat2rss）、本地 LLM API 以及自建抓取服务。</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>readboard</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>

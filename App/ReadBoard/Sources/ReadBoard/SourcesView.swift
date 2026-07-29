@@ -318,13 +318,13 @@ public struct FolderHeader: View {
             get: { pendingBackfillKey != nil },
             set: { if !$0 { pendingBackfillKey = nil } }
         )) {
-            Button("处理所有历史并重新生成 Markdown") {
+            Button("处理所有历史内容") {
                 Task { await PipelineWorker.shared.backfillHistoryForFolder(folderId: folder.id) }
                 pendingBackfillKey = nil
             }
             Button("只处理新增", role: .cancel) { pendingBackfillKey = nil }
         } message: {
-            Text("「\(folder.name)」整组的\(pendingBackfillKey ?? "")已开启。\n\n• 处理历史：组内所有源的存量文章补跑管线并刷新已生成的 Markdown 文件（耗时很长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+            Text("「\(folder.name)」整组的\(pendingBackfillKey ?? "")已开启。\n\n• 处理历史：组内所有源的存量文章补跑管线（耗时很长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
         }
     }
 
@@ -510,7 +510,7 @@ public struct SourceRow: View {
                 )
         }
         .menuStyle(.borderlessButton)
-        .help("全文获取方式（点击可修改）")
+        .help("全文提取方式（点击可修改）")
     }
 
     /// 抓取频率选择菜单
@@ -547,7 +547,7 @@ public struct SourceRow: View {
             ForEach([0, 50, 100, 200, 500], id: \.self) { n in
                 Button {
                     store.setMaxKeep(id: src.id, count: n)
-                    // 设置后立即执行保留策略（超出最旧的归档）
+                    // 设置后立即执行保留策略（超出最旧的软删除）
                     if n > 0 { _ = store.enforceMaxKeep(sourceId: src.id) }
                 } label: {
                     let label = n == 0 ? "不限制" : "\(n) 条"
@@ -557,7 +557,7 @@ public struct SourceRow: View {
             }
         } label: {
             HStack(spacing: 3) {
-                Image(systemName: "archivebox")
+                Image(systemName: "tray.full")
                     .font(.system(size: 9))
                 Text(src.maxKeep == 0 ? "不限制" : "\(src.maxKeep) 条")
             }
@@ -568,7 +568,7 @@ public struct SourceRow: View {
             .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
         }
         .menuStyle(.borderlessButton)
-        .help("最多保留条数（超出最旧的自动归档，可检索）")
+        .help("最多保留条数（超出后最旧内容自动移出列表）")
     }
 
     /// 指派到文件夹菜单
@@ -602,7 +602,7 @@ public struct SourceRow: View {
     private func isOverridden(key: String) -> Bool { false }
 
     /// 单个管线开关（AI 评分/翻译/转录）。inherited=true 表示文件夹层已开，标蓝提示。
-    /// 打开时弹选项：处理所有历史数据并重新归档（该源存量入管线刷新归档）/ 只处理新增。
+    /// 打开时弹选项：处理所有历史数据 / 只处理新增。
     private func pipelineToggle(_ label: String, key: String, on: Bool, inherited: Bool) -> some View {
         Toggle(label, isOn: Binding(
             get: { on },
@@ -622,13 +622,20 @@ public struct SourceRow: View {
             get: { pendingBackfillKey != nil },
             set: { if !$0 { pendingBackfillKey = nil } }
         )) {
-            Button("处理所有历史并重新生成 Markdown") {
-                Task { await PipelineWorker.shared.backfillHistory(onlySourceId: src.id) }
+            Button("处理所有历史内容") {
+                if let key = pendingBackfillKey {
+                    let col = ["auto_score":"auto_score","auto_translate":"auto_translate",
+                               "auto_summarize":"auto_summarize","auto_transcribe":"auto_transcribe"][key] ?? key
+                    Database.shared.execute("UPDATE content SET \(col)=1 WHERE source_id=?", params: [src.id])
+                }
                 pendingBackfillKey = nil
             }
-            Button("只处理新增", role: .cancel) { pendingBackfillKey = nil }
+            Button("只处理新增", role: .cancel) {
+                // 不做额外动作：旧条目保持原值（0 或 NULL），新入库的自然继承源配置 1
+                pendingBackfillKey = nil
+            }
         } message: {
-            Text("「\(src.name)」的\(label)已开启。\n\n• 处理历史：存量文章补跑管线并刷新已生成的 Markdown 文件（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+            Text("「\(src.name)」的\(label)已开启。\n\n• 处理历史：存量文章补跑管线（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
         }
     }
 

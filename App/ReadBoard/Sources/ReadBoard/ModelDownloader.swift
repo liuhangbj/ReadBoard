@@ -1,7 +1,8 @@
 import Foundation
 
 // MARK: - whisper 模型自动下载
-// 模型缺失时从 huggingface 下载 ggml-medium.bin 到 ~/tools/whisper/models/，带进度回调。
+// 模型缺失时从 huggingface 下载到 ~/tools/whisper/models/，带进度回调。
+// 支持 tiny / small / medium / large-v3 四种模型。
 
 @MainActor
 public final class ModelDownloader: ObservableObject {
@@ -12,22 +13,51 @@ public final class ModelDownloader: ObservableObject {
     @Published var statusText = ""
     @Published var errorMessage: String?
 
-    private let modelURL = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin")!
-    /// 下载目标路径：用户自定义的模型路径优先，否则默认 ~/tools/whisper/models/
-    private var modelPath: String {
-        if let custom = UserDefaults.standard.string(forKey: DependencyPaths.Kind.whisperModel.defaultsKey),
-           !custom.isEmpty {
-            return custom
-        }
-        return NSHomeDirectory() + "/tools/whisper/models/ggml-medium.bin"
+    /// 可供下载的模型列表
+    static let availableModels: [(name: String, displayName: String, approxSize: String, url: String)] = [
+        ("tiny",       "ggml-tiny（~75 MB）",       "75 MB",  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"),
+        ("small",      "ggml-small（~466 MB）",      "466 MB", "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"),
+        ("medium",     "ggml-medium（~1.5 GB）",     "1.5 GB", "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"),
+        ("large-v3",   "ggml-large-v3（~3 GB）",     "3 GB",   "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin"),
+    ]
+
+    /// 从模型名获取 URL
+    static func modelURL(for modelName: String) -> URL? {
+        availableModels.first(where: { $0.name == modelName }).map { URL(string: $0.url)! }
+    }
+
+    /// 获取某模型的默认下载路径
+    static func modelPath(for modelName: String) -> String {
+        NSHomeDirectory() + "/tools/whisper/models/ggml-\(modelName).bin"
+    }
+
+    /// 检查模型是否存在，返回实际文件大小（字节），不存在返回 -1
+    static func modelExists(name: String, path: String? = nil) -> (exists: Bool, sizeBytes: Int64) {
+        let p = path ?? modelPath(for: name)
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: p),
+              let size = attrs[.size] as? Int64 else { return (false, -1) }
+        return (true, size)
+    }
+
+    /// 格式化字节为可读大小
+    static func formatSize(_ bytes: Int64) -> String {
+        if bytes >= 1_073_741_824 { return String(format: "%.1f GB", Double(bytes) / 1_073_741_824) }
+        if bytes >= 1_048_576 { return String(format: "%.0f MB", Double(bytes) / 1_048_576) }
+        return String(format: "%.0f KB", Double(bytes) / 1024)
     }
 
     private init() {}
 
-    /// 下载模型（已在位则直接成功）。完成回调 success。
-    func download() async {
+    /// 下载指定模型
+    func download(modelName: String = "medium") async {
         guard !isDownloading else { return }
-        if FileManager.default.fileExists(atPath: modelPath) {
+        guard let url = Self.modelURL(for: modelName) else {
+            errorMessage = "未知模型：\(modelName)"
+            return
+        }
+        let targetPath = Self.modelPath(for: modelName)
+
+        if FileManager.default.fileExists(atPath: targetPath) {
             statusText = "模型已存在"
             return
         }
@@ -38,31 +68,29 @@ public final class ModelDownloader: ObservableObject {
         defer { isDownloading = false }
 
         do {
-            let dir = (modelPath as NSString).deletingLastPathComponent
+            let dir = (targetPath as NSString).deletingLastPathComponent
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
 
-            let tmpPath = modelPath + ".download"
-            // 断点续传：已有部分文件则从断点接着下（Range 头），不从头再来
+            let tmpPath = targetPath + ".download"
             var resumeFrom: Int64 = 0
             if let attrs = try? FileManager.default.attributesOfItem(atPath: tmpPath),
                let size = attrs[.size] as? Int64, size > 0 {
                 resumeFrom = size
             }
 
-            var req = URLRequest(url: modelURL)
+            var req = URLRequest(url: url)
             if resumeFrom > 0 {
                 req.setValue("bytes=\(resumeFrom)-", forHTTPHeaderField: "Range")
                 statusText = String(format: "从 %.0f MB 续传…", Double(resumeFrom) / 1_000_000)
             }
             let (asyncBytes, resp) = try await URLSession.shared.bytes(for: req)
             let http = resp as? HTTPURLResponse
-            // 服务器不支持 Range（200 而非 206）→ 从头下，清掉旧部分文件
             let serverResumed = resumeFrom > 0 && http?.statusCode == 206
             if resumeFrom > 0 && http?.statusCode == 200 {
-                resumeFrom = 0   // 服务端忽略 Range，重来
+                resumeFrom = 0
             }
-            let bodyLen = resp.expectedContentLength   // 本次响应的长度
-            let total: Int64 = serverResumed ? (resumeFrom + max(bodyLen, 0)) : bodyLen   // -1 = 未知
+            let bodyLen = resp.expectedContentLength
+            let total: Int64 = serverResumed ? (resumeFrom + max(bodyLen, 0)) : bodyLen
 
             if !serverResumed {
                 FileManager.default.createFile(atPath: tmpPath, contents: nil)
@@ -74,7 +102,7 @@ public final class ModelDownloader: ObservableObject {
             for try await byte in asyncBytes {
                 try handle.write(contentsOf: [byte])
                 written += 1
-                if written % (512 * 1024) == 0 {   // 每 512KB 刷一次进度
+                if written % (512 * 1024) == 0 {
                     if total > 0 {
                         self.progress = Double(written) / Double(total)
                         self.statusText = String(format: "下载中 %.0f / %.0f MB",
@@ -85,15 +113,13 @@ public final class ModelDownloader: ObservableObject {
                     }
                 }
             }
-            // 完整性校验：Content-Length 已知时核对最终文件大小（网络中断静默截断
-            // 会产生"能下载完但 whisper 加载即崩"的残模型，不如当场报错误删重下）
             if total > 0,
                let finalSize = (try? FileManager.default.attributesOfItem(atPath: tmpPath))?[.size] as? Int64,
                finalSize != total {
                 try? FileManager.default.removeItem(atPath: tmpPath)
                 throw DownloadError.sizeMismatch(expected: total, got: finalSize)
             }
-            try FileManager.default.moveItem(atPath: tmpPath, toPath: modelPath)
+            try FileManager.default.moveItem(atPath: tmpPath, toPath: targetPath)
             progress = 1
             statusText = "下载完成"
         } catch {

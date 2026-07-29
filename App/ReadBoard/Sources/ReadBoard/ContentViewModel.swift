@@ -10,10 +10,8 @@ public final class ContentViewModel: ObservableObject {
     @Published var selectedItem: ContentItem? = nil
     @Published var minScore: Int = 0               // 评分筛选 0=不限
     @Published var includeUnscored: Bool = false   // 评分筛选时是否含未评分
-    /// 阅读状态单选：all=全部 / unread=未读 / starred=星标 / archived=归档（四选一）
+    /// 阅读状态单选：all=全部 / unread=未读 / starred=星标
     @Published var readFilter: ReadFilter = .all
-    /// 看归档 = readFilter 选了归档分支（派生，不再独立 Toggle）
-    var showArchived: Bool { readFilter == .archived }
     /// 处理状态三态筛选：score/summary/translate/transcribe。
     /// 每键三态：.none 不筛选 / .yes 已处理（实色高亮）/ .no 未处理（淡粉高亮）。
     /// 多选为「或」关系（满足任一条件即纳入），跨键可混合 yes/no。
@@ -44,18 +42,18 @@ public final class ContentViewModel: ObservableObject {
     }
 
     enum ReadFilter: String, CaseIterable {
-        case all, unread, starred, archived
+        case all, unread, starred
         var display: String {
             switch self {
             case .all: return "全部"
             case .unread: return "未读"
             case .starred: return "星标"
-            case .archived: return "归档"
             }
         }
     }
     @Published var totalCount: Int = 0
     @Published var totalUnread: Int = 0   // 全部文章未读数（左栏「全部文章」行显示 未读/总数）
+    @Published var totalExported: Int = 0  // 已导出文章数
     @Published var showTranslated: Bool = false    // 阅读区显示原文/翻译
     @Published var searchFocused: Bool = false     // 搜索框焦点（快捷键避让）
 
@@ -72,6 +70,8 @@ public final class ContentViewModel: ObservableObject {
     private let db = Database.shared
     /// 搜索防抖：连续输入时取消上一次未执行的 reload
     private var searchTask: Task<Void, Never>?
+    /// 已读连点时合并左栏计数刷新；只更新统计，不触碰 items，避免表格重建。
+    private var sidebarRefreshTask: Task<Void, Never>?
 
     /// 搜索框输入时调用——300ms 防抖，避免每敲一字就全库查一次
     func reloadDebounced() {
@@ -138,6 +138,7 @@ public final class ContentViewModel: ObservableObject {
     func loadAll() {
         totalCount = db.totalCount()
         totalUnread = db.totalUnread()
+        totalExported = db.totalExported()
         sidebarTree = db.fetchSidebarTree()
         reload()
     }
@@ -165,7 +166,7 @@ public final class ContentViewModel: ObservableObject {
         let unscored = includeUnscored
         let unreadOnly = readFilter == .unread
         let starredOnly = readFilter == .starred
-        let archivedFlag = showArchived
+        let exportedOnly = selectedFilter == "exported"
         let processed = processedStates.mapValues { $0.rawValue }
         let sort = sortOrder.rawValue
         let pageSize = Self.pageSize
@@ -174,14 +175,15 @@ public final class ContentViewModel: ObservableObject {
                                         minScore: minS,
                                         includeUnscored: unscored,
                                         unreadOnly: unreadOnly,
+                                        exportedOnly: exportedOnly,
                                         keyword: keywordArg,
                                         starredOnly: starredOnly,
-                                        archived: archivedFlag,
                                         processedFilters: processed, sortOrder: sort,
                                         limit: pageSize, offset: 0)
             let tree = Database.shared.fetchSidebarTree()
             let total = Database.shared.totalCount()
             let unread = Database.shared.totalUnread()
+            let exported = Database.shared.totalExported()
             await MainActor.run { [weak self] in
                 guard let self, self.reloadSeq == seq else { return }
                 self.items = page
@@ -191,9 +193,29 @@ public final class ContentViewModel: ObservableObject {
                 self.sidebarTree = tree
                 self.totalCount = total
                 self.totalUnread = unread
+                self.totalExported = exported
                 // 全量重查后 DB 已权威——清空乐观已读标记（防与「标为未读」等操作打架）
                 self.readMarks.removeAll()
             }
+        }
+    }
+
+    /// 轻量刷新左栏订阅树和总未读数，不重查/替换文章列表。
+    /// 在已读写入确认完成后调用，避免异步写后立即读到旧计数。
+    private func refreshSidebarCounts() {
+        sidebarRefreshTask?.cancel()
+        sidebarRefreshTask = Task { @MainActor [weak self] in
+            // 快速连续打开文章时合并多次计数查询。
+            do { try await Task.sleep(nanoseconds: 80_000_000) }
+            catch { return }
+            let stats = await Task.detached(priority: .utility) {
+                let tree = Database.shared.fetchSidebarTree()
+                let unread = Database.shared.totalUnread()
+                return (tree, unread)
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            self.sidebarTree = stats.0
+            self.totalUnread = stats.1
         }
     }
 
@@ -206,9 +228,9 @@ public final class ContentViewModel: ObservableObject {
                                     minScore: minS,
                                     includeUnscored: includeUnscored,
                                     unreadOnly: readFilter == .unread,
+                                    exportedOnly: selectedFilter == "exported",
                                     keyword: kw.isEmpty ? nil : kw,
                                     starredOnly: readFilter == .starred,
-                                    archived: showArchived,
                                     processedFilters: processedStates.mapValues { $0.rawValue },
                                     sortOrder: sortOrder.rawValue,
                                     limit: Self.pageSize,
@@ -233,16 +255,24 @@ public final class ContentViewModel: ObservableObject {
         // 这只是个新实例，不碰 items 数组——表格数据纹丝不动。
         selectedItem = wasUnread ? item.markingRead() : item
         if wasUnread {
-            // 已读写入移出主线程：writeQueue.sync 会等后台管线的在途写事务，
-            // 快速连点时主线程被按出风火轮；写库结果无需同步等待。
-            let cid = item.id
-            Task.detached { @Sendable in Database.shared.markRead(contentId: cid) }
+            // 写库仍在后台串行队列；完成后只刷新左栏计数，不改写 items。
+            db.markRead(contentId: item.id) { [weak self] ok in
+                guard let self else { return }
+                if ok {
+                    self.refreshSidebarCounts()
+                } else {
+                    // 极少数写入失败时撤销详情区的乐观已读态。
+                    if self.selectedItem?.id == item.id { self.selectedItem = item }
+                    self.readMarks[item.id] = nil
+                }
+            }
             // ⚠️ 铁证：任何对 items（表格数据源）的改写——同步/0.3s 延迟——快速连点时
             // 都会落进渲染窗口 → reentrant → AG cycle → 闪退（watch5/7 对照实验）。
             // 已读标记走非结构性通道：readMarks 只影响行内颜色/圆点（表格结构纹丝不动），
             // 即便落在渲染窗口也只是"更新中发布"（丢一帧自愈），不会重入崩溃。
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.readMarks[item.id] = true
+                guard let self, self.readMarks[item.id] == nil else { return }
+                self.readMarks[item.id] = true
             }
         }
         loadBodyIfNeeded(for: item.id)
@@ -276,42 +306,57 @@ public final class ContentViewModel: ObservableObject {
 
     /// 切换已读/未读
     func toggleRead(_ item: ContentItem) {
-        if item.isRead {
-            db.markUnread(contentId: item.id)
-            readMarks[item.id] = nil
-        } else {
-            db.markRead(contentId: item.id)
-            readMarks[item.id] = true
+        let targetRead = !effectiveIsRead(item)
+        // 只改轻量覆盖字典，文章列表结构保持不变。
+        readMarks[item.id] = targetRead
+        let completion: @MainActor @Sendable (Bool) -> Void = { [weak self] ok in
+            guard let self else { return }
+            guard ok else {
+                self.readMarks[item.id] = nil
+                return
+            }
+            // “未读”筛选下标为已读会移出列表，必须重查；其他视图只更新左栏计数。
+            if self.readFilter == .unread {
+                self.reload()
+            } else {
+                self.refreshSidebarCounts()
+            }
         }
-        reload()
+        if targetRead {
+            db.markRead(contentId: item.id, completion: completion)
+        } else {
+            db.markUnread(contentId: item.id, completion: completion)
+        }
+    }
+
+    /// 行内乐观状态优先于列表快照；供行样式和右键菜单共用。
+    func effectiveIsRead(_ item: ContentItem) -> Bool {
+        if let override = readMarks[item.id] { return override }
+        if selectedItem?.id == item.id { return selectedItem?.isRead ?? item.isRead }
+        return item.isRead
     }
 
     /// 切换星标
     func toggleStar(_ item: ContentItem) {
-        db.toggleStar(contentId: item.id)
+        let newStarred = db.toggleStar(contentId: item.id) { [weak self] ok, starred in
+            guard let self else { return }
+            if ok {
+                if starred {
+                    Task { await ExportService.shared.runPending(trigger: "starred", contentId: item.id) }
+                }
+            } else {
+                self.reload()
+            }
+        }
         if let idx = items.firstIndex(where: { $0.id == item.id }) {
-            items[idx] = items[idx].togglingStar()
+            if items[idx].starred != newStarred { items[idx] = items[idx].togglingStar() }
         }
         if selectedItem?.id == item.id { selectedItem = items.first { $0.id == item.id } }
     }
 
-    /// 切换归档（归档后从活跃列表消失；取消归档回到活跃列表）
-    func toggleArchive(_ item: ContentItem) {
-        let wasArchived = item.archived
-        db.toggleArchive(contentId: item.id)
-        reload()
-        // 修 P0-4：归档也给反馈——此前只在取消归档时提示，归档动作零提示零撤销，
-        // 误按 a 后文章消失用户不知去哪。
-        if wasArchived {
-            if !showArchived { showToast("已取消归档，回到活跃列表") }
-        } else {
-            showToast("已归档——在「归档」分段可找回")
-        }
-    }
-
     // MARK: 轻提示（3s 自动消失）
     @Published var toastMessage: String? = nil
-    /// 已读乐观标记（非结构性）：open() 点未读后写入，ArticleRow 据此立即消点。
+    /// 已读乐观覆盖（非结构性）：true=已读、false=未读，ArticleRow 据此即时更新。
     /// 不碰 items（表格数据源），重载后 DB 已权威即清空。详见 open() 注释（watch5/7 对照实验）。
     @Published var readMarks: [Int64: Bool] = [:]
     private var toastTask: Task<Void, Never>?
@@ -330,10 +375,11 @@ public final class ContentViewModel: ObservableObject {
     func markAllRead() -> Int {
         let minS: Int? = minScore > 0 ? minScore : nil
         let kw = keyword.trimmingCharacters(in: .whitespaces)
-        // 传 archived 对齐当前视图——归档视图点「全部已读」也生效（修 P0-5）
         let n = db.markAllRead(sourceId: selectedSourceId, folderId: selectedFolderId,
-                               minScore: minS, keyword: kw.isEmpty ? nil : kw,
-                               archived: showArchived)
+                               minScore: minS, includeUnscored: includeUnscored,
+                               keyword: kw.isEmpty ? nil : kw,
+                               starredOnly: readFilter == .starred,
+                               processedFilters: processedStates.mapValues { $0.rawValue })
         reload()
         return n
     }
