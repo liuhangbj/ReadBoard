@@ -1,5 +1,8 @@
 # ReadBoard
 
+<p align="center"><img src="docs/icon.png" width="128" alt="ReadBoard"></p>
+
+
 **信息整合与加工中台。服务你和你的 Agent。**
 
 在 AI 时代，信息是割裂的。上游是分散的 RSS、播客、YouTube，中游是散落各处的 AI 处理能力，下游是各自为政的笔记和知识库软件。我们的信息从未真正汇合——人在不同阅读器之间切换，Agent 在不同的 API 之间跳转，加工结果散落各处，没有一个统一的处理层。
