@@ -13,7 +13,7 @@ ReadBoard 的核心不是 RSS 阅读器，而是信息加工中台：
 数据库结构迁移只有一份权威来源：
 
 ```text
-App/ReadBoard/Sources/ReadBoard/Resources/migrations/
+Sources/ReadBoard/Resources/migrations/
 ```
 
 SwiftPM 构建时将其装入 App 资源，新数据库从基线迁移直接建立到当前版本。

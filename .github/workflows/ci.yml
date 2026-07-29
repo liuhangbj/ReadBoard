@@ -27,10 +27,10 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: App/ReadBoard/Sources/ReadBoard/Resources/engine/package-lock.json
+          cache-dependency-path: Sources/ReadBoard/Resources/engine/package-lock.json
 
       - name: Install full-text engine dependencies
-        run: npm ci --omit=dev --prefix App/ReadBoard/Sources/ReadBoard/Resources/engine
+        run: npm ci --omit=dev --prefix Sources/ReadBoard/Resources/engine
 
       - name: Reject runtime data and compiled apps
         shell: bash
@@ -42,7 +42,7 @@ jobs:
           fi
 
       - name: Build
-        run: swift build --package-path App/ReadBoard
+        run: swift build --package-path .
 
       - name: Test with isolated database
         shell: bash
@@ -50,14 +50,14 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/readboard-tests"
           READBOARD_DB="$RUNNER_TEMP/readboard-tests/readboard.db" \
-            swift test --package-path App/ReadBoard
+            swift test --package-path .
 
       - name: Assemble app bundle
         shell: bash
         run: |
           set -euo pipefail
           READBOARD_OUTPUT_DIR="$RUNNER_TEMP/readboard-package" \
-            App/ReadBoard/Scripts/package_app.sh
+            Scripts/package_app.sh
           codesign --verify --deep --strict \
             "$RUNNER_TEMP/readboard-package/ReadBoard.app"
           test -f "$RUNNER_TEMP/readboard-package/ReadBoard.app/Contents/Resources/migrations/027_reader_performance.sql"

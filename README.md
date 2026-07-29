@@ -99,7 +99,7 @@ macOS 14+ 原生应用
 ## 开发
 
 ```bash
-cd App/ReadBoard
+cd .
 swift build
 swift test
 ```
