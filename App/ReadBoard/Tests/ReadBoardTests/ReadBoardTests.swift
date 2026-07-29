@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import ReadBoard
 
 // MARK: - 纯逻辑单元测试（不触网、不触库——触库的走集成测试）
@@ -675,6 +676,24 @@ final class FeedParseTests: XCTestCase {
         XCTAssertEqual(feed.language, "zh-hans")
         XCTAssertEqual(feed.entries.first?.language, "zh-hans")
     }
+
+    func testVideoEnclosureIsAPlayablePodcastCarrier() throws {
+        let xml = """
+        <?xml version="1.0"?>
+        <rss version="2.0"><channel><title>视频播客</title>
+          <item><title>Video Edition</title><guid>video-podcast-1</guid>
+            <link>https://x.com/video-podcast-1</link>
+            <enclosure url="https://cdn.example/episode.mp4" length="12345" type="video/mp4"/>
+          </item>
+        </channel></rss>
+        """
+        let feed = try XCTUnwrap(FeedFetcher.parseFeedForTest(xml: xml))
+        let entry = try XCTUnwrap(feed.entries.first)
+        XCTAssertEqual(feed.kind, .podcast)
+        XCTAssertEqual(entry.meta["video_url"], "https://cdn.example/episode.mp4")
+        XCTAssertEqual(entry.meta["enclosure_type"], "video/mp4")
+        XCTAssertEqual(SourceStore.contentType(source: "podcast", meta: entry.meta), "podcast")
+    }
 }
 
 // MARK: - Markdown 解析
@@ -777,5 +796,124 @@ final class RelativeDateTests: XCTestCase {
     func testInvalidFallsBack() {
         let r = ArticleRow.relativeDate(from: "not-a-date")
         XCTAssertFalse(r.isEmpty, "非法日期应回退不崩溃")
+    }
+}
+
+// MARK: - 音频播放器控制
+
+final class AudioPlaybackControlTests: XCTestCase {
+    func testSeekTimeClampsToPlayableRange() {
+        XCTAssertEqual(AudioPlaybackSettings.clampedTime(-15, duration: 100), 0)
+        XCTAssertEqual(AudioPlaybackSettings.clampedTime(35, duration: 100), 35)
+        XCTAssertEqual(AudioPlaybackSettings.clampedTime(130, duration: 100), 100)
+        XCTAssertEqual(AudioPlaybackSettings.clampedTime(.infinity, duration: 100), 0)
+    }
+
+    func testTimeFormattingSupportsLongPodcasts() {
+        XCTAssertEqual(AudioPlayerView.formatTime(65), "1:05")
+        XCTAssertEqual(AudioPlayerView.formatTime(3_661), "1:01:01")
+        XCTAssertEqual(AudioPlayerView.formatTime(.nan), "0:00")
+    }
+
+    func testPlaybackRateLabelsStayExact() {
+        XCTAssertEqual(AudioPlayerView.formatRate(0.75), "0.75×")
+        XCTAssertEqual(AudioPlayerView.formatRate(1), "1×")
+        XCTAssertEqual(AudioPlayerView.formatRate(1.25), "1.25×")
+        XCTAssertEqual(AudioPlayerView.formatRate(1.5), "1.5×")
+        XCTAssertEqual(AudioPlayerView.formatRate(2), "2×")
+    }
+}
+
+// MARK: - 列表筛选与跨文章处理状态
+
+final class ContentListFilterTests: XCTestCase {
+    func testDefaultScoreRangeDoesNotCreateSQLBounds() {
+        let bounds = ContentViewModel.scoreBounds(minimum: 0, maximum: 100)
+        XCTAssertNil(bounds.minimum)
+        XCTAssertNil(bounds.maximum)
+    }
+
+    func testScoreRangeClampsButDoesNotSilentlySwapInvalidInput() {
+        let clamped = ContentViewModel.scoreBounds(minimum: -20, maximum: 130)
+        XCTAssertNil(clamped.minimum)
+        XCTAssertNil(clamped.maximum)
+
+        let invalid = ContentViewModel.scoreBounds(minimum: 90, maximum: 80)
+        XCTAssertEqual(invalid.minimum, 90)
+        XCTAssertEqual(invalid.maximum, 80)
+    }
+
+    @MainActor
+    func testProcessingStateSurvivesViewReplacementByContentId() {
+        let store = ContentProcessingStateStore.shared
+        let first: Int64 = 9_880_001
+        let second: Int64 = 9_880_002
+        store.clear(contentId: first)
+        store.clear(contentId: second)
+        defer {
+            store.clear(contentId: first)
+            store.clear(contentId: second)
+        }
+
+        store.begin(contentId: first, message: "翻译中…")
+        XCTAssertEqual(store.state(for: first)?.isProcessing, true)
+        XCTAssertEqual(store.state(for: first)?.message, "翻译中…")
+        XCTAssertNil(store.state(for: second))
+
+        store.finish(contentId: first, message: "✅ 翻译完成")
+        XCTAssertEqual(store.state(for: first)?.isProcessing, false)
+        XCTAssertEqual(store.state(for: first)?.message, "✅ 翻译完成")
+    }
+}
+
+// MARK: - 原生可选择链接标题
+
+final class SelectableLinkTitleTests: XCTestCase {
+    @MainActor
+    func testNativeTitleRemainsSelectableAndWrapsToAvailableWidth() {
+        let view = RBSelectableLinkTextView()
+        view.configure(
+            text: "这是一段足够长、需要随阅读器宽度自动换行的可选择文章标题",
+            destination: "https://example.com/article",
+            font: .systemFont(ofSize: 24, weight: .bold),
+            normalColor: .labelColor,
+            hoverColor: .controlAccentColor)
+
+        XCTAssertTrue(view.isSelectable)
+        XCTAssertFalse(view.isEditable)
+        XCTAssertGreaterThan(view.requiredHeight(for: 180), view.requiredHeight(for: 600))
+    }
+
+    @MainActor
+    func testNormalMarkdownBlocksShareOneSelectionFlow() {
+        let markdown = """
+        # 章节标题
+
+        第一段正文。
+
+        第二段正文。
+
+        - 列表一
+        - 列表二
+
+        第三段正文。
+        """
+        XCTAssertEqual(
+            MarkdownBodyView.selectionUnitBlockCountsForTesting(markdown: markdown),
+            [6])
+    }
+
+    @MainActor
+    func testVisualCardsRemainSelectionBoundaries() {
+        let markdown = """
+        第一段。
+
+        > 独立引用卡
+
+        第二段。
+        """
+        XCTAssertEqual(
+            MarkdownBodyView.selectionUnitBlockCountsForTesting(markdown: markdown),
+            [1, 1, 1])
     }
 }

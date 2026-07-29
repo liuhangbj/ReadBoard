@@ -55,6 +55,11 @@ enum RB {
         static let star      = RB.dynamic("#C9A24B", "#D9BC6E")  // 星标 柔金
         static let summary   = RB.dynamic("#7A6AA0", "#9E8FC0")  // 摘 灰紫
         static let translate = RB.dynamic("#4A7A8C", "#6FA3B3")  // 译/录 灰青
+
+        // —— 内容类型图标（仅用于小面积识别，不参与全局强调层级）——
+        static let rss       = RB.dynamic("#E66A22", "#F08A4B")  // RSS 橙
+        static let podcast   = RB.dynamic("#8B4CB8", "#B07AD3")  // Podcast 紫
+        static let video     = RB.dynamic("#E53935", "#FF6B66")  // 视频红
     }
 
     // MARK: 间距（4 基数梯度）

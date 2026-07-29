@@ -8,11 +8,12 @@ public final class ContentViewModel: ObservableObject {
     /// 左栏选中的过滤键：nil=全部，"source_id=N"=单源，"folder_id=N"=文件夹
     @Published var selectedFilter: String? = nil
     @Published var selectedItem: ContentItem? = nil
-    @Published var minScore: Int = 0               // 评分筛选 0=不限
+    @Published var minScore: Int = 0               // 评分区间下限，0=不限
+    @Published var maxScore: Int = 100             // 评分区间上限，100=不限
     @Published var includeUnscored: Bool = false   // 评分筛选时是否含未评分
     /// 阅读状态单选：all=全部 / unread=未读 / starred=星标
     @Published var readFilter: ReadFilter = .all
-    /// 处理状态三态筛选：score/summary/translate/transcribe。
+    /// 处理状态三态筛选：fulltext/score/summary/translate/transcribe。
     /// 每键三态：.none 不筛选 / .yes 已处理（实色高亮）/ .no 未处理（淡粉高亮）。
     /// 多选为「或」关系（满足任一条件即纳入），跨键可混合 yes/no。
     @Published var processedStates: [String: ProcessedState] = [:]
@@ -53,7 +54,16 @@ public final class ContentViewModel: ObservableObject {
     }
     @Published var totalCount: Int = 0
     @Published var totalUnread: Int = 0   // 全部文章未读数（左栏「全部文章」行显示 未读/总数）
+    @Published var totalPending: Int = 0  // Worker 精确待处理内容数（同一内容只计一次）
+    @Published var totalPendingUnread: Int = 0
     @Published var totalExported: Int = 0  // 已导出文章数
+    @Published var totalExportedUnread: Int = 0
+    @Published var articleCount: Int = 0
+    @Published var articleUnread: Int = 0
+    @Published var podcastCount: Int = 0
+    @Published var podcastUnread: Int = 0
+    @Published var videoCount: Int = 0
+    @Published var videoUnread: Int = 0
     @Published var showTranslated: Bool = false    // 阅读区显示原文/翻译
     @Published var searchFocused: Bool = false     // 搜索框焦点（快捷键避让）
 
@@ -66,13 +76,15 @@ public final class ContentViewModel: ObservableObject {
         guard let f = selectedFilter, f.hasPrefix("folder_id=") else { return nil }
         return Int64(f.replacingOccurrences(of: "folder_id=", with: ""))
     }
+    private var selectedContentCategory: String? {
+        guard let f = selectedFilter, f.hasPrefix("ctype=") else { return nil }
+        return String(f.dropFirst("ctype=".count))
+    }
+    private var pendingOnly: Bool { selectedFilter == "pending" }
 
     private let db = Database.shared
     /// 搜索防抖：连续输入时取消上一次未执行的 reload
     private var searchTask: Task<Void, Never>?
-    /// 已读连点时合并左栏计数刷新；只更新统计，不触碰 items，避免表格重建。
-    private var sidebarRefreshTask: Task<Void, Never>?
-
     /// 搜索框输入时调用——300ms 防抖，避免每敲一字就全库查一次
     func reloadDebounced() {
         searchTask?.cancel()
@@ -88,6 +100,7 @@ public final class ContentViewModel: ObservableObject {
     /// nonisolated(unsafe)：NSObjectProtocol 非 Sendable，@MainActor 类的 deinit 是非隔离的，
     /// 直接访问存储属性会被 Swift 6 并发检查拦。observer token 本身线程安全（removeObserver 可任意线程调）。
     private nonisolated(unsafe) var updateObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var pendingObserver: NSObjectProtocol?
 
     init() {
         // 评分/翻译完成后刷新列表。
@@ -113,34 +126,51 @@ public final class ContentViewModel: ObservableObject {
             // ⚠️ 防抖合并（05:08 渲染风暴实锤）：后台管线每完成一件就 post 一次，
             // 逐次 reload = 300 行 + 300 个 AsyncImage 全量重建 ×N 次/分钟 → 内存疯涨 + AG cycle。
             // 0.75s 合并：连发只跑最后一次 reload，风暴砍成一次。
-            guard let self else { return }
-            self.pendingReload?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                self.reload()
-                // 仍然不替换 selectedItem——替换会诱发 AttributeGraph 无限重绘循环（12:10 hang 实锤）。
-                // 正文/摘要/译文标题新鲜度由 ReadingView 的 @State 镜像 + DB 兜底链解决。
-            }
-            self.pendingReload = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: work)
+            MainActor.assumeIsolated { self?.scheduleContentReload() }
+        }
+        pendingObserver = NotificationCenter.default.addObserver(
+            forName: .pipelinePendingUpdated, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pendingSetDidChange() }
         }
     }
 
     /// 通知防抖用的可取消工作项（连发 contentUpdated 时只保留最后一个）
     private var pendingReload: DispatchWorkItem?
 
+    private func scheduleContentReload() {
+        pendingReload?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                self?.reload()
+                self?.refreshLibraryStats()
+                // 仍然不替换 selectedItem——替换会诱发 AttributeGraph 无限重绘循环。
+            }
+        }
+        pendingReload = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: work)
+    }
+
+    private func pendingSetDidChange() {
+        totalPending = PipelineWorker.shared.pendingContentIds.count
+        totalPendingUnread = PipelineWorker.shared.pendingBreakdown.unread
+        if selectedFilter == "pending" { reload() }
+    }
+
     deinit {
         if let obs = updateObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        if let obs = pendingObserver {
             NotificationCenter.default.removeObserver(obs)
         }
     }
 
     func loadAll() {
-        totalCount = db.totalCount()
-        totalUnread = db.totalUnread()
-        totalExported = db.totalExported()
-        sidebarTree = db.fetchSidebarTree()
+        totalPending = PipelineWorker.shared.pendingContentIds.count
+        totalPendingUnread = PipelineWorker.shared.pendingBreakdown.unread
         reload()
+        refreshLibraryStats()
     }
 
     /// 每页条数（滚动到底自动加载下一页）
@@ -158,7 +188,7 @@ public final class ContentViewModel: ObservableObject {
     func reload() {
         reloadSeq += 1
         let seq = reloadSeq
-        let minS: Int? = minScore > 0 ? minScore : nil
+        let scoreBounds = Self.scoreBounds(minimum: minScore, maximum: maxScore)
         let kw = keyword.trimmingCharacters(in: .whitespaces)
         let keywordArg = kw.isEmpty ? nil : kw
         let sourceId = selectedSourceId
@@ -167,78 +197,139 @@ public final class ContentViewModel: ObservableObject {
         let unreadOnly = readFilter == .unread
         let starredOnly = readFilter == .starred
         let exportedOnly = selectedFilter == "exported"
+        let category = selectedContentCategory
+        let pendingIds: Set<Int64>? = pendingOnly ? PipelineWorker.shared.pendingContentIds : nil
         let processed = processedStates.mapValues { $0.rawValue }
         let sort = sortOrder.rawValue
         let pageSize = Self.pageSize
         Task.detached(priority: .userInitiated) {
             let page = Database.shared.fetchContents(sourceId: sourceId, folderId: folderId,
-                                        minScore: minS,
+                                        minScore: scoreBounds.minimum,
+                                        maxScore: scoreBounds.maximum,
                                         includeUnscored: unscored,
                                         unreadOnly: unreadOnly,
                                         exportedOnly: exportedOnly,
                                         keyword: keywordArg,
                                         starredOnly: starredOnly,
-                                        processedFilters: processed, sortOrder: sort,
+                                        processedFilters: processed,
+                                        contentCategory: category,
+                                        restrictToContentIds: pendingIds,
+                                        sortOrder: sort,
                                         limit: pageSize, offset: 0)
-            let tree = Database.shared.fetchSidebarTree()
-            let total = Database.shared.totalCount()
-            let unread = Database.shared.totalUnread()
-            let exported = Database.shared.totalExported()
             await MainActor.run { [weak self] in
                 guard let self, self.reloadSeq == seq else { return }
                 self.items = page
                 self.hasMore = page.count >= Self.pageSize
                 // 修 P1-6：筛选变化（哪怕改排序）不再销毁正在读的文章——保留 selectedItem，
                 // 用户继续读完当前篇，不因筛选/排序变化被关掉。
-                self.sidebarTree = tree
-                self.totalCount = total
-                self.totalUnread = unread
-                self.totalExported = exported
+                self.totalPending = PipelineWorker.shared.pendingContentIds.count
+                self.totalPendingUnread = PipelineWorker.shared.pendingBreakdown.unread
                 // 全量重查后 DB 已权威——清空乐观已读标记（防与「标为未读」等操作打架）
                 self.readMarks.removeAll()
             }
         }
     }
 
-    /// 轻量刷新左栏订阅树和总未读数，不重查/替换文章列表。
-    /// 在已读写入确认完成后调用，避免异步写后立即读到旧计数。
-    private func refreshSidebarCounts() {
-        sidebarRefreshTask?.cancel()
-        sidebarRefreshTask = Task { @MainActor [weak self] in
-            // 快速连续打开文章时合并多次计数查询。
-            do { try await Task.sleep(nanoseconds: 80_000_000) }
-            catch { return }
-            let stats = await Task.detached(priority: .utility) {
-                let tree = Database.shared.fetchSidebarTree()
-                let unread = Database.shared.totalUnread()
-                return (tree, unread)
-            }.value
-            guard !Task.isCancelled, let self else { return }
-            self.sidebarTree = stats.0
-            self.totalUnread = stats.1
+    /// 左栏树和全局计数独立刷新，绝不再成为中栏翻页/切筛选的前置条件。
+    private var statsSeq = 0
+    private func refreshLibraryStats() {
+        statsSeq += 1
+        let seq = statsSeq
+        Task.detached(priority: .utility) {
+            let tree = Database.shared.fetchSidebarTree()
+            let counts = Database.shared.libraryCounts()
+            await MainActor.run { [weak self] in
+                guard let self, self.statsSeq == seq else { return }
+                self.sidebarTree = tree
+                self.apply(counts)
+            }
+        }
+    }
+
+    private func apply(_ counts: LibraryCounts) {
+        totalCount = counts.total
+        totalUnread = counts.unread
+        totalExported = counts.exported
+        totalExportedUnread = counts.exportedUnread
+        articleCount = counts.articles
+        articleUnread = counts.articleUnread
+        podcastCount = counts.podcasts
+        podcastUnread = counts.podcastUnread
+        videoCount = counts.videos
+        videoUnread = counts.videoUnread
+    }
+
+    /// 单篇已读状态改变时直接修正内存计数。避免每点一篇都重新聚合 15 万条内容。
+    private func applyUnreadDelta(for item: ContentItem, delta: Int) {
+        guard delta != 0 else { return }
+        totalUnread = max(0, totalUnread + delta)
+        switch item.ctype {
+        case "podcast": podcastUnread = max(0, podcastUnread + delta)
+        case "video", "youtube": videoUnread = max(0, videoUnread + delta)
+        default: articleUnread = max(0, articleUnread + delta)
+        }
+        if item.hasExport {
+            totalExportedUnread = max(0, totalExportedUnread + delta)
+        }
+        if PipelineWorker.shared.pendingContentIds.contains(item.id) {
+            totalPendingUnread = max(0, totalPendingUnread + delta)
+        }
+        guard let sourceId = item.feedId else { return }
+        sidebarTree = sidebarTree.map { node in
+            if node.isFolder {
+                let children = node.children?.map { child -> SidebarNode in
+                    guard child.sourceId == sourceId else { return child }
+                    return SidebarNode(id: child.id, name: child.name, count: child.count,
+                                       unread: max(0, child.unread + delta), isFolder: false,
+                                       filterKey: child.filterKey, sourceId: child.sourceId,
+                                       folderId: child.folderId, children: nil)
+                }
+                let unread = children?.reduce(0) { $0 + $1.unread } ?? node.unread
+                return SidebarNode(id: node.id, name: node.name, count: node.count,
+                                   unread: unread, isFolder: true, filterKey: node.filterKey,
+                                   sourceId: nil, folderId: node.folderId, children: children)
+            }
+            guard node.sourceId == sourceId else { return node }
+            return SidebarNode(id: node.id, name: node.name, count: node.count,
+                               unread: max(0, node.unread + delta), isFolder: false,
+                               filterKey: node.filterKey, sourceId: node.sourceId,
+                               folderId: node.folderId, children: nil)
         }
     }
 
     /// 加载下一页（滚动到底触发）。追加而非替换。
     func loadMore() {
         guard hasMore else { return }
-        let minS: Int? = minScore > 0 ? minScore : nil
+        let scoreBounds = Self.scoreBounds(minimum: minScore, maximum: maxScore)
         let kw = keyword.trimmingCharacters(in: .whitespaces)
-        let page = db.fetchContents(sourceId: selectedSourceId, folderId: selectedFolderId,
-                                    minScore: minS,
-                                    includeUnscored: includeUnscored,
-                                    unreadOnly: readFilter == .unread,
-                                    exportedOnly: selectedFilter == "exported",
-                                    keyword: kw.isEmpty ? nil : kw,
-                                    starredOnly: readFilter == .starred,
-                                    processedFilters: processedStates.mapValues { $0.rawValue },
-                                    sortOrder: sortOrder.rawValue,
-                                    limit: Self.pageSize,
-                                    offset: items.count)
-        hasMore = page.count >= Self.pageSize
-        // 去重追加（极端情况数据在两次查询间被插入，offset 可能重叠几条）
-        let existing = Set(items.map { $0.id })
-        items.append(contentsOf: page.filter { !existing.contains($0.id) })
+        let sourceId = selectedSourceId
+        let folderId = selectedFolderId
+        let category = selectedContentCategory
+        let pendingIds: Set<Int64>? = pendingOnly ? PipelineWorker.shared.pendingContentIds : nil
+        let unscored = includeUnscored
+        let unreadOnly = readFilter == .unread
+        let exportedOnly = selectedFilter == "exported"
+        let starredOnly = readFilter == .starred
+        let processed = processedStates.mapValues { $0.rawValue }
+        let sort = sortOrder.rawValue
+        let offset = items.count
+        let pageSize = Self.pageSize
+        Task.detached(priority: .userInitiated) {
+            let page = Database.shared.fetchContents(
+                sourceId: sourceId, folderId: folderId,
+                minScore: scoreBounds.minimum, maxScore: scoreBounds.maximum,
+                includeUnscored: unscored, unreadOnly: unreadOnly,
+                exportedOnly: exportedOnly, keyword: kw.isEmpty ? nil : kw,
+                starredOnly: starredOnly, processedFilters: processed,
+                contentCategory: category, restrictToContentIds: pendingIds,
+                sortOrder: sort, limit: pageSize, offset: offset)
+            await MainActor.run { [weak self] in
+                guard let self, self.items.count == offset else { return }
+                self.hasMore = page.count >= Self.pageSize
+                let existing = Set(self.items.map { $0.id })
+                self.items.append(contentsOf: page.filter { !existing.contains($0.id) })
+            }
+        }
     }
 
     /// 左栏选中：nil=全部，"source_id=N" / "folder_id=N"
@@ -259,7 +350,7 @@ public final class ContentViewModel: ObservableObject {
             db.markRead(contentId: item.id) { [weak self] ok in
                 guard let self else { return }
                 if ok {
-                    self.refreshSidebarCounts()
+                    self.applyUnreadDelta(for: item, delta: -1)
                 } else {
                     // 极少数写入失败时撤销详情区的乐观已读态。
                     if self.selectedItem?.id == item.id { self.selectedItem = item }
@@ -273,33 +364,6 @@ public final class ContentViewModel: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 guard let self, self.readMarks[item.id] == nil else { return }
                 self.readMarks[item.id] = true
-            }
-        }
-        loadBodyIfNeeded(for: item.id)
-    }
-
-    /// 正文/译文/媒体地址按需加载：列表查询不取这些大字段，点开才查并填回 selectedItem
-    private func loadBodyIfNeeded(for id: Int64) {
-        // 已有正文则不重复查。媒体项(audioUrl 非空)也要查——需 content_html(原文标签)/excerptTranslated(译文标签)
-        if selectedItem?.id == id, selectedItem?.contentMd != nil, selectedItem?.contentHtml != nil { return }
-        let currentId = id
-        Trace.d("loadBodyIfNeeded 起 fetchContentBody id=\(currentId)", category: "read")
-        Task.detached(priority: .userInitiated) { [db] in
-            let t0 = Date()
-            guard let body = db.fetchContentBody(id: currentId) else {
-                Trace.w("fetchContentBody 返回 nil id=\(currentId)", category: "read")
-                return
-            }
-            let mdKb = (body.contentMd ?? "").count / 1024
-            let htmlKb = (body.contentHtml ?? "").count / 1024
-            let transKb = (body.llmTranslatedMd ?? "").count / 1024
-            Trace.i("fetchContentBody 完成 id=\(currentId) content_md=\(mdKb)KB content_html=\(htmlKb)KB llm_translated_md=\(transKb)KB 用时=\(Int(t0.timeIntervalSinceNow * -1000))ms mem=\(Trace.mb())MB", category: "read")
-            await MainActor.run { [weak self] in
-                guard let self, self.selectedItem?.id == currentId else { return }
-                // 不替换 selectedItem——ReadingView 的 @State loadContentMd 已同步加载
-                // contentMd/llmTranslatedMd 等字段。替换 selectedItem 会触发
-                // "Publishing changes from within view updates" → 无限重绘循环 →
-                // AttributeGraph cycle → StackLayout.makeChildren use-after-free 崩溃。
             }
         }
     }
@@ -317,9 +381,10 @@ public final class ContentViewModel: ObservableObject {
             }
             // “未读”筛选下标为已读会移出列表，必须重查；其他视图只更新左栏计数。
             if self.readFilter == .unread {
+                self.applyUnreadDelta(for: item, delta: targetRead ? -1 : 1)
                 self.reload()
             } else {
-                self.refreshSidebarCounts()
+                self.applyUnreadDelta(for: item, delta: targetRead ? -1 : 1)
             }
         }
         if targetRead {
@@ -360,7 +425,7 @@ public final class ContentViewModel: ObservableObject {
     /// 不碰 items（表格数据源），重载后 DB 已权威即清空。详见 open() 注释（watch5/7 对照实验）。
     @Published var readMarks: [Int64: Bool] = [:]
     private var toastTask: Task<Void, Never>?
-    private func showToast(_ msg: String) {
+    func showToast(_ msg: String) {
         toastMessage = msg
         toastTask?.cancel()
         toastTask = Task { @MainActor [weak self] in
@@ -373,15 +438,28 @@ public final class ContentViewModel: ObservableObject {
     /// 全部标已读（按当前筛选范围）。返回影响条数。
     @discardableResult
     func markAllRead() -> Int {
-        let minS: Int? = minScore > 0 ? minScore : nil
+        let scoreBounds = Self.scoreBounds(minimum: minScore, maximum: maxScore)
         let kw = keyword.trimmingCharacters(in: .whitespaces)
         let n = db.markAllRead(sourceId: selectedSourceId, folderId: selectedFolderId,
-                               minScore: minS, includeUnscored: includeUnscored,
+                               minScore: scoreBounds.minimum, maxScore: scoreBounds.maximum,
+                               includeUnscored: includeUnscored,
                                keyword: kw.isEmpty ? nil : kw,
                                starredOnly: readFilter == .starred,
-                               processedFilters: processedStates.mapValues { $0.rawValue })
+                               processedFilters: processedStates.mapValues { $0.rawValue },
+                               contentCategory: selectedContentCategory,
+                               restrictToContentIds: pendingOnly ? PipelineWorker.shared.pendingContentIds : nil)
         reload()
+        refreshLibraryStats()
+        PipelineWorker.shared.requestPendingRefresh()
         return n
+    }
+
+    /// 评分固定为 0...100。默认 0...100 不产生 SQL 条件；越界值先收敛，
+    /// 下限高于上限时保留这个空区间，让列表明确显示 0 条而不是偷偷交换用户输入。
+    nonisolated static func scoreBounds(minimum: Int, maximum: Int) -> (minimum: Int?, maximum: Int?) {
+        let lower = Swift.min(100, Swift.max(0, minimum))
+        let upper = Swift.min(100, Swift.max(0, maximum))
+        return (lower > 0 ? lower : nil, upper < 100 ? upper : nil)
     }
 
     // MARK: 快捷键导航（搜索框聚焦时禁用，避免空格/j/k 被列表抢走）

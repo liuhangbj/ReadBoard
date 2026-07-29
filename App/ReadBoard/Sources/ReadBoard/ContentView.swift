@@ -15,6 +15,40 @@ enum MediaAudioURLResolver {
     }
 }
 
+/// 中栏“重新处理”与 Worker 使用相同的包含关系，避免同一正文重复提交给 LLM。
+enum ManualReprocessStep: Equatable {
+    case translateFull
+    case scoreWithSummary
+    case summarize
+    case transcribe
+}
+
+enum ManualReprocessPlanner {
+    nonisolated static func steps(
+        policy: PipelinePolicy,
+        isMedia: Bool,
+        isChineseMedia: Bool
+    ) -> [ManualReprocessStep] {
+        var result: [ManualReprocessStep] = []
+
+        // 翻译整合调用可按 policy 同时回写评分和摘要；不再另外重复请求。
+        if policy.autoTranslate && !isChineseMedia {
+            result.append(.translateFull)
+        } else if policy.autoScore {
+            // score 的固定 JSON 已包含摘要并会一起写库。
+            result.append(.scoreWithSummary)
+        } else if policy.autoSummarize && !(isMedia && policy.autoTranscribe) {
+            // 媒体转录结束后会基于转录稿生成摘要，不先对简介重复摘要。
+            result.append(.summarize)
+        }
+
+        if policy.autoTranscribe && isMedia {
+            result.append(.transcribe)
+        }
+        return result
+    }
+}
+
 public struct ContentView: View {
     @StateObject private var vm = ContentViewModel()
     @EnvironmentObject private var appTab: AppTab
@@ -22,16 +56,22 @@ public struct ContentView: View {
     @FocusState private var searchFocused: Bool
     /// 界面缩放（@AppStorage 直接绑 UserDefaults——改值视图自动重建，静态读取不会触发刷新）
     @AppStorage("reading.uiFontScale") private var uiFontScale: Double = 1.0
+    // 列表外观只由父视图订阅一次，避免 300 个 ArticleRow 各建一组 AppStorage 观察者。
+    @AppStorage("list.density") private var listDensity: String = "comfortable"
+    @AppStorage("list.showSource") private var listShowSource: Bool = true
+    @AppStorage("list.showDate") private var listShowDate: Bool = true
+    @AppStorage("list.unreadBold") private var listUnreadBold: Bool = true
+    @AppStorage("list.dateFormat") private var listDateFormat: String = "absolute"
 
     public var body: some View {
         NavigationSplitView {
             // ── 左栏：源列表 ──
             sourceSidebar
-                .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 280)
+                .navigationSplitViewColumnWidth(min: 180, ideal: 230, max: 360)
         } content: {
             // ── 中栏：文章列表 ──
             articleList
-                .navigationSplitViewColumnWidth(min: 280, ideal: 360, max: 480)
+                .navigationSplitViewColumnWidth(min: 280, ideal: 380, max: 640)
         } detail: {
             // ── 右栏：阅读区 ──
             readingPane
@@ -96,11 +136,12 @@ public struct ContentView: View {
     /// 重命名目标（source: 源 id / folder: 文件夹 id）+ 输入名 + 弹窗状态
     @State private var renameTarget: (kind: String, id: Int64, currentName: String)? = nil
     @State private var renameInput = ""
+    @State private var deleteSourceTarget: (id: Int64, name: String)? = nil
     /// 展开的文件夹 id 集合（自己控制，DisclosureGroup 的 label 无法响应点击过滤）
     /// 持久化到 UserDefaults——重启恢复上次的展开/收起状态（首次启动默认全展开）。
     @State private var expandedFolders: Set<String> = []
     /// 开管线后弹「如何处理历史数据」（kind: source/folder，action: pipeline=LLM管线回填 / fulltext=全文重提）
-    @State private var pendingBackfill: (kind: String, id: Int64, name: String, pipelineLabel: String, action: String)? = nil
+    @State private var pendingBackfill: (kind: String, id: Int64, name: String, pipelineLabel: String, action: String, policyKey: String?)? = nil
 
     // MARK: 左栏展开状态持久化
 
@@ -162,8 +203,21 @@ public struct ContentView: View {
                 LazyVStack(alignment: .leading, spacing: 1) {
                     // ── 全部文章（清空过滤，显示所有内容）──
                     allArticlesRow
+                    // ── 精确待处理：与 Worker 当前任务集合共用同一组 content id ──
+                    pendingRow
                     // ── 已导出文章 ──
                     exportedRow
+
+                    sidebarDivider
+
+                    categoryRow(title: "文章", icon: "doc.text.fill", key: "article",
+                                unread: vm.articleUnread, total: vm.articleCount)
+                    categoryRow(title: "播客", icon: "mic.fill", key: "podcast",
+                                unread: vm.podcastUnread, total: vm.podcastCount)
+                    categoryRow(title: "视频", icon: "play.rectangle.fill", key: "video",
+                                unread: vm.videoUnread, total: vm.videoCount)
+
+                    sidebarDivider
 
                     ForEach(vm.sidebarTree) { node in
                         if node.isFolder {
@@ -227,7 +281,7 @@ public struct ContentView: View {
             }
             Button("取消", role: .cancel) { newFolderName = "" }
         } message: {
-            Text("文件夹用于给订阅源分组（如「快讯」「深度」），并可设置组级管线总开关。")
+            Text("文件夹用于给订阅源分组（如「快讯」「深度」），并可批量设置组内内容处理选项。")
         }
         // 重命名对话框（源/文件夹共用）
         .alert("重命名", isPresented: Binding(
@@ -246,6 +300,27 @@ public struct ContentView: View {
             }
             Button("取消", role: .cancel) { renameTarget = nil }
         }
+        .alert("永久删除订阅源？", isPresented: Binding(
+            get: { deleteSourceTarget != nil },
+            set: { if !$0 { deleteSourceTarget = nil } }
+        )) {
+            Button("取消", role: .cancel) { deleteSourceTarget = nil }
+            Button("永久删除", role: .destructive) {
+                guard let target = deleteSourceTarget else { return }
+                deleteSourceTarget = nil
+                Task {
+                    let deleted = await sourceStore.removeSource(id: target.id)
+                    if vm.selectedItem?.feedId == target.id { vm.selectedItem = nil }
+                    if vm.selectedFilter == "source_id=\(target.id)" { vm.selectedFilter = nil }
+                    vm.loadAll()
+                    vm.showToast("已删除「\(target.name)」及其 \(deleted) 条内容")
+                }
+            }
+        } message: {
+            if let target = deleteSourceTarget {
+                Text("将永久删除「\(target.name)」及其全部文章、AI 处理结果和应用内导出记录。此操作无法撤销；已经写入 Obsidian 的文件不会删除。")
+            }
+        }
         // 开管线/切全文模式后弹「如何处理历史数据」（左栏右键触发，和订阅源页一致）
         .alert("处理历史数据？", isPresented: Binding(
             get: { pendingBackfill != nil },
@@ -262,10 +337,14 @@ public struct ContentView: View {
                             Task.detached { await PipelineWorker.shared.refetchFullTextForSource(onlySourceId: p.id) }
                         }
                     } else {
-                        if p.kind == "folder" {
-                            Task.detached { await PipelineWorker.shared.backfillHistoryForFolder(folderId: p.id) }
-                        } else {
-                            Task.detached { await PipelineWorker.shared.backfillHistory(onlySourceId: p.id) }
+                        if let key = p.policyKey {
+                            if p.kind == "folder" {
+                                if sourceStore.setHistoricalItemsEnabled(folderId: p.id, key: key) {
+                                    Task.detached { await PipelineWorker.shared.backfillHistoryForFolder(folderId: p.id) }
+                                }
+                            } else if sourceStore.setHistoricalItemsEnabled(sourceId: p.id, key: key) {
+                                Task.detached { await PipelineWorker.shared.backfillHistory(onlySourceId: p.id) }
+                            }
                         }
                     }
                 }
@@ -277,7 +356,7 @@ public struct ContentView: View {
                 if p.action == "fulltext" {
                     Text("「\(p.name)」的全文提取模式已切换为\(p.pipelineLabel)。\n\n• 重提历史：存量文章按新模式重新提取全文（耗时较长）\n• 只处理新增：历史不动，新抓的按新模式抓")
                 } else {
-                    Text("「\(p.name)」的\(p.pipelineLabel)已开启。\n\n• 处理历史：存量文章补跑管线（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+                    Text("「\(p.name)」的\(p.pipelineLabel)已开启。\n\n• 处理历史：存量内容补做相应处理（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动进入内容处理引擎")
                 }
             }
         }
@@ -296,11 +375,16 @@ public struct ContentView: View {
         Button {
             appTab.selection = tab
         } label: {
-            HStack(spacing: 5) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 5) {
+                    Image(systemName: icon)
+                        .font(.system(size: 12))
+                    Text(label)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                }
                 Image(systemName: icon)
                     .font(.system(size: 12))
-                Text(label)
-                    .font(.system(size: 11, weight: .medium))
             }
             .foregroundStyle(Color.rbText2)
             .frame(maxWidth: .infinity)
@@ -309,6 +393,43 @@ public struct ContentView: View {
         }
         .buttonStyle(.rowHover)
         .help("打开「\(label)」页面")
+    }
+
+    /// 左栏统一的“未读/全部”计数。固定数字槽优先保留，窄栏时名称截断而不吞掉计数。
+    private func sidebarCount(unread: Int, total: Int) -> some View {
+        ViewThatFits(in: .horizontal) {
+            sidebarCountPair(unread: "\(unread)", total: "\(total)", hasUnread: unread > 0)
+            sidebarCountPair(
+                unread: Self.compactSidebarCount(unread),
+                total: Self.compactSidebarCount(total),
+                hasUnread: unread > 0)
+        }
+        .monospacedDigit()
+        .lineLimit(1)
+        .frame(minWidth: 44, idealWidth: 80, maxWidth: 96, alignment: .trailing)
+        .layoutPriority(2)
+        .accessibilityLabel("未读 \(unread)，全部 \(total)")
+    }
+
+    private func sidebarCountPair(unread: String, total: String, hasUnread: Bool) -> some View {
+        HStack(spacing: 1) {
+            Text(unread)
+                .font(.system(size: RB.F.count * uiFontScale,
+                              weight: hasUnread ? .medium : .regular))
+                .foregroundStyle(hasUnread ? Color.rbAccent : Color.rbText3)
+            Text("/\(total)")
+                .font(.system(size: RB.F.count * uiFontScale))
+                .foregroundStyle(Color.rbText3)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    nonisolated private static func compactSidebarCount(_ count: Int) -> String {
+        guard count >= 10_000 else { return String(count) }
+        let value = Double(count) / 10_000
+        return value >= 10
+            ? String(format: "%.0f万", value)
+            : String(format: "%.1f万", value)
     }
 
     // MARK: OPML 导入（主界面入口，与订阅管理页同源）
@@ -363,21 +484,40 @@ public struct ContentView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "tray.full")
-                    .foregroundStyle(Color.rbText3)
+                    .foregroundStyle(Color.rbAccent)
                     .frame(width: 16)
                 Text("全部文章")
                     .font(.system(size: RB.F.sidebar * scale))
                     .foregroundStyle(Color.rbText)
+                    .lineLimit(1)
                 Spacer()
-                // 未读/总数（和文件夹行格式一致：未读>0 墨蓝 medium，读完纯 text3）
-                HStack(spacing: 1) {
-                    Text("\(vm.totalUnread)")
-                        .font(.system(size: RB.F.count * scale, weight: vm.totalUnread > 0 ? .medium : .regular))
-                        .foregroundStyle(vm.totalUnread > 0 ? Color.rbAccent : Color.rbText3)
-                    Text("/\(vm.totalCount)")
-                        .font(.system(size: RB.F.count * scale))
-                        .foregroundStyle(Color.rbText3)
-                }
+                sidebarCount(unread: vm.totalUnread, total: vm.totalCount)
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, 12)
+            .padding(.vertical, 5 * scale)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .rbSelection(active)
+        }
+        .buttonStyle(.rowHover)
+    }
+
+    /// 左栏「待处理」严格显示 Worker 规划器当前认定仍需进入内容处理引擎的内容。
+    private var pendingRow: some View {
+        let scale = uiFontScale
+        let active = vm.selectedFilter == "pending"
+        return Button { vm.selectFilter("pending") } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "gearshape.2.fill")
+                    .foregroundStyle(Color.rbAccent)
+                    .frame(width: 16)
+                Text("待处理")
+                    .font(.system(size: RB.F.sidebar * scale))
+                    .foregroundStyle(Color.rbText)
+                    .lineLimit(1)
+                Spacer()
+                sidebarCount(unread: vm.totalPendingUnread, total: vm.totalPending)
             }
             .padding(.leading, 12)
             .padding(.trailing, 12)
@@ -403,10 +543,42 @@ public struct ContentView: View {
                 Text("已导出")
                     .font(.system(size: RB.F.sidebar * scale))
                     .foregroundStyle(Color.rbText)
+                    .lineLimit(1)
                 Spacer()
-                Text("\(vm.totalExported)")
-                    .font(.system(size: RB.F.count * scale))
-                    .foregroundStyle(Color.rbText3)
+                sidebarCount(unread: vm.totalExportedUnread, total: vm.totalExported)
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, 12)
+            .padding(.vertical, 5 * scale)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .rbSelection(active)
+        }
+        .buttonStyle(.rowHover)
+    }
+
+    private var sidebarDivider: some View {
+        Hairline()
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+    }
+
+    private func categoryRow(title: String, icon: String, key: String,
+                             unread: Int, total: Int) -> some View {
+        let scale = uiFontScale
+        let active = vm.selectedFilter == "ctype=\(key)"
+        return Button { vm.selectFilter("ctype=\(key)") } label: {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.rbAccent)
+                    .frame(width: 16)
+                Text(title)
+                    .font(.system(size: RB.F.sidebar * scale))
+                    .foregroundStyle(Color.rbText)
+                    .lineLimit(1)
+                Spacer()
+                sidebarCount(unread: unread, total: total)
             }
             .padding(.leading, 12)
             .padding(.trailing, 12)
@@ -440,18 +612,11 @@ public struct ContentView: View {
                 }
                 Text(node.name)
                     .lineLimit(1)
+                    .truncationMode(.tail)
                     .font(.system(size: RB.F.sidebar * scale))
                     .foregroundStyle(Color.rbText)
                 Spacer()
-                // 始终显示 未读/总数（未读 > 0 时未读部分墨蓝 medium，读完纯 text3）
-                HStack(spacing: 1) {
-                    Text("\(node.unread)")
-                        .font(.system(size: RB.F.count * scale, weight: node.unread > 0 ? .medium : .regular))
-                        .foregroundStyle(node.unread > 0 ? Color.rbAccent : Color.rbText3)
-                    Text("/\(node.count)")
-                        .font(.system(size: RB.F.count * scale))
-                        .foregroundStyle(Color.rbText3)
-                }
+                sidebarCount(unread: node.unread, total: node.count)
             }
             .padding(.leading, node.isFolder ? 0 : (indent > 0 ? 6 : 0))
             .padding(.trailing, 10)
@@ -510,8 +675,10 @@ public struct ContentView: View {
                     Label("移动到文件夹", systemImage: "folder")
                 }
                 Divider()
-                Button(role: .destructive) { sourceStore.removeSource(id: sid); vm.loadAll() } label: {
-                    Label("删除此源", systemImage: "trash")
+                Button(role: .destructive) {
+                    deleteSourceTarget = (sid, src.name)
+                } label: {
+                    Label("永久删除此源", systemImage: "trash")
                 }
             }
         } else if let fid = node.folderId {
@@ -555,83 +722,94 @@ public struct ContentView: View {
         }
     }
 
-    /// 导出单篇文章到指定平台（不必遵循规则，直接用平台预设配置）
-    private func exportToPlatform(item: ContentItem, platform: String) {
-        Task {
-            let config = ExportPlatformConfig.shared
-            var rule = ExportRule(
-                id: 0, name: "单篇导出", enabled: true,
-                criteria: ExportRule.Criteria(),
-                triggerOn: "manual", target: platform, targetConfig: [:], lastRunAt: nil)
-            // 用平台预设配置填充 targetConfig
-            switch platform {
-            case "obsidian", "mddir":
-                rule.targetConfig["dir"] = config.obsidianDir
-            case "webhook":
-                rule.targetConfig["url"] = config.webhookURL
-                rule.targetConfig["headers"] = config.webhookHeaders
-            default: break
-            }
-            // 直接调 deliver（不经过规则匹配）
-            let (ok, dest, err) = await ExportService.shared.deliverSingle(rule: rule, contentId: item.id)
-            await MainActor.run {
-                // 用 App 级通知显示导出结果（不依赖 ViewModel 状态）
-                NotificationCenter.default.post(
-                    name: NSNotification.Name("ExportResult"),
-                    object: nil,
-                    userInfo: [
-                        "ok": ok,
-                        "platform": platform,
-                        "dest": dest ?? "",
-                        "error": err ?? ""
-                    ])
-            }
-        }
-    }
-
-    /// 从 DB 查某篇文章所属源的 PipelinePolicy
-    private func sourcePolicy(for contentId: Int64) -> PipelinePolicy {
-        guard let row = Database.shared.queryRows(
-            "SELECT s.config FROM content c JOIN content_source s ON s.id = c.source_id WHERE c.id = ?",
-            params: [contentId]).first,
-              let cfg = row["config"], !cfg.isEmpty else { return PipelinePolicy() }
-        return PipelinePolicy.from(configJson: cfg)
-    }
-
-    /// 重新处理（右键菜单用，fire-and-forget，无需 UI 状态）
+    /// 重新处理（右键菜单用）：与 Worker 共用 contentId 锁，并按包含关系合并 LLM 调用。
     private func reprocessItem(item: ContentItem) {
-        let loadedAudioUrl = Database.shared.fetchContentBody(id: item.id)?.audioUrl
-        let audioUrl = MediaAudioURLResolver.preferred(item.audioUrl, loadedAudioUrl)
+        guard PipelineWorker.shared.tryLockContent(item.id) else {
+            vm.showToast("该篇正在处理中，请稍候")
+            return
+        }
         Task {
-            let body = item.contentMd ?? item.excerpt ?? ""
-            let policy = sourcePolicy(for: item.id)
+            defer { PipelineWorker.shared.unlockContent(item.id) }
+            let contentId = item.id
+            let loaded = await Task.detached(priority: .userInitiated) {
+                Database.shared.fetchContentBody(id: contentId)
+            }.value
+            let body = PipelineWorker.resolveBody(
+                md: loaded?.contentMd ?? item.contentMd,
+                html: loaded?.contentHtml ?? item.contentHtml,
+                excerpt: item.excerpt)
+            let audioUrl = MediaAudioURLResolver.preferred(loaded?.audioUrl, item.audioUrl)
+            let policy = await Task.detached(priority: .utility) {
+                Database.shared.effectivePolicyFor(contentId: contentId)
+            }.value
             let pipeline = LLMPipeline()
             let isMedia = item.ctype == "podcast" || item.ctype == "video"
                 || item.ctype == "youtube" || audioUrl != nil
-            let skipMediaTranslation = isMedia && ContentLanguage.isChinese(
+            let isChineseMedia = isMedia && ContentLanguage.isChinese(
                 declared: item.language, fallbackText: item.title + "\n" + body)
-            var any = false
-            if policy.autoScore, pipeline.isAvailable { any = true; let _ = await pipeline.score(contentId: item.id, title: item.title, body: body) }
-            if policy.autoTranslate, !skipMediaTranslation, pipeline.isAvailable {
-                any = true
-                let _ = await pipeline.translate(contentId: item.id, title: item.title, body: body)
+            let steps = ManualReprocessPlanner.steps(
+                policy: policy, isMedia: isMedia, isChineseMedia: isChineseMedia)
+            var succeeded = false
+
+            for step in steps {
+                guard !Task.isCancelled else { break }
+                let ok: Bool
+                switch step {
+                case .translateFull:
+                    if pipeline.isAvailable {
+                        ok = await pipeline.translateFull(
+                            contentId: item.id, title: item.title, body: body, policy: policy)
+                    } else {
+                        ok = false
+                    }
+                case .scoreWithSummary:
+                    if pipeline.isAvailable {
+                        ok = await pipeline.score(
+                            contentId: item.id, title: item.title, body: body)
+                    } else {
+                        ok = false
+                    }
+                case .summarize:
+                    if pipeline.isAvailable {
+                        ok = await pipeline.summarize(
+                            contentId: item.id, title: item.title, body: body)
+                    } else {
+                        ok = false
+                    }
+                case .transcribe:
+                    ok = await TranscribePipeline().transcribe(
+                        contentId: item.id, title: item.title, audioUrl: audioUrl,
+                        pageUrl: item.url, language: item.language)
+                }
+                succeeded = succeeded || ok
             }
-            if policy.autoSummarize, pipeline.isAvailable { any = true; let _ = await pipeline.summarize(contentId: item.id, title: item.title, body: body) }
-            if policy.autoTranscribe, (item.ctype == "podcast" || item.ctype == "video" || audioUrl != nil) {
-                any = true; let _ = await TranscribePipeline().transcribe(contentId: item.id, title: item.title, audioUrl: audioUrl, pageUrl: item.url, language: item.language)
+
+            if succeeded {
+                await ExportService.shared.runPending(trigger: "ready", contentId: item.id)
+                NotificationCenter.default.post(name: .contentUpdated, object: nil)
             }
-            if any { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
         }
     }
 
     /// 单篇文章跑管线（评分/摘要/翻译/转录）——右键菜单调用
     private func runPipelineForItem(item: ContentItem, type: String) {
-        let pipeline = LLMPipeline()
-        let transcriber = TranscribePipeline()
-        let body = item.contentMd ?? item.excerpt ?? ""
-        let loadedAudioUrl = type == "transcribe" ? Database.shared.fetchContentBody(id: item.id)?.audioUrl : nil
-        let audioUrl = MediaAudioURLResolver.preferred(item.audioUrl, loadedAudioUrl)
+        guard PipelineWorker.shared.tryLockContent(item.id) else {
+            vm.showToast("该篇正在处理中，请稍候")
+            return
+        }
         Task {
+            defer { PipelineWorker.shared.unlockContent(item.id) }
+            let pipeline = LLMPipeline()
+            let transcriber = TranscribePipeline()
+            let contentId = item.id
+            let loaded = await Task.detached(priority: .userInitiated) {
+                Database.shared.fetchContentBody(id: contentId)
+            }.value
+            let body = PipelineWorker.resolveBody(
+                md: loaded?.contentMd ?? item.contentMd,
+                html: loaded?.contentHtml ?? item.contentHtml,
+                excerpt: item.excerpt)
+            let audioUrl = MediaAudioURLResolver.preferred(loaded?.audioUrl, item.audioUrl)
             let ok: Bool
             switch type {
             case "score":
@@ -639,9 +817,11 @@ public struct ContentView: View {
             case "summarize":
                 ok = await pipeline.summarize(contentId: item.id, title: item.title, body: body)
             case "translate":
-                // 媒体项翻简介（content_html → llm_excerpt_translated）；非媒体项翻正文
-                if item.ctype == "podcast" || item.ctype == "video" || item.audioUrl != nil {
-                    ok = await pipeline.translateExcerpt(contentId: item.id, title: item.title, contentHtml: item.excerpt ?? item.contentHtml ?? "")
+                // 媒体项使用简介专用翻译；非媒体项翻译正文。
+                if item.ctype == "podcast" || item.ctype == "video" || item.ctype == "youtube" || audioUrl != nil {
+                    ok = await pipeline.translateExcerpt(
+                        contentId: item.id, title: item.title,
+                        contentHtml: loaded?.contentHtml ?? item.contentHtml ?? item.excerpt ?? body)
                 } else {
                     ok = await pipeline.translate(contentId: item.id, title: item.title, body: body)
                 }
@@ -653,9 +833,8 @@ public struct ContentView: View {
                 ok = false
             }
             if ok {
-                await MainActor.run {
-                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
-                }
+                await ExportService.shared.runPending(trigger: "ready", contentId: item.id)
+                NotificationCenter.default.post(name: .contentUpdated, object: nil)
             }
         }
     }
@@ -683,7 +862,7 @@ public struct ContentView: View {
             sourceStore.setPolicy(id: src.id, key: key, value: turningOn)
             // 开启时弹「如何处理历史数据」（和订阅源页一致）
             if turningOn {
-                pendingBackfill = ("source", src.id, src.name, label, "pipeline")
+                pendingBackfill = ("source", src.id, src.name, label, "pipeline", key)
             }
         } label: {
             // 只留打钩表勾选态（不要内容图标——勾选清晰可见最重要）
@@ -872,7 +1051,7 @@ public struct ContentView: View {
             sourceStore.setFolderPolicy(id: folder.id, key: key, value: turningOn)
             // 开启时弹「如何处理历史数据」（和订阅源页一致）
             if turningOn {
-                pendingBackfill = ("folder", folder.id, folder.name, label, "pipeline")
+                pendingBackfill = ("folder", folder.id, folder.name, label, "pipeline", key)
             }
         } label: {
             // 只留打钩表勾选态；不一致显示「按订阅源设置」不钩
@@ -954,6 +1133,80 @@ public struct ContentView: View {
         }
     }
 
+    private var scoreFilterControls: some View {
+        HStack(spacing: 5) {
+            Text("评分")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.rbText3)
+            scoreField(placeholder: "0", value: $vm.minScore)
+            Text("–")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.rbText3)
+            scoreField(placeholder: "100", value: $vm.maxScore)
+            if vm.minScore > 0 || vm.maxScore < 100 {
+                filterChip(label: "含未评分", state: vm.includeUnscored ? .yes : .none) {
+                    vm.includeUnscored.toggle()
+                    vm.reload()
+                }
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func scoreField(placeholder: String, value: Binding<Int>) -> some View {
+        TextField(placeholder, value: value, format: .number)
+            .textFieldStyle(.plain)
+            .font(.system(size: 11, design: .monospaced))
+            .multilineTextAlignment(.trailing)
+            .frame(width: 30)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3.5)
+            .background(RoundedRectangle(cornerRadius: RB.Radius.md).fill(Color.rbSurface))
+            .overlay(
+                RoundedRectangle(cornerRadius: RB.Radius.md)
+                    .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
+            )
+            .onSubmit { vm.reload() }
+            .onChange(of: value.wrappedValue) { _, _ in vm.reloadDebounced() }
+    }
+
+    private var readAndSortControls: some View {
+        HStack(spacing: 8) {
+            RBSegmented(
+                items: ContentViewModel.ReadFilter.allCases.map { ($0, $0.display) },
+                selection: $vm.readFilter
+            )
+            .onChange(of: vm.readFilter) { _, _ in vm.reload() }
+
+            Menu {
+                ForEach(ContentViewModel.SortOrder.allCases) { order in
+                    Button { vm.sortOrder = order } label: {
+                        Label(order.display, systemImage: vm.sortOrder == order ? "checkmark" : "")
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Color.rbText3)
+                    Text(vm.sortOrder.display)
+                        .font(.system(size: 11))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(Color.rbText3)
+                }
+                .foregroundStyle(Color.rbText2)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4.5)
+                .background(Capsule().fill(Color.rbSurface))
+                .overlay(Capsule().strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair))
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .onChange(of: vm.sortOrder) { _, _ in vm.reload() }
+        }
+    }
+
     private var articleList: some View {
         VStack(spacing: 0) {
             // 搜索框（胶囊输入：surface 底 + hairline 描边，聚焦转墨蓝）
@@ -978,88 +1231,37 @@ public struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.top, 10)
 
-            // 筛选条行1：评分(输入框) + 未读/全部/星标(单选)
-            HStack(spacing: 8) {
-                Text("评分 ≥")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.rbText3)
-                TextField("0", value: $vm.minScore, format: .number)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 11, design: .monospaced))
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 30)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3.5)
-                    .background(
-                        RoundedRectangle(cornerRadius: RB.Radius.md)
-                            .fill(Color.rbSurface)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: RB.Radius.md)
-                            .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
-                    )
-                    .onSubmit { vm.reload() }
-                    .onChange(of: vm.minScore) { _, _ in vm.reloadDebounced() }
-                if vm.minScore > 0 {
-                    filterChip(label: "含未评分", state: vm.includeUnscored ? .yes : .none) {
-                        vm.includeUnscored.toggle()
-                        vm.reload()
+            // 筛选条行1：宽栏同排；窄栏自动拆成“评分区间 / 阅读状态+排序”两行。
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    scoreFilterControls
+                    Spacer(minLength: 8)
+                    readAndSortControls
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    scoreFilterControls
+                    HStack(spacing: 8) {
+                        readAndSortControls
+                        Spacer(minLength: 0)
                     }
                 }
-
-                Spacer()
-
-                // 全部/未读/星标三选一（纸墨分段，替代原生 segmented）
-                RBSegmented(
-                    items: ContentViewModel.ReadFilter.allCases.map { ($0, $0.display) },
-                    selection: $vm.readFilter
-                )
-                .onChange(of: vm.readFilter) { _, _ in vm.reload() }
-
-                // 排序选择（最新/最早/评分；胶囊 Menu，替代原生弹出按钮）
-                Menu {
-                    ForEach(ContentViewModel.SortOrder.allCases) { o in
-                        Button { vm.sortOrder = o } label: {
-                            Label(o.display, systemImage: vm.sortOrder == o ? "checkmark" : "")
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.up.arrow.down")
-                            .font(.system(size: 9))
-                            .foregroundStyle(Color.rbText3)
-                        Text(vm.sortOrder.display)
-                            .font(.system(size: 11))
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 7, weight: .bold))
-                            .foregroundStyle(Color.rbText3)
-                    }
-                    .foregroundStyle(Color.rbText2)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4.5)
-                    .background(Capsule().fill(Color.rbSurface))
-                    .overlay(
-                        Capsule().strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
-                    )
-                }
-                .menuStyle(.borderlessButton)
-                .onChange(of: vm.sortOrder) { _, _ in vm.reload() }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 
             // 筛选条行2：处理状态平铺三态按钮（AI 评分/AI 摘要/AI 翻译/AI 转录，可多选）
             // 三态：无底色=不筛选 → 实色=已处理 → 淡粉=未处理，点击循环切换
-            HStack(spacing: 6) {
+            RBFlowLayout(horizontalSpacing: 6, verticalSpacing: 6) {
                 Text("处理")
                     .font(.system(size: 11))
                     .foregroundStyle(Color.rbText3)
+                processedToggle(key: "fulltext", label: "全文提取")
                 processedToggle(key: "score", label: "AI 评分")
                 processedToggle(key: "summary", label: "AI 摘要")
                 processedToggle(key: "translate", label: "AI 翻译")
                 processedToggle(key: "transcribe", label: "AI 转录")
-                Spacer()
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
 
@@ -1090,7 +1292,11 @@ public struct ContentView: View {
             )) {
                 ForEach(vm.items) { item in
                     ArticleRow(item: item, isSelected: vm.selectedItem?.id == item.id,
-                               isReadOverride: vm.readMarks[item.id])
+                               isReadOverride: vm.readMarks[item.id],
+                               scale: uiFontScale,
+                               density: listDensity, showSource: listShowSource,
+                               showDate: listShowDate, unreadBold: listUnreadBold,
+                               dateFormat: listDateFormat)
                         .tag(item)
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
@@ -1166,46 +1372,11 @@ public struct ContentView: View {
 
                             // ── 后处理 ──
                             Button {
-                                Task { await ExportService.shared.runPending(trigger: "manual", contentId: item.id) }
+                                Task { _ = await ExportService.shared.forceExport(contentId: item.id) }
                             } label: {
                                 Label("触发导出规则", systemImage: "square.and.arrow.up.on.square")
                             }
 
-                            // ── 导出到平台（不必遵循规则，直接导出到各平台预设位置）──
-                            Menu {
-                                Button {
-                                    exportToPlatform(item: item, platform: "obsidian")
-                                } label: {
-                                    Label("Obsidian", systemImage: "note.text")
-                                }
-                                Button {
-                                    exportToPlatform(item: item, platform: "notion")
-                                } label: {
-                                    Label("Notion", systemImage: "square.grid.2x2")
-                                }
-                                Button {
-                                    exportToPlatform(item: item, platform: "cubox")
-                                } label: {
-                                    Label("Cubox", systemImage: "cube")
-                                }
-                                Button {
-                                    exportToPlatform(item: item, platform: "instapaper")
-                                } label: {
-                                    Label("Instapaper", systemImage: "book")
-                                }
-                                Button {
-                                    exportToPlatform(item: item, platform: "readwise")
-                                } label: {
-                                    Label("Readwise", systemImage: "bookmark")
-                                }
-                                Button {
-                                    exportToPlatform(item: item, platform: "webhook")
-                                } label: {
-                                    Label("Webhook", systemImage: "link")
-                                }
-                            } label: {
-                                Label("导出到平台", systemImage: "square.and.arrow.up")
-                            }
                         }
                         // 最后一行出现时自动加载下一页（滚动到底分页，打破 300 条上限）
                         .onAppear {
@@ -1228,7 +1399,7 @@ public struct ContentView: View {
             if let item = vm.selectedItem {
                 ReadingView(item: item, showTranslated: $vm.showTranslated,
                             onPrev: { vm.selectPrev() }, onNext: { vm.selectNext() })
-                    .id(item.id)   // 切文章强制重建视图：busy/statusMsg 等 @State 不串到下一篇
+                    .id(item.id)   // 切文章重建阅读视图；手动处理状态由 content id 共享 Store 恢复
             } else {
                 ContentUnavailableView(
                     "选择一篇文章",
@@ -1249,34 +1420,32 @@ public struct ArticleRow: View {
     var isReadOverride: Bool? = nil
     /// 有效已读态（覆盖优先，其次 item 字段）
     private var isRead: Bool { isReadOverride ?? item.isRead }
-    /// @AppStorage 让设置变化时行自动重建（静态 ReadingLayout 读取不触发刷新）
-    @AppStorage("reading.uiFontScale") private var scale: Double = 1.0
-    @AppStorage("list.showThumbnails") private var showThumbnails: Bool = true
-    @AppStorage("list.excerptLines") private var excerptLines: Int = 2
-    @AppStorage("list.density") private var density: String = "comfortable"
-    @AppStorage("list.showSource") private var showSource: Bool = true
-    @AppStorage("list.showDate") private var showDate: Bool = true
-    @AppStorage("list.unreadBold") private var unreadBold: Bool = true
-    @AppStorage("list.dateFormat") private var dateFormat: String = "absolute"
+    let scale: Double
+    let density: String
+    let showSource: Bool
+    let showDate: Bool
+    let unreadBold: Bool
+    let dateFormat: String
 
-    /// 紧凑密度下缩略图更小、行距更紧
+    /// 紧凑密度下行距更紧。
     private var isCompact: Bool { density == "compact" }
 
-    /// 源类型图标（RSS 用经典三半圆图标，其他来源待补齐品牌图标）
+    /// 内容类型图标（不是平台识别）：RSS / Podcast / Video 各用固定语义色。
     /// 返回 nil 表示暂不显示图标（等写对应订阅功能时再补）
     private var ctypeIcon: String? {
         switch item.ctype {
-        case "podcast": return "mic"
-        case "video", "youtube": return "play.rectangle.fill"  // YouTube 品牌图标（红色 foregroundStyle）
+        case "podcast": return "mic.fill"
+        case "video", "youtube": return "play.rectangle.fill"
         case "wechat", "social": return nil   // 待微信订阅功能补齐品牌图标
         default: return nil  // RSS 用自定义 RSSIcon 组件，不走 SF Symbol
         }
     }
 
-    /// 源类型图标的强调色（YouTube 用品牌红，其余跟随次级文字色）
+    /// 内容类型图标的强调色。
     private var ctypeIconColor: Color {
         switch item.ctype {
-        case "video", "youtube": return Color(red: 1.0, green: 0.0, blue: 0.0)  // YouTube 红 #FF0000
+        case "podcast": return .rbPodcast
+        case "video", "youtube": return .rbVideo
         default: return Color.rbText3
         }
     }
@@ -1305,11 +1474,16 @@ public struct ArticleRow: View {
     }
 
     public var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: isCompact ? 2 : 5) {
-                // 标题行（评分挪到下方来源行了，标题行只留标题 + 星标）
+        HStack(alignment: .center, spacing: 9) {
+            // 未读点固定在整行最左侧并垂直居中；已读时保留槽位，正文不会左右跳。
+            Circle()
+                .fill(isRead ? Color.clear : Color.rbAccent)
+                .frame(width: 6, height: 6)
+                .frame(width: 8)
+
+            VStack(alignment: .leading, spacing: isCompact ? 4 : 6) {
+                // 第一行：标题 + 星标
                 HStack(alignment: .top, spacing: 6) {
-                    // 有译文时显示中文标题（llm_translated_md 第一行），否则原标题
                     Text(displayTitle)
                         .font(.system(size: RB.F.rowTitle * scale, weight: (unreadBold && !isRead) ? .semibold : .regular))
                         .foregroundStyle(isRead ? Color.rbText2 : Color.rbText)
@@ -1322,33 +1496,42 @@ public struct ArticleRow: View {
                     }
                     Spacer(minLength: 0)
                 }
-                // 摘要（行数可配，0 = 不显示）
-                if excerptLines > 0, let ex = item.excerpt, !ex.isEmpty {
-                    Text(ex)
-                        .font(.system(size: RB.F.rowExcerpt * scale))
-                        .foregroundStyle(Color.rbText2)
-                        .lineLimit(excerptLines)
-                }
-                // 来源 + 评分标签 + 日期（评分挪到标题下面这行，在 RSS 来源旁边）
+
+                // 第二行：内容类型图标 + 订阅源名称 + 时间
                 HStack(spacing: 6) {
-                    if showSource {
-                        HStack(spacing: 4) {
-                            // 源类型图标：RSS 用经典三半圆，其他来源待补齐品牌图标（只显示图标不要文字）
-                            if isRSSSource {
-                                RSSIcon(size: 11, color: .rbText3)
-                            } else if let icon = ctypeIcon {
-                                Image(systemName: icon)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(ctypeIconColor)
-                            }
-                        }
+                    if isRSSSource {
+                        RSSIcon(size: 11, color: .rbRSS)
+                    } else if let icon = ctypeIcon {
+                        Image(systemName: icon)
+                            .font(.system(size: 11))
+                            .foregroundStyle(ctypeIconColor)
                     }
-                    // 评分 badge（固定宽度——个位数/0 不短一截）
+                    if showSource {
+                        Text(item.sourceName ?? item.source)
+                            .font(.system(size: RB.F.rowMeta * scale))
+                            .foregroundStyle(Color.rbText3)
+                            .lineLimit(1)
+                    }
+                    if showSource, showDate, item.publishedAt != nil {
+                        Text("·").foregroundStyle(Color.rbText3)
+                    }
+                    if showDate, let pd = item.publishedAt, pd.count >= 10 {
+                        Text(formattedDate(pd))
+                            .font(.system(size: RB.F.rowMeta * scale))
+                            .foregroundStyle(Color.rbText3)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                // 第三行：加工状态；已导出与前五项分开并固定靠右。
+                HStack(spacing: 6) {
+                    if item.ctype != "podcast", item.hasFulltext {
+                        RBadge(text: "全文", color: .rbScoreHigh, scale: scale)
+                    }
                     if let s = item.llmScore {
                         Text("评分 \(s)")
                             .font(.system(size: RB.F.badge * scale, weight: .medium))
                             .foregroundStyle(scoreColor(s))
-                            .frame(width: 52, alignment: .center)   // 固定宽度
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1.5)
                             .background(scoreColor(s).opacity(0.10))
@@ -1358,57 +1541,20 @@ public struct ArticleRow: View {
                                     .strokeBorder(scoreColor(s).opacity(0.22), lineWidth: RB.Line.hair)
                             )
                     }
-                    // 全文 badge（有全文绿 / 无全文红）——所有项（YouTube/播客 defuddle 也能拿全文）
-                    if item.hasFulltext {
-                        RBadge(text: "全文", color: .rbScoreHigh, scale: scale)
-                    } else {
-                        RBadge(text: "无全文", color: .rbScoreLow, scale: scale)
-                    }
-                    // 管线已处理 badge（两字标签）
                     if let sum = item.llmSummary, !sum.isEmpty {
                         RBadge(text: "摘要", color: .rbSummary, scale: scale)
                     }
-                    // 翻译（llm_translated_md 全文翻译，所有项统一）
                     if item.hasTranslation {
                         RBadge(text: "翻译", color: .rbTranslate, scale: scale)
                     }
-                    // 转录（llm_transcript_md，仅媒体项）
                     if item.isMedia && item.hasTranscript {
                         RBadge(text: "转录", color: .rbSummary, scale: scale)
                     }
+                    Spacer(minLength: 8)
                     if item.hasExport {
                         RBadge(text: "已导出", color: .rbAccent, scale: scale)
                     }
-                    if showDate, let pd = item.publishedAt, pd.count >= 10 {
-                        Text(formattedDate(pd))
-                            .font(.system(size: RB.F.rowMeta * scale))
-                            .foregroundStyle(Color.rbText3)
-                    }
-                    Spacer()
-                    // 未读点：6pt 墨蓝（选中态不隐藏——浅底下保持可见）
-                    if !isRead {
-                        Circle().fill(Color.rbAccent).frame(width: 6, height: 6)
-                    }
                 }
-            }
-            // 右侧缩略图（可关；紧凑模式更小；失败占位 surface 更干净；hairline 描边挺边）
-            if showThumbnails, let img = item.imageUrl, let url = URL(string: img) {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    case .failure, .empty:
-                        Rectangle().fill(Color.rbSurface)
-                    @unknown default:
-                        Rectangle().fill(Color.rbSurface)
-                    }
-                }
-                .frame(width: (isCompact ? 48 : 72) * scale, height: (isCompact ? 48 : 72) * scale)
-                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.md))
-                .overlay(
-                    RoundedRectangle(cornerRadius: RB.Radius.md)
-                        .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
-                )
             }
         }
         .padding(.horizontal, 12)
@@ -1492,11 +1638,6 @@ struct ReadingLayout {
 
     // MARK: 文章列表外观（常见 RSS 阅读器设置项）
 
-    /// 列表是否显示缩略图（右侧小图）
-    static var showThumbnails: Bool {
-        get { UserDefaults.standard.object(forKey: "list.showThumbnails") as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: "list.showThumbnails") }
-    }
     /// 摘要显示行数（0 = 不显示摘要）
     static var excerptLines: Int {
         get { UserDefaults.standard.object(forKey: "list.excerptLines") as? Int ?? 2 }
@@ -1539,10 +1680,7 @@ public struct ReadingView: View {
     @State private var pipeline = LLMPipeline()
     @State private var llmAvailable = false  // 在 onAppear 中赋值，避免 body 渲染时调 isAvailable→SecretStore 递归锁崩溃
     @State private var transcriber = TranscribePipeline()
-    @State private var busy = false
-    @State private var statusMsg: String?
-    /// busy 所属的内容 id——切文章后旧任务完成不再污染新文章的 busy 状态
-    @State private var busyForId: Int64? = nil
+    @ObservedObject private var processingStates = ContentProcessingStateStore.shared
     /// 当前内容的有效管线开关（源 OR 文件夹）
     @State private var policy = PipelinePolicy()
     /// 媒体项（播客/视频）正文标签：0=原文(简介) / 1=译文(简介翻译) / 2=转录(中英对照)
@@ -1604,39 +1742,47 @@ public struct ReadingView: View {
         fullBody
     }
 
+    private var processingState: ContentProcessingStateStore.Entry? {
+        processingStates.state(for: item.id)
+    }
+
+    private var busy: Bool { processingState?.isProcessing == true }
+    private var statusMsg: String? { processingState?.message }
+
     private var fullBody: some View {
         VStack(spacing: 0) {
-            // ── 顶部操作条：左快捷操作 / 中双语切换 / 右版面设置（三段分组式）──
-            HStack(spacing: 2) {
-                // 快捷操作簇（统一 15pt + frame 24×24 对齐，SF Symbol 视觉大小归一）
-                Button { toggleStar() } label: {
-                    Image(systemName: isStarred ? "star.fill" : "star")
-                        .font(.system(size: 15, weight: .regular))
-                        .frame(width: 24, height: 24)
-                        .foregroundStyle(isStarred ? Color.rbStar : Color.rbText2)
-                }
-                .buttonStyle(.staticQuiet)
-                .help(isStarred ? "取消星标" : "加星标")
+            // ── 顶部操作条：左右操作槽等宽，文稿标签占满中间区域并保持整体居中。──
+            HStack(spacing: 12) {
+                HStack(spacing: 2) {
+                    // 快捷操作簇（统一 15pt + frame 24×24 对齐，SF Symbol 视觉大小归一）
+                    Button { toggleStar() } label: {
+                        Image(systemName: isStarred ? "star.fill" : "star")
+                            .font(.system(size: 15, weight: .regular))
+                            .frame(width: 24, height: 24)
+                            .foregroundStyle(isStarred ? Color.rbStar : Color.rbText2)
+                    }
+                    .buttonStyle(.staticQuiet)
+                    .help(isStarred ? "取消星标" : "加星标")
 
-                Button { toggleRead() } label: {
-                    Image(systemName: isRead ? "envelope.open" : "envelope")
-                        .font(.system(size: 15, weight: .regular))
-                        .frame(width: 24, height: 24)
-                        .foregroundStyle(Color.rbText2)
-                }
-                .buttonStyle(.staticQuiet)
-                .help(isRead ? "标为未读" : "标为已读")
+                    Button { toggleRead() } label: {
+                        Image(systemName: isRead ? "envelope.open" : "envelope")
+                            .font(.system(size: 15, weight: .regular))
+                            .frame(width: 24, height: 24)
+                            .foregroundStyle(Color.rbText2)
+                    }
+                    .buttonStyle(.staticQuiet)
+                    .help(isRead ? "标为未读" : "标为已读")
 
-                Button { showShareSheet = true } label: {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 15, weight: .regular))
-                        .frame(width: 24, height: 24)
-                        .foregroundStyle(Color.rbText2)
+                    Button { showShareSheet = true } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 15, weight: .regular))
+                            .frame(width: 24, height: 24)
+                            .foregroundStyle(Color.rbText2)
+                    }
+                    .buttonStyle(.staticQuiet)
+                    .help("分享 / 后处理")
                 }
-                .buttonStyle(.staticQuiet)
-                .help("分享 / 后处理")
-
-                Spacer()
+                .frame(width: 76, alignment: .leading)
 
                 // 视图切换：非媒体项「译文/原文」两段；媒体项「原文/译文/转录」三段（同一组件同一位置）
                 if isMediaItem {
@@ -1644,7 +1790,8 @@ public struct ReadingView: View {
                     // 转录看 llm_transcript_md；二者互不作为对方的显示条件。
                     RBSegmented(
                         items: mediaTabItems,
-                        selection: mediaTabSelection
+                        selection: mediaTabSelection,
+                        fillsAvailableWidth: true
                     )
                 // ⚠️ 切标签"点了没反应"根治（09:21 用户直觉定位：在等通知但通知没给到，是个低级问题）：
                 // 原判断 `!= nil` —— llm_translated_md=0KB 的文章 loadedTranslatedMd 是**空字符串 ""（非 nil）**，
@@ -1654,24 +1801,29 @@ public struct ReadingView: View {
                 } else if translatedText != nil {
                     RBSegmented(
                         items: [(0, "译文"), (1, "原文")],
-                        selection: $viewMode
+                        selection: $viewMode,
+                        fillsAvailableWidth: true
                     )
+                } else {
+                    Spacer(minLength: 0)
                 }
 
-                Spacer()
-
-                // 版面设置（Aa 图标）——右上角只留格式按钮；全文/评分/摘要/翻译/转录统一在标题栏下方胶囊按钮组
-                Button { showLayoutPopover = true } label: {
-                    Image(systemName: "textformat")
-                        .font(.system(size: 15, weight: .regular))
-                        .frame(width: 24, height: 24)
-                        .foregroundStyle(Color.rbText2)
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    // 明确显示 Aa 字标；不再沿用此前没有产生视觉变化的 textformat 图标。
+                    Button { showLayoutPopover = true } label: {
+                        Text("Aa")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .frame(width: 24, height: 24)
+                            .foregroundStyle(Color.rbText2)
+                    }
+                    .buttonStyle(.staticQuiet)
+                    .help("阅读器设置")
+                    .popover(isPresented: $showLayoutPopover, arrowEdge: .bottom) {
+                        layoutPanel
+                    }
                 }
-                .buttonStyle(.staticQuiet)
-                .help("版面设置")
-                .popover(isPresented: $showLayoutPopover, arrowEdge: .bottom) {
-                    layoutPanel
-                }
+                .frame(width: 76, alignment: .trailing)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
@@ -1685,23 +1837,16 @@ public struct ReadingView: View {
             // 多轮实测确认可靠，先保留。后续验证就地更新稳定后可移除以保留滚动位置。）
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    // 标题（独立字号设置；标题字体跟用户字体选择走，不被主题强制）
-                    // 点击直接在浏览器打开原文 + 文本可选择
-                    Button {
-                        if let url = URL(string: item.url), !item.url.isEmpty {
-                            NSWorkspace.shared.open(url)
-                        }
-                    } label: {
-                        Text(item.title)
-                            .font(fontChoice.font(size: titleFontSize).bold())
-                            .foregroundStyle(p.text)
-                            .multilineTextAlignment(.leading)
-                    }
-                    .buttonStyle(.plain)
-                    // 允许在标题上直接选文字（.plain 按钮配 textSelection 即可点又可选区）
-                    .textSelection(.enabled)
+                    // 原生 NSTextView 同时处理拖选、单击和 pointing-hand cursor rect。
+                    SelectableLinkTitle(
+                        text: item.title,
+                        destination: item.url,
+                        font: fontChoice.nsFont(size: titleFontSize, bold: true),
+                        normalColor: NSColor(p.text),
+                        hoverColor: NSColor(Color.rbAccent.opacity(0.88))
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .help("点击在浏览器打开原文")
-                    .textSelection(.enabled)
                     // 中文标题（有译文时显示在英文标题下方——从 translatedHead 第一行取）
                     if let chineseTitle = chineseTitle, chineseTitle != item.title {
                         Text(chineseTitle)
@@ -1742,30 +1887,29 @@ public struct ReadingView: View {
                         StaticCapsuleButton(title: "内容处理", icon: "gearshape.2", disabled: busy) {
                             reprocessFromReadingView()
                         }
-                        if !llmAvailable {
-                            if !isMediaItem {
-                                Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
-                                    .font(.caption)
-                                    .foregroundStyle(Color.rbScoreLow)
-                            }
-                        } else {
+                        if llmAvailable {
                             // 评分/摘要/翻译按钮：均始终显示，已有结果也可重新执行
                             StaticCapsuleButton(title: "AI 评分", icon: "star", disabled: busy) { runScore() }
                             StaticCapsuleButton(title: "AI 摘要", icon: "text.quote", disabled: busy) { runSummarize() }
                             StaticCapsuleButton(title: "AI 翻译", icon: "character.bubble", disabled: busy) { runTranslate() }
-                            if busy {
-                                ProgressView().scaleEffect(0.6).frame(width: 16, height: 16)
-                            }
-                            if let msg = statusMsg {
-                                Text(msg)
-                                    .font(.caption)
-                                    .foregroundStyle(Color.rbText3)
-                                    .lineLimit(1)
-                            }
                         }
                         // AI 转录：媒体项始终显示（放最后）；已有转录稿也显示（可重新转录）
                         if isMediaItem {
                             StaticCapsuleButton(title: "AI 转录", icon: "waveform", disabled: busy) { runTranscribe() }
+                        }
+                        // 所有状态统一位于最后一个操作按钮右侧。
+                        if busy {
+                            ProgressView().scaleEffect(0.6).frame(width: 16, height: 16)
+                        }
+                        if let msg = statusMsg {
+                            Text(msg)
+                                .font(.caption)
+                                .foregroundStyle(Color.rbText3)
+                                .lineLimit(1)
+                        } else if !llmAvailable, !isMediaItem {
+                            Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
+                                .font(.caption)
+                                .foregroundStyle(Color.rbScoreLow)
                         }
                         Spacer()
                     }
@@ -1829,10 +1973,15 @@ public struct ReadingView: View {
             Trace.i("ReadingView.onAppear id=\(item.id) ctype=\(item.ctype) 已有contentMd=\(item.contentMd != nil) llmTranslatedMd非空=\(item.llmTranslatedMd != nil) mem=\(Trace.mb())MB [\(buildTag)]", category: "read")
             Trace.startMemorySampler(category: "read.mem")
             llmAvailable = pipeline.isAvailable  // 读取一次缓存，避免 body 渲染时调 SecretStore 递归锁
-            policy = Database.shared.effectivePolicyFor(contentId: item.id)
             isStarred = item.starred
             isRead = item.isRead
-            loadContentMd()   // 按 id 查 content_md（列表查询不取，点开再查防闪烁）
+        }
+        // 正文、译文、转录、评分、摘要和源策略一次后台读取；不再在 onAppear 主线程查两遍 DB。
+        .task(id: item.id) { await loadContentMd() }
+        .onChange(of: processingState?.isProcessing) { wasProcessing, isProcessing in
+            if wasProcessing == true, isProcessing == false {
+                refreshLoadedBody()
+            }
         }
         .onDisappear {
             Trace.i("ReadingView.onDisappear id=\(item.id) mem=\(Trace.mb())MB", category: "read")
@@ -1852,115 +2001,22 @@ public struct ReadingView: View {
         return parts
     }
 
-    /// 版面设置面板（极简分组：外观 / 字号 / 排版，标签统一 text2 右对齐，数值等宽）
+    /// 右上角直接复用设置页完整的阅读器设置，避免两处配置项和取值范围再次分叉。
     private var layoutPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("版面设置")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color.rbText)
-
-            // ── 外观 ──
-            SectionLabel(text: "外观")
-            settingRow("主题") {
-                Picker("", selection: $themeRaw) {
-                    ForEach(ReadingTheme.allCases) { t in
-                        Text(t.displayName).tag(t.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .tint(Color.rbAccent)
+        VStack(spacing: 0) {
+            HStack {
+                Text("阅读器设置")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.rbText)
+                Spacer()
             }
-            settingRow("亮暗") {
-                Picker("", selection: $themeModeRaw) {
-                    ForEach(ReadingTheme.Mode.allCases) { m in
-                        Text(m.displayName).tag(m.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .tint(Color.rbAccent)
-            }
-            settingRow("字体") {
-                Picker("", selection: $fontRaw) {
-                    ForEach(ReadingFont.presets, id: \.self) { f in
-                        Text(f.displayName).tag(fontKey(f))
-                    }
-                    Divider()
-                    ForEach(ReadingFont.availableFontFamilies, id: \.self) { family in
-                        Text(family)
-                            .font(.custom(family, size: 13))
-                            .tag("custom:\(family)")
-                    }
-                }
-                .pickerStyle(.menu)
-                .tint(Color.rbAccent)
-            }
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 8)
 
-            Hairline()
-
-            // ── 字号（统一滑块）──
-            SectionLabel(text: "字号")
-            sliderRow("正文", value: $fontSize, range: 12...28)
-            sliderRow("标题", value: $titleFontSize, range: 16...40)
-            sliderRow("信息", value: $metaFontSize, range: 9...18)
-            sliderRow("摘要", value: $summaryFontSize, range: 10...22)
-            sliderRow("界面缩放", value: $uiFontScale, range: 0.8...1.5, step: 0.05,
-                      format: { String(format: "%.0f%%", $0 * 100) })
-
-            Hairline()
-
-            // ── 排版 ──
-            SectionLabel(text: "排版")
-            sliderRow("行距", value: $lineSpacing, range: 0...16)
-            settingRow("宽度") {
-                Picker("", selection: $contentWidth) {
-                    Text("窄").tag(560.0)
-                    Text("中").tag(720.0)
-                    Text("宽").tag(960.0)
-                }
-                .pickerStyle(.segmented)
-                .tint(Color.rbAccent)
-            }
+            ReaderPane()
         }
-        .padding(18)
-        .frame(width: 340)
-    }
-
-    /// 设置行：左侧标签（text2 右对齐固定宽）+ 右侧控件
-    private func settingRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 10) {
-            Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(Color.rbText2)
-                .frame(width: 56, alignment: .trailing)
-            content()
-        }
-    }
-
-    /// 滑块行（字号/行距/界面缩放统一）：标签 + 滑块 + 数值等宽。
-    /// format 自定义数值显示（默认整数，界面缩放传百分比）。
-    private func sliderRow(_ label: String, value: Binding<Double>, range: ClosedRange<Double>,
-                           step: Double = 1, format: ((Double) -> String)? = nil) -> some View {
-        settingRow(label) {
-            HStack(spacing: 8) {
-                Slider(value: value, in: range, step: step)
-                    .tint(Color.rbAccent)
-                Text(format?(value.wrappedValue) ?? "\(Int(value.wrappedValue))")
-                    .font(.system(size: 12).monospacedDigit())
-                    .foregroundStyle(Color.rbText2)
-                    .frame(width: 34, alignment: .trailing)
-            }
-        }
-    }
-
-    /// ReadingFont → 持久化 key（和 ReadingFont.current 存储格式一致）
-    private func fontKey(_ f: ReadingFont) -> String {
-        switch f {
-        case .system: return "system"
-        case .heiti: return "heiti"
-        case .kaiti: return "kaiti"
-        case .fangsong: return "fangsong"
-        case .custom(let name): return "custom:\(name)"
-        }
+        .frame(width: 480, height: 620)
     }
 
     // MARK: 快捷操作（本地即时反馈 + 通知列表刷新）
@@ -2170,6 +2226,7 @@ public struct ReadingView: View {
     @State private var loadedVideoId: String? = nil
     /// 转录稿镜像（llm_transcript_md）。独立于翻译稿，供「转录」标签使用。
     @State private var loadedTranscriptMd: String? = nil
+    @State private var readerPayloadLoaded = false
 
     /// 镜像优先的有效值（镜像未就绪时回退 item 字段）
     private var effectiveTitleTranslated: String? { loadedTitleTranslated ?? item.titleTranslated }
@@ -2182,70 +2239,64 @@ public struct ReadingView: View {
         return item.excerpt ?? ""
     }
 
-    /// 打开时按 id 查 content_md（列表查询不取大字段，点开再查）
-    private func loadContentMd() {
-        guard loadedContentMd == nil else { return }
+    /// 打开时从阅读器专用连接一次加载所有所需字段，不受列表/Worker 长查询占用。
+    @MainActor
+    private func loadContentMd() async {
+        guard !readerPayloadLoaded else { return }
         let t0 = Date()
-        if let body = Database.shared.fetchContentBody(id: item.id) {
-            let mdKb = (body.contentMd ?? "").count / 1024
-            let htmlKb = (body.contentHtml ?? "").count / 1024
-            let transKb = (body.llmTranslatedMd ?? "").count / 1024
-            Trace.i("loadContentMd 完成 id=\(item.id) content_md=\(mdKb)KB content_html=\(htmlKb)KB llm_translated_md=\(transKb)KB 用时=\(Int(t0.timeIntervalSinceNow * -1000))ms mem=\(Trace.mb())MB", category: "read")
-            loadedContentMd = body.contentMd
-            loadedContentHtml = body.contentHtml
-            loadedTranslatedMd = body.llmTranslatedMd
-            loadedTitleTranslated = body.titleTranslated
-            loadedAudioUrl = body.audioUrl   // ⬅️ 回填音频地址，媒体播放器靠它渲染
-            loadedVideoId = body.videoId     // ⬅️ 回填视频 id，YouTube 播放器靠它渲染
-            loadedTranscriptMd = body.llmTranscriptMd  // ⬅️ 回填转录稿，供「转录」标签
-            if let ex = Database.shared.fetchLLMExtras(id: item.id) {
-                loadedScore = ex.score
-                loadedSummary = ex.summary
-            }
+        let contentId = item.id
+        let payload = await Task.detached(priority: .userInitiated) {
+            Database.shared.fetchReaderPayload(id: contentId)
+        }.value
+        guard !Task.isCancelled else { return }
+        readerPayloadLoaded = true
+        if let payload {
+            apply(payload)
+            let mdKb = (payload.contentMd ?? "").count / 1024
+            let transKb = (payload.llmTranslatedMd ?? "").count / 1024
+            Trace.i("阅读数据加载完成 id=\(item.id) content_md=\(mdKb)KB llm_translated_md=\(transKb)KB 用时=\(Int(t0.timeIntervalSinceNow * -1000))ms mem=\(Trace.mb())MB", category: "read")
         } else {
-            Trace.w("loadContentMd 返回 nil id=\(item.id)", category: "read")
+            Trace.w("fetchReaderPayload 返回 nil id=\(item.id)", category: "read")
         }
     }
 
     /// LLM 任务完成后重查全部镜像（item 实例刻意不替换，新鲜度全走镜像/DB 兜底——
     /// 翻译/摘要/评分/转录完成后 译文标题、摘要卡、评分标、标签入口 即刻自动上屏）
     private func refreshLoadedBody() {
-        guard let body = Database.shared.fetchContentBody(id: item.id) else { return }
-        loadedContentMd = body.contentMd
-        loadedContentHtml = body.contentHtml
-        loadedTranslatedMd = body.llmTranslatedMd
-        loadedTitleTranslated = body.titleTranslated
-        loadedAudioUrl = body.audioUrl
-        loadedVideoId = body.videoId
-        loadedTranscriptMd = body.llmTranscriptMd
-        if let ex = Database.shared.fetchLLMExtras(id: item.id) {
-            loadedScore = ex.score
-            loadedSummary = ex.summary
+        let contentId = item.id
+        Task { @MainActor in
+            let payload = await Task.detached(priority: .userInitiated) {
+                Database.shared.fetchReaderPayload(id: contentId)
+            }.value
+            guard contentId == item.id, let payload else { return }
+            apply(payload)
         }
     }
 
-    /// 原始 HTML（原网页视图用）——@State 缓存，打开时按 id 查
-    @State private var loadedContentHtml: String? = nil
+    private func apply(_ payload: ReaderPayload) {
+        loadedContentMd = payload.contentMd
+        loadedTranslatedMd = payload.llmTranslatedMd
+        loadedTitleTranslated = payload.titleTranslated
+        loadedAudioUrl = payload.audioUrl
+        loadedVideoId = payload.videoId
+        loadedTranscriptMd = payload.llmTranscriptMd
+        loadedScore = payload.score
+        loadedSummary = payload.summary
+        policy = payload.policy
+    }
 
     /// 重新处理：按文章所属源的当前开关，重新跑所有已开启管线（阅读栏用，带状态反馈）
     private func reprocessFromReadingView() {
         let cid = item.id
         guard PipelineWorker.shared.tryLockContent(cid) else {
-            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
             return
         }
-        let policy: PipelinePolicy = {
-            guard let row = Database.shared.queryRows(
-                "SELECT s.config FROM content c JOIN content_source s ON s.id = c.source_id WHERE c.id = ?",
-                params: [cid]).first,
-                  let cfg = row["config"], !cfg.isEmpty else { return PipelinePolicy() }
-            return PipelinePolicy.from(configJson: cfg)
-        }()
         let body = loadedContentMd ?? item.contentMd ?? item.excerpt ?? ""
         let audioUrl = MediaAudioURLResolver.preferred(loadedAudioUrl, item.audioUrl)
         let skipMediaTranslation = isMediaItem && ContentLanguage.isChinese(
             declared: item.language, fallbackText: item.title + "\n" + body)
-        busy = true; busyForId = cid; statusMsg = "内容处理中…"
+        processingStates.begin(contentId: cid, message: "内容处理中…")
         Task {
             var results: [String] = []
             if policy.autoScore, pipeline.isAvailable { results.append(await pipeline.score(contentId: cid, title: item.title, body: body) ? "评分✅" : "评分❌") }
@@ -2258,10 +2309,14 @@ public struct ReadingView: View {
             }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
-                guard busyForId == cid else { return }
-                busy = false
-                statusMsg = results.isEmpty ? "无已开启管线" : results.joined(separator: " ")
+                processingStates.finish(
+                    contentId: cid,
+                    message: results.isEmpty ? "无已开启的内容处理项" : results.joined(separator: " "))
                 refreshLoadedBody()
+                // 重新处理完成后触发导出规则
+                if results.first(where: { $0.hasSuffix("✅") }) != nil {
+                    Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
+                }
                 NotificationCenter.default.post(name: .contentUpdated, object: nil)
             }
         }
@@ -2270,17 +2325,18 @@ public struct ReadingView: View {
     private func runFulltext() {
         let cid = item.id
         guard PipelineWorker.shared.tryLockContent(cid) else {
-            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
             return
         }
-        busy = true
-        busyForId = cid
-        statusMsg = "提取全文中…"
+        processingStates.begin(contentId: cid, message: "提取全文中…")
         Task {
             // 从源 config 解析 fetch_mode + 获取 feed html（feed_full 模式需要）
-            let row = Database.shared.queryRows("""
-                SELECT s.config, c.content_html FROM content c LEFT JOIN content_source s ON c.source_id = s.id WHERE c.id = ?
-                """, params: [cid]).first
+            let row = await Task.detached(priority: .userInitiated) {
+                Database.shared.queryRows("""
+                    SELECT s.config, c.content_html FROM content c
+                    LEFT JOIN content_source s ON c.source_id = s.id WHERE c.id = ?
+                    """, params: [cid]).first
+            }.value
             let srcConfig = row?["config"] ?? "{}"
             let feedHtml = row?["content_html"]
             var mode: FetchMode = .summary
@@ -2292,9 +2348,9 @@ public struct ReadingView: View {
                 contentId: cid, url: item.url, feedHtml: feedHtml, mode: mode)
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
-                guard busyForId == cid else { return }
-                busy = false
-                statusMsg = ok ? "✅ 全文提取完成" : "❌ 全文提取失败"
+                processingStates.finish(
+                    contentId: cid,
+                    message: ok ? "✅ 全文提取完成" : "❌ 全文提取失败")
                 if ok {
                     refreshLoadedBody()
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)
@@ -2307,21 +2363,20 @@ public struct ReadingView: View {
         let cid = item.id
         // contentId 互斥：worker 正在处理同一篇则不重复触发（防双倍 LLM 计费，修 P1-10）
         guard PipelineWorker.shared.tryLockContent(cid) else {
-            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
             return
         }
-        busy = true
-        busyForId = cid
-        statusMsg = "AI 评分中…"
+        processingStates.begin(contentId: cid, message: "AI 评分中…")
         Task {
             let ok = await pipeline.score(contentId: cid, title: item.title, body: contentBody)
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
-                guard busyForId == cid else { return }   // 已切走，不覆盖新文章状态
-                busy = false
-                statusMsg = ok ? "✅ AI 评分完成" : "❌ AI 评分失败"
+                processingStates.finish(
+                    contentId: cid,
+                    message: ok ? "✅ AI 评分完成" : "❌ AI 评分失败")
                 if ok {
                     refreshLoadedBody()
+                    Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)
                 }
             }
@@ -2331,12 +2386,10 @@ public struct ReadingView: View {
     private func runTranslate() {
         let cid = item.id
         guard PipelineWorker.shared.tryLockContent(cid) else {
-            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
             return
         }
-        busy = true
-        busyForId = cid
-        statusMsg = "翻译中…"
+        processingStates.begin(contentId: cid, message: "翻译中…")
         Task {
             // 媒体项：翻译 defuddle 全文（loadedContentMd）→ llm_translated_md（「译文」标签）；
             // 兜底走 feed 简介翻译（translateExcerpt），简介空则返回 false 不浪费 LLM 调用。
@@ -2354,11 +2407,12 @@ public struct ReadingView: View {
             }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
-                guard busyForId == cid else { return }
-                busy = false
-                statusMsg = ok ? "✅ 翻译完成" : "❌ 翻译失败"
+                processingStates.finish(
+                    contentId: cid,
+                    message: ok ? "✅ 翻译完成" : "❌ 翻译失败")
                 if ok {
                     refreshLoadedBody()
+                    Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
                     // 非媒体：仅原文→双语对照；媒体：切到「译文」标签立刻看到
                     if isMediaItem { mediaTab = 1 }
                     else if viewMode == 1 { viewMode = 0 }
@@ -2371,21 +2425,20 @@ public struct ReadingView: View {
     private func runSummarize() {
         let cid = item.id
         guard PipelineWorker.shared.tryLockContent(cid) else {
-            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
             return
         }
-        busy = true
-        busyForId = cid
-        statusMsg = "摘要中…"
+        processingStates.begin(contentId: cid, message: "摘要中…")
         Task {
             let ok = await pipeline.summarize(contentId: cid, title: item.title, body: contentBody)
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
-                guard busyForId == cid else { return }
-                busy = false
-                statusMsg = ok ? "✅ 摘要完成" : "❌ 摘要失败"
+                processingStates.finish(
+                    contentId: cid,
+                    message: ok ? "✅ 摘要完成" : "❌ 摘要失败")
                 if ok {
                     refreshLoadedBody()
+                    Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)
                 }
             }
@@ -2395,23 +2448,22 @@ public struct ReadingView: View {
     private func runTranscribe() {
         let cid = item.id
         guard PipelineWorker.shared.tryLockContent(cid) else {
-            statusMsg = "⏳ 该篇正在后台处理中，请稍候"
+            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
             return
         }
-        busy = true
-        busyForId = cid
-        statusMsg = "转录中（下载+识别，较长）…"
+        processingStates.begin(contentId: cid, message: "转录中（下载+识别，较长）…")
         let audioUrl = MediaAudioURLResolver.preferred(loadedAudioUrl, item.audioUrl)
         Task {
             let ok = await transcriber.transcribe(
                 contentId: cid, title: item.title, audioUrl: audioUrl, pageUrl: item.url, language: item.language)
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
-                guard busyForId == cid else { return }
-                busy = false
-                statusMsg = ok ? "✅ 转录完成" : "❌ 转录失败"
+                processingStates.finish(
+                    contentId: cid,
+                    message: ok ? "✅ 转录完成" : "❌ 转录失败")
                 if ok {
                     refreshLoadedBody()
+                    Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
                     // 翻译完成：若当前是仅原文，切到双语对照让用户立刻看到译文
                     if viewMode == 1 { viewMode = 0 }
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)
@@ -2476,9 +2528,9 @@ public struct ShareSheet: View {
             Hairline()
 
             VStack(alignment: .leading, spacing: 2) {
-                shareActionRow("触发导出规则（Obsidian / webhook）", icon: "square.and.arrow.up.on.square") {
+                shareActionRow("触发导出规则", icon: "square.and.arrow.up.on.square") {
                     Task {
-                        await ExportService.shared.runPending(trigger: "manual", contentId: item.id)
+                        _ = await ExportService.shared.forceExport(contentId: item.id)
                         message = "✅ 已触发手动导出规则"
                     }
                 }

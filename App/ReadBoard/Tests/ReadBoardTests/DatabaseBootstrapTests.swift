@@ -8,17 +8,178 @@ final class DatabaseBootstrapTests: XCTestCase {
             throw XCTSkip("需要 READBOARD_DB 指向临时数据库；跳过以免触碰真实库")
         }
         XCTAssertTrue(Database.shared.open())
-        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 25)
+        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 27)
 
-        let requiredColumns = ["deleted_at", "llm_translated_md", "llm_transcript_md"]
+        let requiredColumns = ["deleted_at", "llm_translated_md", "llm_transcript_md",
+                               "first_image_url"]
         let columns = Set(Database.shared.queryRows("PRAGMA table_info(content);")
             .compactMap { $0["name"] })
         for column in requiredColumns {
             XCTAssertTrue(columns.contains(column), "全新数据库缺少字段 \(column)")
         }
+        let indexes = Set(Database.shared.queryRows("PRAGMA index_list(content);")
+            .compactMap { $0["name"] })
+        for index in ["idx_content_worker_score", "idx_content_worker_translate",
+                      "idx_content_worker_summarize", "idx_content_worker_transcribe",
+                      "idx_content_active_published", "idx_content_active_type_published"] {
+            XCTAssertTrue(indexes.contains(index), "全新数据库缺少内容处理索引 \(index)")
+        }
         XCTAssertFalse(columns.contains("is_archived"), "归档状态字段应已从当前数据库结构移除")
         XCTAssertEqual(Database.shared.scalarInt(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='content_fts';"), 1)
+    }
+
+    func testLightweightListCategoryCountsAndExactMarkReadScope() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_210_001
+        let articleId: Int64 = 9_210_011
+        let podcastId: Int64 = 9_210_012
+        let videoId: Int64 = 9_210_013
+        let ids = [articleId, podcastId, videoId]
+        cleanup(ids: ids, sourceIds: [sid])
+        defer { cleanup(ids: ids, sourceIds: [sid]) }
+        let before = db.libraryCounts()
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config, enabled)
+            VALUES (?, 'rss', '轻量列表测试源', ?, '{}', 1);
+            """, params: [sid, "https://test.invalid/list-source-\(sid)"]))
+        let longBody = String(repeating: "正文", count: 300)
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content
+                (id,source_id,ctype,guid,source,title,url,content_md,first_image_url,fetch_status)
+            VALUES (?,?,'article',?,'rss','文章',?,?,?,2),
+                   (?,?,'podcast',?,'podcast','播客',?,NULL,NULL,0),
+                   (?,?,'video',?,'youtube','视频',?,NULL,NULL,0);
+            """, params: [articleId, sid, "list-guid-\(articleId)",
+                             "https://test.invalid/item/\(articleId)", longBody,
+                             "https://test.invalid/image.jpg",
+                             podcastId, sid, "list-guid-\(podcastId)",
+                             "https://test.invalid/item/\(podcastId)",
+                             videoId, sid, "list-guid-\(videoId)",
+                             "https://test.invalid/item/\(videoId)"]))
+
+        let counts = db.libraryCounts()
+        XCTAssertEqual(counts.total, before.total + 3)
+        XCTAssertEqual(counts.articles, before.articles + 1)
+        XCTAssertEqual(counts.podcasts, before.podcasts + 1)
+        XCTAssertEqual(counts.videos, before.videos + 1)
+
+        let article = try XCTUnwrap(db.fetchContents(sourceId: sid, contentCategory: "article").first)
+        XCTAssertEqual(article.id, articleId)
+        XCTAssertEqual(article.sourceName, "轻量列表测试源")
+        XCTAssertEqual(article.imageUrl, "https://test.invalid/image.jpg")
+        XCTAssertTrue(article.hasFulltext)
+        XCTAssertEqual(db.fetchContents(sourceId: sid, processedFilters: ["fulltext": 1]).map(\.id),
+                       [articleId])
+
+        XCTAssertEqual(db.markAllRead(sourceId: sid, contentCategory: "podcast"), 1)
+        XCTAssertEqual(db.scalarInt("SELECT read_at IS NOT NULL FROM content WHERE id=?",
+                                    params: [podcastId]), 1)
+        XCTAssertEqual(db.scalarInt("SELECT read_at IS NOT NULL FROM content WHERE id=?",
+                                    params: [articleId]), 0)
+        XCTAssertEqual(db.markAllRead(sourceId: sid, restrictToContentIds: [videoId]), 1)
+        XCTAssertEqual(db.scalarInt("SELECT read_at IS NOT NULL FROM content WHERE id=?",
+                                    params: [videoId]), 1)
+    }
+
+    func testLibraryCountsExposeUnreadExportedContents() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_212_001
+        let unreadId: Int64 = 9_212_011
+        let readId: Int64 = 9_212_012
+        let ruleId: Int64 = 9_212_021
+        cleanup(ids: [unreadId, readId], sourceIds: [sid])
+        db.execute("DELETE FROM export_rule WHERE id=?", params: [ruleId])
+        defer {
+            db.execute("DELETE FROM export_rule WHERE id=?", params: [ruleId])
+            cleanup(ids: [unreadId, readId], sourceIds: [sid])
+        }
+        let before = db.libraryCounts()
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source(id,stype,name,identifier,config,enabled)
+            VALUES (?,'rss','export-count-test',?,'{}',1)
+            """, params: [sid, "https://test.invalid/export-count-\(sid)"]))
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content(id,source_id,ctype,guid,source,title,url,read_at)
+            VALUES (?,?,'article',?,'rss','未读导出',?,NULL),
+                   (?,?,'article',?,'rss','已读导出',?,'2026-07-29 00:00:00')
+            """, params: [unreadId, sid, "export-count-guid-\(unreadId)",
+                            "https://test.invalid/item/\(unreadId)",
+                            readId, sid, "export-count-guid-\(readId)",
+                            "https://test.invalid/item/\(readId)"]))
+        XCTAssertTrue(db.execute("""
+            INSERT INTO export_rule(id,name,enabled,criteria,trigger_on,target,target_config)
+            VALUES (?,'导出计数测试',1,'{}','manual','obsidian','{}')
+            """, params: [ruleId]))
+        XCTAssertTrue(db.execute("""
+            INSERT INTO export_record(rule_id,content_id,artifact,revision,status)
+            VALUES (?,?,'original',1,'delivered'),
+                   (?,?,'original',1,'delivered')
+            """, params: [ruleId, unreadId, ruleId, readId]))
+
+        let counts = db.libraryCounts()
+        XCTAssertEqual(counts.exported, before.exported + 2)
+        XCTAssertEqual(counts.exportedUnread, before.exportedUnread + 1)
+    }
+
+    @MainActor
+    func testDeletingSourceHardDeletesContentAndRepairsCrossSourceDuplicate() async throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sourceId: Int64 = 9_215_001
+        let otherSourceId: Int64 = 9_215_002
+        let originalId: Int64 = 9_215_011
+        let duplicateId: Int64 = 9_215_012
+        let ruleId: Int64 = 9_215_021
+        db.execute("DELETE FROM export_rule WHERE id=?", params: [ruleId])
+        cleanup(ids: [originalId, duplicateId], sourceIds: [sourceId, otherSourceId])
+        defer {
+            db.execute("DELETE FROM export_rule WHERE id=?", params: [ruleId])
+            cleanup(ids: [originalId, duplicateId], sourceIds: [sourceId, otherSourceId])
+        }
+
+        for (sid, name) in [(sourceId, "待删除源"), (otherSourceId, "保留源")] {
+            XCTAssertTrue(db.execute("""
+                INSERT INTO content_source (id,stype,name,identifier,config,enabled)
+                VALUES (?,'rss',?,?, '{}',1);
+                """, params: [sid, name, "https://test.invalid/source/\(sid)"]))
+        }
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content
+                (id,source_id,ctype,guid,source,title,url,content_hash,is_duplicate,duplicate_of)
+            VALUES (?,?,'article',?,'rss','原件',?,'shared-delete-hash',0,NULL),
+                   (?,?,'article',?,'rss','跨源副本',?,'shared-delete-hash',1,?);
+            """, params: [originalId, sourceId, "delete-guid-\(originalId)",
+                             "https://test.invalid/item/\(originalId)", duplicateId, otherSourceId,
+                             "delete-guid-\(duplicateId)",
+                             "https://test.invalid/item/\(duplicateId)", originalId]))
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_job(content_id,jtype,status) VALUES (?,'score',2);
+            """, params: [originalId]))
+        XCTAssertTrue(db.execute("""
+            INSERT INTO export_rule(id,name,enabled,criteria,trigger_on,target,target_config)
+            VALUES (?,'删除源测试',1,'{}','manual','obsidian','{}');
+            """, params: [ruleId]))
+        XCTAssertTrue(db.execute("""
+            INSERT INTO export_record(rule_id,content_id,artifact,revision,status)
+            VALUES (?,?,'original',1,'delivered');
+            """, params: [ruleId, originalId]))
+
+        let removed = await SourceStore.shared.removeSource(id: sourceId)
+        XCTAssertEqual(removed, 1)
+        XCTAssertEqual(db.scalarInt("SELECT COUNT(*) FROM content_source WHERE id=?", params: [sourceId]), 0)
+        XCTAssertEqual(db.scalarInt("SELECT COUNT(*) FROM content WHERE id=?", params: [originalId]), 0)
+        XCTAssertEqual(db.scalarInt("SELECT COUNT(*) FROM content_job WHERE content_id=?", params: [originalId]), 0)
+        XCTAssertEqual(db.scalarInt("SELECT COUNT(*) FROM export_record WHERE content_id=?", params: [originalId]), 0)
+        XCTAssertEqual(db.scalarInt("SELECT is_duplicate FROM content WHERE id=?", params: [duplicateId]), 0)
+        XCTAssertNil(db.scalarString("SELECT duplicate_of FROM content WHERE id=?", params: [duplicateId]))
     }
 
     @MainActor
@@ -47,6 +208,100 @@ final class DatabaseBootstrapTests: XCTestCase {
         let ids = PipelineWorker.shared.pendingTaskIdsForTesting(
             ignoreWatermark: true, onlySourceId: sid)
         XCTAssertEqual(ids, [originalId], "历史扫描应越过水位线，但重复内容不能进入 AI 队列")
+    }
+
+    @MainActor
+    func testSourcePolicyOnlyNewFreezesExistingItemsAndHistoryChoiceRequeuesThem() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_230_001
+        let nullFlagId: Int64 = 9_230_011
+        let oldEnabledId: Int64 = 9_230_012
+        let ids = [nullFlagId, oldEnabledId]
+        cleanup(ids: ids, sourceIds: [sid])
+        defer { cleanup(ids: ids, sourceIds: [sid]) }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config)
+            VALUES (?, 'rss', 'source-history-policy-test', ?, '{"auto_translate":false}');
+            """, params: [sid, "https://test.invalid/source-history-\(sid)"]))
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content (id, source_id, ctype, guid, source, title, url,
+                                 content_md, fetch_status, auto_translate)
+            VALUES (?, ?, 'article', ?, 'rss', '历史 NULL 标记', ?, '可翻译正文', 2, NULL),
+                   (?, ?, 'article', ?, 'rss', '历史开启标记', ?, '可翻译正文', 2, 1);
+            """, params: [nullFlagId, sid, "source-history-guid-\(nullFlagId)",
+                            "https://test.invalid/item/\(nullFlagId)",
+                            oldEnabledId, sid, "source-history-guid-\(oldEnabledId)",
+                            "https://test.invalid/item/\(oldEnabledId)"]))
+
+        let store = SourceStore.shared
+        store.reload()
+        store.setPolicy(id: sid, key: "auto_translate", value: true)
+
+        XCTAssertEqual(db.scalarInt("SELECT json_extract(config, '$.auto_translate') FROM content_source WHERE id=?", params: [sid]), 1)
+        XCTAssertEqual(db.scalarInt("SELECT COUNT(*) FROM content WHERE source_id=? AND auto_translate=0", params: [sid]), 2,
+                       "开启后尚未确认历史范围时，所有既有条目都应固定为仅新增之外的 0")
+        XCTAssertTrue(PipelineWorker.shared.pendingTaskIdsForTesting(
+            ignoreWatermark: true, onlySourceId: sid).isEmpty,
+                      "选择仅新增的默认状态不能让历史条目回退读取源开关")
+
+        XCTAssertTrue(store.setHistoricalItemsEnabled(sourceId: sid, key: "auto_translate"))
+        XCTAssertEqual(db.scalarInt("SELECT COUNT(*) FROM content WHERE source_id=? AND auto_translate=1", params: [sid]), 2)
+        XCTAssertEqual(PipelineWorker.shared.pendingTaskIdsForTesting(
+            ignoreWatermark: true, onlySourceId: sid), Array(ids.reversed()),
+                       "明确选择处理历史后，源下缺少译文的历史条目应按最新优先进入回填队列")
+    }
+
+    @MainActor
+    func testFolderPolicyUsesTheSameOnlyNewAndHistorySemantics() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let folderId: Int64 = 9_240_001
+        let sourceIds: [Int64] = [9_240_011, 9_240_012]
+        let contentIds: [Int64] = [9_240_021, 9_240_022]
+        cleanup(ids: contentIds, sourceIds: sourceIds)
+        db.execute("DELETE FROM folder WHERE id=?", params: [folderId])
+        defer {
+            cleanup(ids: contentIds, sourceIds: sourceIds)
+            db.execute("DELETE FROM folder WHERE id=?", params: [folderId])
+        }
+
+        XCTAssertTrue(db.execute("INSERT INTO folder (id,name) VALUES (?,?)",
+                                 params: [folderId, "folder-history-policy-test"]))
+        for (index, sid) in sourceIds.enumerated() {
+            XCTAssertTrue(db.execute("""
+                INSERT INTO content_source (id, stype, name, identifier, config, folder_id)
+                VALUES (?, 'rss', ?, ?, '{"auto_score":false}', ?);
+                """, params: [sid, "folder-source-\(index)",
+                                "https://test.invalid/folder-source-\(sid)", folderId]))
+            XCTAssertTrue(db.execute("""
+                INSERT INTO content (id, source_id, ctype, guid, source, title, url,
+                                     content_md, fetch_status, auto_score)
+                VALUES (?, ?, 'article', ?, 'rss', '文件夹历史条目', ?, '可评分正文', 2, ?);
+                """, params: [contentIds[index], sid, "folder-history-guid-\(contentIds[index])",
+                                "https://test.invalid/item/\(contentIds[index])", index == 0 ? nil : 1]))
+        }
+
+        let store = SourceStore.shared
+        store.reload()
+        store.setFolderPolicy(id: folderId, key: "auto_score", value: true)
+        XCTAssertEqual(db.scalarInt("SELECT COUNT(*) FROM content WHERE source_id IN (?,?) AND auto_score=0",
+                                    params: sourceIds), 2)
+        for sid in sourceIds {
+            XCTAssertTrue(PipelineWorker.shared.pendingTaskIdsForTesting(
+                ignoreWatermark: true, onlySourceId: sid).isEmpty)
+        }
+
+        XCTAssertTrue(store.setHistoricalItemsEnabled(folderId: folderId, key: "auto_score"))
+        XCTAssertEqual(db.scalarInt("SELECT COUNT(*) FROM content WHERE source_id IN (?,?) AND auto_score=1",
+                                    params: sourceIds), 2)
+        for (index, sid) in sourceIds.enumerated() {
+            XCTAssertEqual(PipelineWorker.shared.pendingTaskIdsForTesting(
+                ignoreWatermark: true, onlySourceId: sid), [contentIds[index]])
+        }
     }
 
     @MainActor
@@ -172,7 +427,9 @@ final class DatabaseBootstrapTests: XCTestCase {
         let unstarredId: Int64 = 9_320_013
         let untranslatedId: Int64 = 9_320_014
         let duplicateId: Int64 = 9_320_015
-        let ids = [matchingId, matchingUnscoredId, unstarredId, untranslatedId, duplicateId]
+        let aboveRangeId: Int64 = 9_320_016
+        let ids = [matchingId, matchingUnscoredId, unstarredId, untranslatedId,
+                   duplicateId, aboveRangeId]
         cleanup(ids: ids, sourceIds: [sid])
         defer { cleanup(ids: ids, sourceIds: [sid]) }
 
@@ -186,7 +443,8 @@ final class DatabaseBootstrapTests: XCTestCase {
             (matchingUnscoredId, nil, 1, "译文", 0),
             (unstarredId, 80, 0, "译文", 0),
             (untranslatedId, 80, 1, nil, 0),
-            (duplicateId, 80, 1, "译文", 1)
+            (duplicateId, 80, 1, "译文", 1),
+            (aboveRangeId, 95, 1, "译文", 0)
         ]
         for (id, score, starred, translation, duplicate) in rows {
             XCTAssertTrue(db.execute("""
@@ -201,21 +459,21 @@ final class DatabaseBootstrapTests: XCTestCase {
         }
 
         let visibleBefore = db.fetchContents(
-            sourceId: sid, minScore: 70, includeUnscored: true,
+            sourceId: sid, minScore: 70, maxScore: 90, includeUnscored: true,
             unreadOnly: true, starredOnly: true,
             processedFilters: ["translate": 1])
         XCTAssertEqual(Set(visibleBefore.map(\.id)), Set([matchingId, matchingUnscoredId]))
 
         let changed = db.markAllRead(
-            sourceId: sid, minScore: 70, includeUnscored: true,
+            sourceId: sid, minScore: 70, maxScore: 90, includeUnscored: true,
             starredOnly: true, processedFilters: ["translate": 1])
         XCTAssertEqual(changed, 2)
         XCTAssertEqual(db.scalarInt(
             "SELECT COUNT(*) FROM content WHERE id IN (?, ?) AND read_at IS NOT NULL",
             params: [matchingId, matchingUnscoredId]), 2)
         XCTAssertEqual(db.scalarInt(
-            "SELECT COUNT(*) FROM content WHERE id IN (?, ?, ?) AND read_at IS NOT NULL",
-            params: [unstarredId, untranslatedId, duplicateId]), 0)
+            "SELECT COUNT(*) FROM content WHERE id IN (?, ?, ?, ?) AND read_at IS NOT NULL",
+            params: [unstarredId, untranslatedId, duplicateId, aboveRangeId]), 0)
     }
 
     @MainActor

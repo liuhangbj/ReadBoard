@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 
 // MARK: - 导出规则管理（后处理板块）
 
@@ -31,9 +30,8 @@ public struct ExportRulePane: View {
             }
         }
         .sheet(isPresented: $showEditor) {
-            ExportRuleEditor(rule: editing ?? ExportRule(id: 0, name: "", enabled: true, criteria: ExportRule.Criteria(), triggerOn: "manual", target: "obsidian", targetConfig: [:], lastRunAt: nil)) { saved, isEdit in
+            ExportRuleEditor(rule: editing ?? ExportRule(id: 0, name: "", enabled: true, criteria: ExportRule.Criteria(), triggerOn: "manual", target: "obsidian", targetConfig: [:], lastRunAt: nil)) { saved, _ in
                 _ = ExportService.shared.saveRule(saved)
-                if isEdit { ExportService.shared.resetDelivered(ruleId: saved.id) }
                 showEditor = false; reload()
             }
         }
@@ -81,14 +79,14 @@ public struct ExportRuleEditor: View {
     @State private var fieldLabelOverrides: [String: String] = [:]
 
     // 导出配置
-    @State private var dir = ""; @State private var subfolder = ""
+    @State private var subfolder = ""
     @State private var artifactType = "original"; @State private var missingPolicy = "wait"
     @State private var useTranslatedTitle = false; @State private var titleTemplate = "{title}-{id}"
     @State private var writePolicy = "overwrite"; @State private var historyScope = "new_only"
+    @State private var historyAfterDate = Date()
     @State private var scheduleInterval = "daily"
     @State private var publishedAfterEnabled = false; @State private var publishedBeforeEnabled = false
     @State private var publishedAfter = Date(); @State private var publishedBefore = Date()
-    @State private var requireFulltext = false
 
     // 预览
     @State private var preview: ExportRulePreview?; @State private var showPreview = false; @State private var isPreviewing = false
@@ -102,6 +100,14 @@ public struct ExportRuleEditor: View {
                 Form {
                     Section("基本信息") {
                         TextField("规则名称", text: $rule.name).font(.callout)
+                        Picker("目标平台", selection: $rule.target) {
+                            Text("Obsidian").tag("obsidian")
+                            Text("Webhook").tag("webhook")
+                        }.tint(Color.rbAccent)
+                        if !ExportPlatformConfig.shared.isEnabled(rule.target) {
+                            Text("该平台尚未启用；规则会保存，但启用平台前不会执行。")
+                                .font(.caption2).foregroundStyle(Color.rbScoreMid)
+                        }
                         Picker("触发时机", selection: $rule.triggerOn) {
                             Text("内容入库后").tag("ingest"); Text("加工完成后").tag("ready")
                             Text("加星标时").tag("starred"); Text("定时批量导出").tag("scheduled")
@@ -131,7 +137,6 @@ public struct ExportRuleEditor: View {
                         if publishedBeforeEnabled { DatePicker("不晚于", selection: $publishedBefore, displayedComponents: .date) }
                     }
                     Section("加工完成条件") {
-                        Toggle("全文提取完成", isOn: $requireFulltext).tint(Color.rbAccent)
                         Toggle("评分完成", isOn: $rule.criteria.requireScored).tint(Color.rbAccent)
                         Toggle("摘要完成", isOn: $rule.criteria.requireSummary).tint(Color.rbAccent)
                         Toggle("译文完成", isOn: $rule.criteria.requireTranslated).tint(Color.rbAccent)
@@ -150,21 +155,35 @@ public struct ExportRuleEditor: View {
                             Text("跳过内容").tag("skip")
                         }.tint(Color.rbAccent)
                     }
-                    Section("目标与文件") {
-                        HStack {
-                            Text(dir.isEmpty ? "选择 Obsidian Vault 目录" : dir).font(.callout)
-                                .foregroundStyle(dir.isEmpty ? Color.rbText3 : Color.rbText).lineLimit(1).truncationMode(.middle)
-                            Spacer(); Button("选择…") { pickTargetDir() }.controlSize(.small)
+                    Section(rule.target == "webhook" ? "交付设置" : "目标与文件") {
+                        if rule.target == "webhook" {
+                            LabeledContent("Webhook URL") {
+                                Text(ExportPlatformConfig.shared.webhookURL.isEmpty ? "未配置" : ExportPlatformConfig.shared.webhookURL)
+                                    .foregroundStyle(ExportPlatformConfig.shared.webhookURL.isEmpty ? Color.rbScoreMid : Color.rbText2)
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
+                            Text("地址和请求 Header 请在“导出平台”页面统一配置。")
+                                .font(.caption2).foregroundStyle(Color.rbText3)
+                        } else {
+                            LabeledContent("Obsidian Vault") {
+                                Text(ExportPlatformConfig.shared.obsidianDir.isEmpty ? "未配置" : ExportPlatformConfig.shared.obsidianDir)
+                                    .foregroundStyle(ExportPlatformConfig.shared.obsidianDir.isEmpty ? Color.rbScoreMid : Color.rbText2)
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
+                            TextField("子目录模板", text: $subfolder, prompt: Text("{source}/{year}/{month}"))
+                            TextField("文件名模板", text: $titleTemplate, prompt: Text("{date} {title}-{id}"))
+                            Text("可用占位符：{title} {date} {id} {source} {ctype} {score} {year} {month}").font(.caption2).foregroundStyle(Color.rbText3)
+                            Picker("已有文件", selection: $writePolicy) {
+                                Text("内容变化时覆盖").tag("overwrite"); Text("跳过").tag("skip"); Text("生成新版本").tag("versioned")
+                            }.tint(Color.rbAccent)
                         }
-                        TextField("子目录模板", text: $subfolder, prompt: Text("{source}/{year}/{month}"))
-                        TextField("文件名模板", text: $titleTemplate, prompt: Text("{date} {title}-{id}"))
-                        Text("可用占位符：{title} {date} {id} {source} {ctype} {score} {year} {month}").font(.caption2).foregroundStyle(Color.rbText3)
-                        Picker("已有文件", selection: $writePolicy) {
-                            Text("内容变化时覆盖").tag("overwrite"); Text("跳过").tag("skip"); Text("生成新版本").tag("versioned")
-                        }.tint(Color.rbAccent)
                         Picker("历史范围", selection: $historyScope) {
                             Text("仅规则创建后的新内容").tag("new_only"); Text("回填所有历史匹配内容").tag("all")
+                            Text("指定日期之后").tag("custom_date")
                         }.tint(Color.rbAccent)
+                        if historyScope == "custom_date" {
+                            DatePicker("起始日期", selection: $historyAfterDate, displayedComponents: .date)
+                        }
                     }
                     Section("Frontmatter 字段") {
                         let columns: [GridItem] = [
@@ -188,7 +207,9 @@ public struct ExportRuleEditor: View {
                                     Text(field).font(.caption.monospaced()).foregroundStyle(Color.rbText3)
                                     Toggle("", isOn: fBind(field)).tint(Color.rbAccent).labelsHidden()
                                     if selectedFrontmatterFields.contains(field) {
-                                        TextField("", text: lBind(field)).textFieldStyle(.plain).font(.callout)
+                                        TextField("", text: lBind(field),
+                                                  prompt: Text(ExportService.defaultFrontmatterLabel(for: field)))
+                                            .textFieldStyle(.plain).font(.callout)
                                             .padding(.horizontal, 8).padding(.vertical, 3)
                                             .background(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.3)))
                                     } else {
@@ -201,7 +222,7 @@ public struct ExportRuleEditor: View {
                     }
                     Section("附件") {
                         LabeledContent("图片与附件") { Text("保留远程链接").foregroundStyle(Color.rbText2) }
-                        Text("第一版不会把图片、音频或视频复制进 Vault。").font(.caption2).foregroundStyle(Color.rbText3)
+                        Text("第一版不会复制图片、音频或视频文件。").font(.caption2).foregroundStyle(Color.rbText3)
                     }
                 }.formStyle(.grouped)
             }
@@ -235,14 +256,19 @@ public struct ExportRuleEditor: View {
         let ek = excludeKeywordsText.components(separatedBy: CharacterSet(charactersIn: ",，\n")).map{$0.trimmingCharacters(in:.whitespaces)}.filter{!$0.isEmpty}
         r.criteria.excludedKeywords = ek.isEmpty ? nil : ek
         r.criteria.publishedAfter = publishedAfterEnabled ? fmtDay(publishedAfter) : nil
-        r.criteria.publishedBefore = publishedBeforeEnabled ? fmtDay(publishedBefore)+" 23:59:59" : nil
-        r.target = "obsidian"; r.targetConfig["dir"] = ExportPlatformConfig.shared.obsidianDir.isEmpty ? dir : ExportPlatformConfig.shared.obsidianDir
+        // 只保存日期；查询层把结束日转换成“次日零点之前”，兼容空格和 ISO T/Z 时间。
+        r.criteria.publishedBefore = publishedBeforeEnabled ? fmtDay(publishedBefore) : nil
+        r.target = rule.target == "webhook" ? "webhook" : "obsidian"
+        // 平台地址与凭证由“导出平台”页面统一维护，规则不复制这些配置。
+        r.targetConfig.removeValue(forKey: "dir")
+        r.targetConfig.removeValue(forKey: "url")
+        r.targetConfig.removeValue(forKey: "headers")
         r.subfolderTemplate = subfolder.trimmingCharacters(in:.whitespaces)
         r.targetConfig["subfolder"] = r.subfolderTemplate; r.targetConfig["view"] = artifactType
         r.targetConfig["missing_policy"] = missingPolicy; r.targetConfig["write_policy"] = writePolicy
         r.targetConfig["history_scope"] = historyScope; r.targetConfig["schedule_interval"] = scheduleInterval
         r.artifact = artifactType; r.missingPolicy = missingPolicy; r.writePolicy = writePolicy
-        r.historyScope = historyScope; r.overwrite = writePolicy == "overwrite"
+        r.historyScope = historyScope; r.historyAfter = historyScope == "custom_date" ? fmtDay(historyAfterDate) : nil; r.overwrite = writePolicy == "overwrite"
         r.titleTemplate = titleTemplate.trimmingCharacters(in:.whitespaces).isEmpty ? "{title}-{id}" : titleTemplate.trimmingCharacters(in:.whitespaces)
         r.frontmatterFields = selectedFrontmatterFields.isEmpty ? nil : Array(selectedFrontmatterFields).sorted()
         r.useTranslatedTitle = useTranslatedTitle
@@ -256,9 +282,10 @@ public struct ExportRuleEditor: View {
         minScoreText = rule.criteria.minScore.map(String.init) ?? ""
         keywordsText = (rule.criteria.keywords ?? []).joined(separator: "，")
         excludeKeywordsText = (rule.criteria.excludedKeywords ?? []).joined(separator: "，")
-        dir = rule.targetConfig["dir"] as? String ?? ExportPlatformConfig.shared.obsidianDir
+        if rule.target != "obsidian" && rule.target != "webhook" { rule.target = "obsidian" }
         subfolder = rule.effectiveSubfolderTemplate; artifactType = rule.effectiveArtifact
         missingPolicy = rule.missingPolicy; writePolicy = rule.effectiveWritePolicy; historyScope = rule.historyScope
+        if let ha = rule.historyAfter, let d = parseDay(ha) { historyAfterDate = d }
         scheduleInterval = (rule.targetConfig["schedule_interval"] as? String) ?? "daily"
         useTranslatedTitle = rule.useTranslatedTitle; fieldLabelOverrides = rule.frontmatterLabels ?? [:]
         titleTemplate = rule.titleTemplate
@@ -272,11 +299,6 @@ public struct ExportRuleEditor: View {
     }
 
     private func previewRule() { let d = draftRule(); isPreviewing = true; Task { let r = await Task.detached(priority:.userInitiated){ ExportService.shared.preview(rule:d) }.value; preview = r; isPreviewing = false; showPreview = true } }
-
-    private func pickTargetDir() {
-        let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url { dir = url.path }
-    }
 
     private func fBind(_ f: String) -> Binding<Bool> { Binding(get:{selectedFrontmatterFields.contains(f)}, set:{if $0{selectedFrontmatterFields.insert(f)}else{selectedFrontmatterFields.remove(f)}}) }
     private func lBind(_ f: String) -> Binding<String> { Binding(get:{fieldLabelOverrides[f] ?? ""}, set:{v in let t=v.trimmingCharacters(in:.whitespaces); if t.isEmpty{fieldLabelOverrides.removeValue(forKey:f)}else{fieldLabelOverrides[f]=t}}) }

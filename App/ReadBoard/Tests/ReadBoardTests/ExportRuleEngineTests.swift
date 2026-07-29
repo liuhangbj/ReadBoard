@@ -1,5 +1,44 @@
 import XCTest
+import Foundation
 @testable import ReadBoard
+
+private final class WebhookURLProtocolStub: URLProtocol {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+    override func stopLoading() {}
+}
+
+private func requestBodyData(_ request: URLRequest) -> Data? {
+    if let body = request.httpBody { return body }
+    guard let stream = request.httpBodyStream else { return nil }
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4_096)
+    while stream.hasBytesAvailable {
+        let count = stream.read(&buffer, maxLength: buffer.count)
+        if count < 0 { return nil }
+        if count == 0 { break }
+        data.append(buffer, count: count)
+    }
+    return data
+}
 
 final class ExportRuleEngineTests: XCTestCase {
     private let db = Database.shared
@@ -13,7 +52,7 @@ final class ExportRuleEngineTests: XCTestCase {
     }
 
     func testV24SchemaAndRuleOptionsRoundTrip() throws {
-        XCTAssertEqual(db.scalarInt("PRAGMA user_version;"), 25)
+        XCTAssertEqual(db.scalarInt("PRAGMA user_version;"), 27)
         let ruleColumns = Set(db.queryRows("PRAGMA table_info(export_rule);").compactMap { $0["name"] })
         for column in ["revision", "artifact", "missing_policy", "output_format",
                        "subfolder_template", "filename_template", "write_policy",
@@ -64,11 +103,20 @@ final class ExportRuleEngineTests: XCTestCase {
 
         let vault = FileManager.default.temporaryDirectory
             .appendingPathComponent("readboard-vault-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: vault) }
+        let platform = ExportPlatformConfig.shared
+        let oldEnabled = platform.isEnabled("obsidian")
+        let oldDirectory = platform.obsidianDir
+        platform.setEnabled("obsidian", true)
+        platform.obsidianDir = vault.path
+        defer {
+            platform.setEnabled("obsidian", oldEnabled)
+            platform.obsidianDir = oldDirectory
+            try? FileManager.default.removeItem(at: vault)
+        }
 
         var rule = makeRule(name: "obsidian")
         rule.target = "obsidian"
-        rule.targetConfig = ["dir": vault.path]
+        rule.targetConfig = [:]
         rule.artifact = "summary_translated"
         rule.subfolderTemplate = "ReadBoard/{source}/{year}/{month}"
         rule.titleTemplate = "{date:yyyy-MM-dd} {title}-{id}"
@@ -93,6 +141,110 @@ final class ExportRuleEngineTests: XCTestCase {
         let escaped = await service.deliverSingle(rule: rule, contentId: contentId)
         XCTAssertFalse(escaped.0)
         XCTAssertTrue(escaped.2?.contains("不安全") == true)
+    }
+
+    func testWebhookPostsJSONWithConfiguredHeaders() async throws {
+        let token = UUID().uuidString
+        let contentId: Int64 = 9_715_001
+        db.execute("DELETE FROM content WHERE id=?", params: [contentId])
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content (id, ctype, guid, source, title, url, content_md, llm_summary)
+            VALUES (?, 'article', ?, 'rss', ?, ?, '# Webhook 正文', 'Webhook 摘要')
+            """, params: [contentId, "webhook-\(token)", "Webhook \(token)",
+                           "https://test.invalid/webhook/\(token)"]))
+
+        let platform = ExportPlatformConfig.shared
+        let oldEnabled = platform.isEnabled("webhook")
+        let oldURL = platform.webhookURL
+        let oldHeaders = platform.webhookHeaders
+        let endpoint = "https://webhook.test.invalid/receive"
+        platform.setEnabled("webhook", true)
+        platform.webhookURL = endpoint
+        platform.webhookHeaders = ["Authorization": "Bearer test-token", "X-ReadBoard": "test"]
+
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [WebhookURLProtocolStub.self]
+        let session = URLSession(configuration: sessionConfiguration)
+        service.setWebhookSessionForTesting(session)
+        var receivedRequest: URLRequest?
+        var receivedBody: Data?
+        WebhookURLProtocolStub.handler = { request in
+            receivedRequest = request
+            receivedBody = requestBodyData(request)
+            let response = try XCTUnwrap(HTTPURLResponse(
+                url: try XCTUnwrap(request.url), statusCode: 204,
+                httpVersion: "HTTP/1.1", headerFields: nil))
+            return (response, Data())
+        }
+
+        var rule = makeRule(name: "webhook")
+        rule.target = "webhook"
+        rule.criteria.keywords = [token]
+        let ruleId = service.saveRule(rule)
+        defer {
+            service.deleteRule(id: ruleId)
+            db.execute("DELETE FROM content WHERE id=?", params: [contentId])
+            WebhookURLProtocolStub.handler = nil
+            service.setWebhookSessionForTesting(nil)
+            session.invalidateAndCancel()
+            platform.setEnabled("webhook", oldEnabled)
+            platform.webhookURL = oldURL
+            platform.webhookHeaders = oldHeaders
+        }
+
+        await service.runFor(ruleId: ruleId)
+
+        let request = try XCTUnwrap(receivedRequest)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.absoluteString, endpoint)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-ReadBoard"), "test")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json; charset=utf-8")
+        let body = try XCTUnwrap(receivedBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["event"] as? String, "readboard.export")
+        XCTAssertEqual(json["artifact"] as? String, "original")
+        let markdown = try XCTUnwrap(json["markdown"] as? String)
+        XCTAssertTrue(markdown.contains("id: \(contentId)"))
+        XCTAssertTrue(markdown.contains("# Webhook \(token)"))
+        XCTAssertTrue(markdown.contains("# Webhook 正文"))
+        XCTAssertEqual(((json["content"] as? [String: Any])?["id"] as? NSNumber)?.int64Value,
+                       contentId)
+        XCTAssertEqual(db.scalarInt("""
+            SELECT COUNT(*) FROM export_record
+            WHERE rule_id=? AND status='delivered' AND destination=?
+            """, params: [ruleId, endpoint]), 1)
+    }
+
+    func testDisabledWebhookRuleDoesNotExecute() async throws {
+        let token = UUID().uuidString
+        let contentId: Int64 = 9_716_001
+        db.execute("DELETE FROM content WHERE id=?", params: [contentId])
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content (id, ctype, guid, source, title, url, content_md)
+            VALUES (?, 'article', ?, 'rss', ?, ?, '# 正文')
+            """, params: [contentId, "disabled-webhook-\(token)", "Disabled \(token)",
+                           "https://test.invalid/disabled-webhook/\(token)"]))
+
+        let platform = ExportPlatformConfig.shared
+        let oldEnabled = platform.isEnabled("webhook")
+        platform.setEnabled("webhook", false)
+        var rule = makeRule(name: "disabled-webhook")
+        rule.target = "webhook"
+        rule.criteria.keywords = [token]
+        let ruleId = service.saveRule(rule)
+        defer {
+            service.deleteRule(id: ruleId)
+            db.execute("DELETE FROM content WHERE id=?", params: [contentId])
+            platform.setEnabled("webhook", oldEnabled)
+        }
+
+        await service.runFor(ruleId: ruleId)
+
+        XCTAssertEqual(db.scalarInt("SELECT COUNT(*) FROM export_record WHERE rule_id=?",
+                                    params: [ruleId]), 0)
+        XCTAssertNil(db.scalarString("SELECT last_run_at FROM export_rule WHERE id=?",
+                                     params: [ruleId]))
     }
 
     func testRevisionCreatesNewDeliveryAndSameHashIsIdempotent() async throws {
@@ -132,6 +284,123 @@ final class ExportRuleEngineTests: XCTestCase {
         await service.runFor(ruleId: ruleId)
         XCTAssertEqual(db.scalarInt("SELECT COUNT(*) FROM export_record WHERE rule_id=?",
                                     params: [ruleId]), 2)
+    }
+
+    func testRuleStatsCountDistinctContentAcrossRevisions() throws {
+        let contentIds: [Int64] = [9_721_001, 9_721_002]
+        for id in contentIds { db.execute("DELETE FROM content WHERE id=?", params: [id]) }
+        for id in contentIds {
+            XCTAssertTrue(db.execute("""
+                INSERT INTO content (id, ctype, guid, source, title, url, content_md)
+                VALUES (?, 'article', ?, 'rss', '统计去重测试', ?, '# 正文')
+                """, params: [id, "export-stats-\(id)", "https://test.invalid/\(id)"]))
+        }
+        let ruleId = service.saveRule(makeRule(name: "stats-distinct"))
+        defer {
+            service.deleteRule(id: ruleId)
+            for id in contentIds { db.execute("DELETE FROM content WHERE id=?", params: [id]) }
+        }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO export_record
+                (rule_id,content_id,artifact,revision,status,attempts,updated_at)
+            VALUES (?,?,'original',1,'delivered',1,datetime('now')),
+                   (?,?,'original',2,'delivered',1,datetime('now')),
+                   (?,?,'original',1,'delivered',1,datetime('now')),
+                   (?,?,'translated',1,'failed',1,datetime('now')),
+                   (?,?,'translated',2,'failed',1,datetime('now'));
+            """, params: [ruleId, contentIds[0], ruleId, contentIds[0],
+                            ruleId, contentIds[1], ruleId, contentIds[0],
+                            ruleId, contentIds[0]]))
+
+        let stats = service.statsFor(ruleId: ruleId)
+        XCTAssertEqual(stats.delivered, 2)
+        XCTAssertEqual(stats.failed, 1)
+    }
+
+    func testFullHistoryExportContinuesPastTwoThousandItems() async throws {
+        let token = UUID().uuidString
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (stype, name, identifier)
+            VALUES ('rss', '批量导出测试', ?)
+            """, params: ["export-batch-\(token)"]))
+        let sourceId = db.lastInsertId()
+        XCTAssertGreaterThan(sourceId, 0)
+
+        let itemCount = 2_005
+        XCTAssertTrue(db.transaction {
+            for index in 0..<itemCount {
+                guard db.execute("""
+                    INSERT INTO content (source_id, ctype, guid, source, title, url, content_md)
+                    VALUES (?, 'article', ?, 'rss', ?, ?, '# 正文')
+                    """, params: [sourceId, "export-batch-\(token)-\(index)",
+                                   "批量导出 \(index)",
+                                   "https://test.invalid/export-batch/\(token)/\(index)"]) else {
+                    return false
+                }
+            }
+            return true
+        })
+
+        let vault = FileManager.default.temporaryDirectory
+            .appendingPathComponent("readboard-batch-\(token)", isDirectory: true)
+        var rule = makeRule(name: "full-history-over-2000")
+        rule.criteria.sourceIds = [sourceId]
+        rule.targetConfig = ["dir": vault.path]
+        rule.titleTemplate = "batch"
+        rule.writePolicy = "skip"
+        rule.frontmatterFields = []
+        let ruleId = service.saveRule(rule)
+        defer {
+            service.deleteRule(id: ruleId)
+            db.execute("DELETE FROM content WHERE source_id=?", params: [sourceId])
+            db.execute("DELETE FROM content_source WHERE id=?", params: [sourceId])
+            try? FileManager.default.removeItem(at: vault)
+        }
+
+        await service.runFor(ruleId: ruleId)
+
+        XCTAssertEqual(db.scalarInt("""
+            SELECT COUNT(*) FROM export_record
+            WHERE rule_id=? AND status='delivered'
+            """, params: [ruleId]), itemCount)
+    }
+
+    func testPublishedEndDateIncludesWholeDayAcrossTimestampFormats() throws {
+        let token = UUID().uuidString
+        let firstId: Int64 = 9_717_001
+        let rows: [(Int64, String)] = [
+            (firstId, "2026-07-28T23:59:59Z"),
+            (firstId + 1, "2026-07-29T08:00:00Z"),
+            (firstId + 2, "2026-07-29 22:30:00"),
+            (firstId + 3, "2026-07-30T00:00:00Z")
+        ]
+        defer {
+            db.execute("DELETE FROM content WHERE id BETWEEN ? AND ?",
+                       params: [firstId, firstId + Int64(rows.count - 1)])
+        }
+        XCTAssertTrue(db.transaction {
+            for (id, publishedAt) in rows {
+                guard db.execute("""
+                    INSERT INTO content
+                        (id, ctype, guid, source, title, url, content_md, published_at)
+                    VALUES (?, 'article', ?, 'rss', ?, ?, '# 正文', ?)
+                    """, params: [id, "published-range-\(token)-\(id)", "日期测试 \(token)",
+                                   "https://test.invalid/published-range/\(token)/\(id)", publishedAt]) else {
+                    return false
+                }
+            }
+            return true
+        })
+
+        var rule = makeRule(name: "published-end-date")
+        rule.criteria.keywords = [token]
+        rule.criteria.publishedAfter = "2026-07-29"
+        rule.criteria.publishedBefore = "2026-07-29 23:59:59" // 兼容已经保存的旧规则
+        XCTAssertEqual(service.preview(rule: rule, maxSamples: 0).matchingCount, 2)
+
+        rule.criteria.publishedBefore = "2026-07-29" // 新版界面保存格式
+        XCTAssertEqual(service.preview(rule: rule, maxSamples: 0).matchingCount, 2)
     }
 
     func testScheduledFrequencyUsesLastRunTime() throws {

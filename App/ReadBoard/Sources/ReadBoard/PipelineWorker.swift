@@ -1,8 +1,8 @@
 import Foundation
 import SQLite3
 
-// MARK: - 后台管线 worker
-// 周期扫描内容, 按源的"有效开关"(源 OR 文件夹)对未处理内容补跑 AI 评分/翻译/摘要/转录。
+// MARK: - 后台内容处理引擎
+// 周期查询条目级 auto 标记，对缺少结果的内容补跑 AI 评分/翻译/摘要/转录。
 // 内容级并发，但按资源分通道：LLM 默认最多 2 篇，Whisper 全局串行。
 // App 内常驻 Task 驱动, 自包含, 无 launchd/CLI。
 
@@ -71,17 +71,46 @@ actor PipelineWorkScheduler {
 public final class PipelineWorker: ObservableObject {
     static let shared = PipelineWorker()
 
-    @Published var isRunning = false
+    enum EnginePhase: Equatable {
+        case idle, scanning, working
+    }
+
+    struct PendingBreakdown: Equatable, Sendable {
+        var score = 0
+        var translate = 0
+        var summarize = 0
+        var transcribe = 0
+        var items = 0
+        var unread = 0
+    }
+
+    /// 当前真正占用 LLM / Whisper 通道的任务。不能只保存一个标题：LLM 默认可并发 2 篇。
+    struct ActiveTask: Identifiable, Equatable, Sendable {
+        let id: Int64
+        let title: String
+        let stage: String
+    }
+
+    @Published private(set) var phase: EnginePhase = .idle
+    var isRunning: Bool { phase != .idle }
     @Published var lastSummary = ""
-    @Published var currentItem: String? = nil   // 当前正在处理的条目标题
+    @Published private(set) var currentItems: [ActiveTask] = []
+    /// 兼容只需要一个标题的旧调用；新看板直接展示 currentItems。
+    var currentItem: String? { currentItems.first?.title }
     @Published var pendingCount = 0              // DB 实时待处理数
+    @Published private(set) var pendingBreakdown = PendingBreakdown()
+    @Published private(set) var pendingContentIds: Set<Int64> = []
     @Published var processedCount = 0            // DB 实时已处理数
     @Published var deadLetterCount = 0
 
-    private let db = Database.shared
+    nonisolated private let db = Database.shared
     private static let workScheduler = PipelineWorkScheduler()
     /// 真正驱动轮询的任务。必须保存句柄，stop() 才能取消它，并阻止重复启动。
     private var workerTask: Task<Void, Never>?
+    /// 全文失败补抓属于抓取模块，独立执行，不能挡在 AI 任务前面。
+    private var fullTextRecoveryTask: Task<Void, Never>?
+    /// 精确计数在后台计算；连续刷新只保留最后一项，避免大队列时主线程遍历数千条。
+    private var countRefreshTask: Task<Void, Never>?
 
     /// 扫描间隔（秒）
     var interval: TimeInterval = 120
@@ -110,12 +139,10 @@ public final class PipelineWorker: ObservableObject {
     // 水位线 = 首次启动时的最大内容 id, 持久化到 UserDefaults, 重启不累加旧的。
 
     private let watermarkKey = "pipelineWorker.watermarkId"
+    private let flagsMaterializedKey = "pipelineWorker.itemFlagsMaterializedV26"
 
     /// 存量水位线：小于等于此 id 的内容不处理
     private(set) var watermark: Int64 = 0
-    /// 扫描光标：上次扫描到的最大 id（避免每轮都从 0 开始扫全表）
-    private var scanCursor: Int64 = 0
-
     /// 初始化水位线：已存则读，否则取当前最大 id 并持久化。
     /// 修 P1-7：重装/换机时 UserDefaults 没了但 DB 还在——水位线若重置为 MAX(id)，
     /// 之前所有未处理内容被一次性当新内容涌入 AI 评分区（LLM 成本爆炸）。
@@ -132,19 +159,49 @@ public final class PipelineWorker: ObservableObject {
         UserDefaults.standard.set(maxId, forKey: watermarkKey)
         // 重装检测：DB 已有大量内容但无水位线，记日志提示历史需手动回填
         if maxId > 100 {
-            fputs("[watermark] 检测到重装/换机（DB 有 \(maxId) 条但无水位线），历史不自动跑管线，需要请手动回填\n", stderr)
+            fputs("[watermark] 检测到重装/换机（DB 有 \(maxId) 条但无水位线），历史不自动处理，需要请手动回填\n", stderr)
         }
     }
 
     private init() {
         initWatermark()
-        scanCursor = watermark
+    }
+
+    /// v25 之前的条目可能仍是 NULL。只固化“水位线之后且源当时仍开启”的1，
+    /// 其余 NULL 在普通扫描中等同0；历史扫描仍可显式回退源设置。
+    private func materializeLegacyAutoFlags() {
+        guard !UserDefaults.standard.bool(forKey: flagsMaterializedKey) else { return }
+        let policies = fetchEffectivePolicies()
+        let definitions: [(column: String, enabled: (PipelinePolicy) -> Bool)] = [
+            ("auto_score", { $0.autoScore }),
+            ("auto_translate", { $0.autoTranslate }),
+            ("auto_summarize", { $0.autoSummarize }),
+            ("auto_transcribe", { $0.autoTranscribe })
+        ]
+        let ok = db.transaction {
+            for definition in definitions {
+                let sourceIds = policies.compactMap { id, value in
+                    definition.enabled(value.policy) ? String(id) : nil
+                }
+                guard !sourceIds.isEmpty else { continue }
+                guard db.execute("""
+                    UPDATE content SET \(definition.column)=1
+                    WHERE \(definition.column) IS NULL AND id>\(watermark)
+                      AND source_id IN (\(sourceIds.joined(separator: ",")))
+                      AND deleted_at IS NULL AND is_duplicate=0;
+                    """) else { return false }
+            }
+            return true
+        }
+        if ok { UserDefaults.standard.set(true, forKey: flagsMaterializedKey) }
     }
 
     // MARK: Worker 生命周期
 
     func start() {
         guard workerTask == nil else { return }
+        // 先在后台生成精确待处理快照，左栏“待处理”和四项计数无需等首轮 Worker。
+        refreshCounts()
         // 延迟 5 秒再首次执行——避免与 app 启动阶段 List 首次渲染竞争
         workerTask = Task { [weak self] in
             guard let self else { return }
@@ -158,17 +215,11 @@ public final class PipelineWorker: ObservableObject {
                 guard !Task.isCancelled else { break }
                 await Task.yield()  // 让 SwiftUI 有机会渲染 @Published 更新
                 if done == 0 {
-                    // 无事可做 → 已到 DB 尾部？则等 interval 秒再看；否则继续推进光标
-                    let maxId = db.scalarInt("SELECT MAX(id) FROM content") ?? 0
-                    if scanCursor >= Int64(maxId) {
-                        scanCursor = watermark  // 回卷从头
-                        do {
-                            try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                        } catch {
-                            break
-                        }
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                    } catch {
+                        break
                     }
-                    // 光标未到尾：间隙，不停立刻下一轮推进
                 }
             }
         }
@@ -177,6 +228,12 @@ public final class PipelineWorker: ObservableObject {
     func stop() {
         workerTask?.cancel()
         workerTask = nil
+        fullTextRecoveryTask?.cancel()
+        fullTextRecoveryTask = nil
+        countRefreshTask?.cancel()
+        countRefreshTask = nil
+        phase = .idle
+        currentItems.removeAll()
     }
 
     // MARK: 单轮执行
@@ -186,31 +243,24 @@ public final class PipelineWorker: ObservableObject {
     func runOnce() async -> Int {
         guard !Task.isCancelled else { return 0 }
         guard !isRunning else { return 0 }
-        isRunning = true
+        phase = .scanning
+        // 先让 SwiftUI 提交“扫描中”，再进入同步数据库查询。
+        await Task.yield()
+        materializeLegacyAutoFlags()
         defer {
-            isRunning = false
-            currentItem = nil
+            currentItems.removeAll()
             refreshCounts()
+            phase = .idle
         }
 
-        let scan = collectPendingTasks()
-        let tasks = scan.tasks
-        // 常规 worker 使用全局扫描光标；历史回填使用自己的局部光标，二者互不污染。
-        if scan.lastScannedId > scanCursor {
-            scanCursor = scan.lastScannedId
-        } else if tasks.isEmpty {
-            scanCursor += Int64(batchLimit * 5)
-        }
+        let taskLimit = batchLimit
+        let tasks = await Task.detached(priority: .utility) { [self] in
+            collectPendingTasks(maxTasks: taskLimit)
+        }.value
         fputs("[worker] runOnce: \(tasks.count) pending tasks\n", stderr)
-        var refetched = 0
-
-        // 第 0 步: 全文回填——水位线后抓取失败(fetch_status=0/3)的文章按源 fetch_mode 重试,
-        // 成功(fetch_status→2/4)后下一轮就能进管线。每轮限 10 条防抖。
-        // fulltext 板块关则跳过回填。
-        if FeatureBoard.fulltext.enabled, !Task.isCancelled {
-            refetched = await backfillFullText()
-        }
+        scheduleFullTextRecovery()
         guard !Task.isCancelled else { return 0 }
+        guard !tasks.isEmpty else { return 0 }
 
         // 转录依赖一次性检查：缺依赖则本轮所有转录任务跳过（不逐条死信浪费重试），
         // 并在 summary 里提示。用户装好依赖后下轮自动恢复。
@@ -220,13 +270,13 @@ public final class PipelineWorker: ObservableObject {
             lastSummary = "⚠️ 转录依赖缺失（whisper/ffmpeg/模型），已跳过 \(tasks.filter { $0.needTranscribe }.count) 条转录任务。请去 设置→依赖 安装。"
         }
 
-        let result = await processBatch(Array(tasks.prefix(batchLimit)),
-                                        transcribeReady: transcribeReady)
+        phase = .working
+        let result = await processBatch(tasks, transcribeReady: transcribeReady)
 
         if result.processed > 0 {
-            lastSummary = "本轮 \(result.processed) 条：评分\(result.scored) 翻译\(result.translated) 摘要\(result.summarized) 转录\(result.transcribed) 全文补\(refetched)"
+            lastSummary = "本轮 \(result.processed) 条：评分\(result.scored) 翻译\(result.translated) 摘要\(result.summarized) 转录\(result.transcribed)"
             NotificationCenter.default.post(name: .contentUpdated, object: nil)
-            db.execute("PRAGMA wal_checkpoint(PASSIVE);")
+            // WAL 已配置自动 checkpoint；不要在 MainActor 同步等待维护操作。
         }
         return result.processed
     }
@@ -277,21 +327,29 @@ public final class PipelineWorker: ObservableObject {
         guard !Task.isCancelled else { return BatchResult() }
         // 与常规 worker、历史回填、阅读器手动处理共用 contentId 锁。
         guard tryLockContent(task.id) else { return BatchResult() }
-        currentItem = task.title
-
+        defer { unlockContent(task.id) }
+        guard let initial = revalidatedPendingTask(
+            contentId: task.id, allowLegacyFallback: task.allowLegacyFallback) else {
+            return BatchResult()
+        }
         var result = BatchResult()
         var attempted = false
 
         // 一篇内容的评分/翻译/摘要共用一个 LLM 通道名额，内部仍按顺序执行。
-        if task.needScore || task.needTranslate || task.needSummary {
+        if initial.needScore || initial.needTranslate || initial.needSummary {
             do {
                 let llmResult = try await Self.workScheduler.run(in: .llm) { [weak self] in
                     guard let self, !Task.isCancelled else { return BatchResult() }
-                    // 排队快照可能已过期：真正拿到执行名额时再读一次源和全局开关。
-                    guard let live = await self.fetchCurrentPolicy(sourceId: task.sourceId) else {
+                    // 排队快照可能已过期：真正拿到名额时重读条目、结果、软删除和 auto 标记。
+                    guard let live = await self.revalidatedPendingTask(
+                        contentId: task.id, allowLegacyFallback: task.allowLegacyFallback),
+                          live.needScore || live.needTranslate || live.needSummary else {
                         return BatchResult()
                     }
-                    return await self.runLLMStages(task, policy: live.policy)
+                    await self.beginActiveTask(live, stage: "LLM")
+                    let result = await self.runLLMStages(live, policy: live.policy)
+                    await self.endActiveTask(contentId: live.id)
+                    return result
                 }
                 result.merge(llmResult)
                 attempted = attempted || llmResult.processed > 0
@@ -303,14 +361,18 @@ public final class PipelineWorker: ObservableObject {
         }
 
         // Whisper 独立通道全局只允许 1 篇，不占用 LLM 名额。
-        if task.needTranscribe, transcribeReady, !Task.isCancelled {
+        if initial.needTranscribe, transcribeReady, !Task.isCancelled {
             do {
                 let transcribeResult = try await Self.workScheduler.run(in: .transcription) { [weak self] in
                     guard let self, !Task.isCancelled else { return BatchResult() }
-                    guard let live = await self.fetchCurrentPolicy(sourceId: task.sourceId),
-                          live.policy.autoTranscribe,
+                    guard let live = await self.revalidatedPendingTask(
+                        contentId: task.id, allowLegacyFallback: task.allowLegacyFallback),
+                          live.needTranscribe,
                           AIPipeline.transcribe.effective else { return BatchResult() }
-                    return await self.runTranscription(task)
+                    await self.beginActiveTask(live, stage: "转录")
+                    let result = await self.runTranscription(live)
+                    await self.endActiveTask(contentId: live.id)
+                    return result
                 }
                 result.merge(transcribeResult)
                 attempted = attempted || transcribeResult.processed > 0
@@ -321,7 +383,6 @@ public final class PipelineWorker: ObservableObject {
             }
         }
 
-        unlockContent(task.id)
         result.processed = attempted ? 1 : 0
         result.succeededContents = (result.scored + result.translated + result.summarized + result.transcribed) > 0 ? 1 : 0
 
@@ -330,6 +391,19 @@ public final class PipelineWorker: ObservableObject {
             await ExportService.shared.runPending(trigger: "ready", contentId: task.id)
         }
         return result
+    }
+
+    private func beginActiveTask(_ task: PendingTask, stage: String) {
+        let item = ActiveTask(id: task.id, title: task.title, stage: stage)
+        if let index = currentItems.firstIndex(where: { $0.id == task.id }) {
+            currentItems[index] = item
+        } else {
+            currentItems.append(item)
+        }
+    }
+
+    private func endActiveTask(contentId: Int64) {
+        currentItems.removeAll { $0.id == contentId }
     }
 
     private func runLLMStages(_ task: PendingTask, policy: PipelinePolicy) async -> BatchResult {
@@ -421,32 +495,22 @@ public final class PipelineWorker: ObservableObject {
             deadLetterCount = countDeadLetters()
         }
         var processed = 0, round = 0
-        var historyCursor: Int64 = 0
         while !Task.isCancelled {
             round += 1
-            let scan = collectPendingTasks(ignoreWatermark: true,
-                                           onlySourceId: onlySourceId,
-                                           afterId: historyCursor)
-            let tasks = Array(scan.tasks.prefix(batchLimit))
-            // 当前窗口没有待处理项时也要推进到窗口末尾，继续检查更老/更后的历史；
-            // 不能因为前 500 条已经处理完，就误判整个源回填完成。
-            if tasks.isEmpty {
-                guard scan.lastScannedId > historyCursor else { break }
-                historyCursor = scan.lastScannedId
-                if scan.reachedEnd { break }
-                continue
-            }
+            let taskLimit = batchLimit
+            let tasks = await Task.detached(priority: .utility) { [self] in
+                collectPendingTasks(ignoreWatermark: true,
+                                    onlySourceId: onlySourceId,
+                                    maxTasks: taskLimit)
+            }.value
+            guard !tasks.isEmpty else { break }
             let result = await processBatch(
                 tasks,
                 transcribeReady: DependencyChecker.shared.transcribeReady)
             processed += result.succeededContents
-            if let lastId = tasks.last?.id { historyCursor = max(historyCursor, lastId) }
             backfillProgress = "已处理 \(processed) 条（第 \(round) 轮）…"
-            // tasks 被 prefix 截断时从最后处理 id 继续；否则可直接越过扫描窗口尾部。
-            if scan.tasks.count <= batchLimit {
-                historyCursor = max(historyCursor, scan.lastScannedId)
-                if scan.reachedEnd { break }
-            }
+            // 本轮没有任何实际调用，说明剩余项均被锁定、依赖缺失或已在退避，避免空转。
+            if result.processed == 0 { break }
         }
         backfillProgress = Task.isCancelled
             ? "已取消历史回填：处理 \(processed) 条"
@@ -464,149 +528,225 @@ public final class PipelineWorker: ObservableObject {
         let body: String
         let language: String?
         let audioUrl: String?
-        let policy: PipelinePolicy   // 源级/文件夹级开关快照，translateFull 用
+        let policy: PipelinePolicy   // 条目级有效输出开关，translateFull 按它回写
+        let allowLegacyFallback: Bool
         var needScore = false
         var needTranslate = false
         var needSummary = false
         var needTranscribe = false
     }
 
-    private struct PendingScan {
-        let tasks: [PendingTask]
-        let lastScannedId: Int64
-        let reachedEnd: Bool
+    private enum CandidateOrder { case newest, oldest }
+
+    private struct PendingRow {
+        let id: Int64, sourceId: Int64
+        let ctype: String, title: String, url: String, language: String?
+        let md: String?, html: String?, excerpt: String?
+        let hasScore: Bool, hasSummary: Bool, hasTranslated: Bool, hasTranscript: Bool
+        let autoScore: Int64?, autoTranslate: Int64?, autoSummarize: Int64?, autoTranscribe: Int64?
+        let audioUrl: String?
+        let isUnread: Bool
+        var isMedia: Bool {
+            ctype == "podcast" || ctype == "video" || ctype == "youtube" || audioUrl != nil
+        }
     }
 
-    /// 扫描内容，对每条算有效开关(源 OR 文件夹)，挑出需要处理但还没结果的
-    /// - Parameters:
-    ///   - ignoreWatermark: true 时扫全部历史（开管线后"处理所有历史数据"回填用）；
-    ///     false 只扫水位线之后的新内容（常规轮询，存量不动）
-    ///   - onlySourceId: 限定单源回填（nil = 全部）
-    private func collectPendingTasks(ignoreWatermark: Bool = false,
-                                     onlySourceId: Int64? = nil,
-                                     afterId: Int64? = nil) -> PendingScan {
-        // 1. 源 stype/enabled/config/folder config 快照：source 名 → (stype, enabled, 有效开关)
-        let srcPolicies = fetchEffectivePolicies()
-        // 2. 遍历内容，只取"有全文或有音频"且该源启用、有任一管线待跑的
-        guard db.open() else { return PendingScan(tasks: [], lastScannedId: afterId ?? scanCursor, reachedEnd: true) }
-        var stmt: OpaquePointer?
-        var out: [PendingTask] = []
-        // 媒体项(podcast/video)不看 fetch_status——音频在 enclosure 里, 无正文可抓, fetch_status 恒为 0;
-        // 文章类要求 fetch_status IN (2成功, 4直入) 才有正文可做 AI 评分/翻译。
-        // 只扫水位线之后的新内容(id > watermark), 存量不动（除非 ignoreWatermark 回填）。
-        var conds = ["is_duplicate = 0",
-                     "((ctype IN ('podcast','video','youtube') OR meta LIKE '%audio_url%') OR fetch_status IN (2, 4))"]
-        if !ignoreWatermark { conds.append("id > \(watermark)") }
-        if let sid = onlySourceId { conds.append("source_id = \(sid)") }
-        // 扫描光标：从上次扫描到的最大 id 继续，避免每轮重扫全表。
-        // 第 0 轮从 watermark 开始；每轮过完更新 scanCursor 到本轮看到的最大 id。
-        // 下一轮 SQL 加 id > scanCursor → 已处理完的不会重扫 → 自然推进。
-        // 历史回填必须从 0（或它自己的分页光标）开始；沿用 watermark 会把所有历史排除。
-        let startId = ignoreWatermark ? (afterId ?? 0) : scanCursor
-        conds.append("id > \(startId)")
-        let sql = """
-        SELECT id, source, source_id, ctype, title, url, language, content_md, excerpt,
-               llm_score, llm_summary, llm_translated_md, meta, content_html, llm_transcript_md,
-               auto_score, auto_translate, auto_summarize, auto_transcribe
-        FROM content
-        WHERE \(conds.joined(separator: " AND "))
-        ORDER BY id ASC
-        LIMIT \(batchLimit * 5);
-        """
-        guard db.prepare(sql, &stmt) else {
-            return PendingScan(tasks: [], lastScannedId: startId, reachedEnd: true)
-        }
+    /// 条目字段与结果字段共同构成持久化派生队列。普通扫描不再遍历水位线后的全部内容：
+    /// - 显式 auto=1 的条目不论新旧都会进入；
+    /// - NULL 仅作迁移兼容，普通扫描只允许水位线后的条目回退源设置；
+    /// - 历史回填允许全部 NULL 条目回退源设置。
+    nonisolated private func collectPendingTasks(ignoreWatermark: Bool = false,
+                                                 onlySourceId: Int64? = nil,
+                                                 afterId: Int64? = nil,
+                                                 maxTasks: Int) -> [PendingTask] {
+        guard db.open() else { return [] }
+        let policies = fetchEffectivePolicies()
+        var tasks: [PendingTask] = []
+        var seen: Set<Int64> = []
 
-        // 先收全行，再一次性算死信/退避——原实现在行循环里每行 4 次 SQL（2000 行最坏 8000 次/轮）
-        struct Row {
-            let id: Int64, sourceId: Int64?
-            let title: String, url: String, language: String?, md: String?, excerpt: String?
-            let html: String?   // content_html：feed 自带全文（md 还没转出来时的正文兜底）
-           let hasScore: Bool, hasSummary: Bool, hasTranslated: Bool, hasTranscript: Bool, isMedia: Bool
-            let autoScore: Int64?, autoTranslate: Int64?, autoSummarize: Int64?, autoTranscribe: Int64?
-            let audioUrl: String?
-        }
-        var rawRows: [Row] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            let id = sqlite3_column_int64(stmt, 0)
-            let sourceId = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 2)
-            let ctype = colText(stmt, 3) ?? "article"
-            let metaStr = colText(stmt, 12) ?? "{}"
-            let audioUrl = Self.parseAudioUrl(metaStr)
-            let isMedia = ctype == "podcast" || ctype == "video" || ctype == "youtube" || audioUrl != nil
-            let summary = colText(stmt, 10)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let translation = colText(stmt, 11)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let transcript = colText(stmt, 14)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            rawRows.append(Row(
-                id: id, sourceId: sourceId,
-                title: colText(stmt, 4) ?? "", url: colText(stmt, 5) ?? "",
-                language: colText(stmt, 6), md: colText(stmt, 7), excerpt: colText(stmt, 8),
-                html: colText(stmt, 13),
-                hasScore: sqlite3_column_type(stmt, 9) != SQLITE_NULL,
-                hasSummary: summary?.isEmpty == false,
-                hasTranslated: translation?.isEmpty == false,
-                hasTranscript: transcript?.isEmpty == false,
-                isMedia: isMedia,
-                autoScore: sqlite3_column_type(stmt, 15) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 15),
-                autoTranslate: sqlite3_column_type(stmt, 16) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 16),
-                autoSummarize: sqlite3_column_type(stmt, 17) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 17),
-                autoTranscribe: sqlite3_column_type(stmt, 18) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 18),
-                audioUrl: audioUrl))
-        }
-        sqlite3_finalize(stmt)
-
-        // 一次聚合查询算全量 content 的死信+退避状态（jtype → skip）
-        let skipMap = failureSkipMap(contentIds: rawRows.map { $0.id })
-        fputs("[worker] rawRows=\(rawRows.count) skipMapSize=\(skipMap.count)\n", stderr)
-
-        for r in rawRows {
-            let id = r.id
-
-            // 按具体源查开关; source_id 为 NULL(存量/异常)则无开关, 跳过
-            guard let sid = r.sourceId, let pol = srcPolicies[sid], pol.enabled else { continue }
-            // body 三级兜底：content_md（全文）→ content_html 剥标签（feed 自带全文，
-            // md 还没转出来——你 1119 篇翻译源文章就是这样，正文在 content_html 但 md/excerpt
-            // 都空，worker 此前只认 md/excerpt 拿不到正文跳过翻译）→ excerpt（摘要）
-            let body = Self.resolveBody(md: r.md, html: r.html, excerpt: r.excerpt)
-            // 修：content_html 有全文但 content_md 空时，剥标签写回 content_md——
-            // 否则翻译用了 content_html 全文，但阅读区 content_md 还是空（显示摘要不是全文）
-            if (r.md == nil || r.md!.isEmpty), let html = r.html, !html.isEmpty {
-                let mdText = Self.resolveBody(md: nil, html: html, excerpt: nil)
-                if !mdText.isEmpty {
-                    db.execute("UPDATE content SET content_md = ? WHERE id = ?", params: [mdText, id])
+        func append(order: CandidateOrder, until target: Int) {
+            guard tasks.count < target else { return }
+            var boundary: Int64?
+            let pageSize = max(100, maxTasks * 5)
+            while tasks.count < target, !Task.isCancelled {
+                let rows = fetchPendingRows(
+                    policies: policies, ignoreWatermark: ignoreWatermark,
+                    onlySourceId: onlySourceId, onlyContentId: nil, afterId: afterId,
+                    order: order, boundary: boundary, limit: pageSize, lightweight: false)
+                guard !rows.isEmpty else { break }
+                let skipMap = failureSkipMap(contentIds: rows.map(\.id))
+                for row in rows where !seen.contains(row.id) {
+                    seen.insert(row.id)
+                    if let task = makePendingTask(
+                        row: row, policies: policies, ignoreWatermark: ignoreWatermark,
+                        skip: skipMap[row.id] ?? [:], writeBackExtractedBody: true) {
+                        tasks.append(task)
+                        if tasks.count >= target { break }
+                    }
                 }
-            }
-            let audioUrl = r.audioUrl
-            let isMedia = r.isMedia
-            let isChineseMedia = isMedia && ContentLanguage.isChinese(
-                declared: r.language, fallbackText: r.title + "\n" + body)
-            let skip = skipMap[id] ?? [:]
-
-            var t = PendingTask(id: id, sourceId: sid, title: r.title, url: r.url, body: body,
-                                language: r.language, audioUrl: audioUrl, policy: pol.policy)
-            // per-item 字段优先：0=跳过 1=处理 NULL=回退读源配置（存量兼容）
-            // 中文播客/视频不进入翻译管线；translateFull 合并评分+摘要
-            let doTranslate = (r.autoTranslate == 0 ? false : r.autoTranslate == 1 ? true : pol.policy.autoTranslate)
-                && !isChineseMedia && !r.hasTranslated && !body.isEmpty && skip["translate"] != true
-            let doScore = (r.autoScore == 0 ? false : r.autoScore == 1 ? true : pol.policy.autoScore)
-                && !r.hasScore && !body.isEmpty && !doTranslate && skip["score"] != true
-            let doSummary = (r.autoSummarize == 0 ? false : r.autoSummarize == 1 ? true : pol.policy.autoSummarize)
-                && !r.hasSummary && !body.isEmpty && !isMedia && !doTranslate && skip["summarize"] != true
-            let doTranscribe = (r.autoTranscribe == 0 ? false : r.autoTranscribe == 1 ? true : pol.policy.autoTranscribe)
-                && !r.hasTranscript && isMedia && (audioUrl != nil || !r.url.isEmpty) && skip["transcribe"] != true
-
-            if doTranslate { t.needTranslate = true }
-            if doScore { t.needScore = true }
-            if doSummary { t.needSummary = true }
-            if doTranscribe { t.needTranscribe = true }
-
-            if t.needScore || t.needTranslate || t.needSummary || t.needTranscribe {
-                out.append(t)
+                boundary = rows.last?.id
+                if rows.count < pageSize { break }
             }
         }
-        return PendingScan(tasks: out,
-                           lastScannedId: rawRows.last?.id ?? startId,
-                           reachedEnd: rawRows.count < batchLimit * 5)
+
+        // 最新内容优先，但为最旧任务保留 20% 名额，避免持续入库时旧任务永久饥饿。
+        let newestTarget = max(1, maxTasks * 4 / 5)
+        append(order: .newest, until: newestTarget)
+        append(order: .oldest, until: maxTasks)
+        return tasks
+    }
+
+    nonisolated private func fetchPendingRows(
+        policies: [Int64: SrcPolicy], ignoreWatermark: Bool,
+        onlySourceId: Int64?, onlyContentId: Int64?, afterId: Int64?,
+        order: CandidateOrder, boundary: Int64?, limit: Int?, lightweight: Bool
+    ) -> [PendingRow] {
+        func sourceIds(_ enabled: (PipelinePolicy) -> Bool) -> String {
+            policies.compactMap { id, value in enabled(value.policy) ? String(id) : nil }
+                .joined(separator: ",")
+        }
+        let media = "(c.ctype IN ('podcast','video','youtube') OR c.meta LIKE '%audio_url%' OR c.meta LIKE '%video_url%')"
+        let body = "(LENGTH(TRIM(COALESCE(c.content_md,'')))>0 OR LENGTH(TRIM(COALESCE(c.content_html,'')))>0 OR LENGTH(TRIM(COALESCE(c.excerpt,'')))>0)"
+        let articleOrMedia = "(\(media) OR c.fetch_status IN (2,4))"
+        var branchBaseParts = ["c.deleted_at IS NULL", "c.is_duplicate=0"]
+        if let sid = onlySourceId { branchBaseParts.append("c.source_id=\(sid)") }
+        if let cid = onlyContentId { branchBaseParts.append("c.id=\(cid)") }
+        if let afterId, afterId > 0 { branchBaseParts.append("c.id>\(afterId)") }
+        if let boundary {
+            branchBaseParts.append(order == .newest ? "c.id<\(boundary)" : "c.id>\(boundary)")
+        }
+        let base = branchBaseParts.joined(separator: " AND ")
+        func branches(column: String, resultMissing: String, extra: String,
+                      fallbackIds: String) -> [String] {
+            var result = ["SELECT c.id FROM content c WHERE \(base) AND c.\(column)=1 AND \(resultMissing) AND \(extra)"]
+            if ignoreWatermark, !fallbackIds.isEmpty {
+                result.append("SELECT c.id FROM content c WHERE \(base) AND c.\(column) IS NULL AND c.source_id IN (\(fallbackIds)) AND \(resultMissing) AND \(extra)")
+            }
+            return result
+        }
+        var candidateBranches: [String] = []
+        candidateBranches += branches(
+            column: "auto_score", resultMissing: "c.llm_score IS NULL",
+            extra: "\(articleOrMedia) AND \(body)", fallbackIds: sourceIds { $0.autoScore })
+        candidateBranches += branches(
+            column: "auto_translate",
+            resultMissing: "LENGTH(TRIM(COALESCE(c.llm_translated_md,'')))=0",
+            extra: "\(articleOrMedia) AND \(body)", fallbackIds: sourceIds { $0.autoTranslate })
+        candidateBranches += branches(
+            column: "auto_summarize",
+            resultMissing: "LENGTH(TRIM(COALESCE(c.llm_summary,'')))=0",
+            extra: "c.ctype NOT IN ('podcast','video','youtube') AND \(body)",
+            fallbackIds: sourceIds { $0.autoSummarize })
+        candidateBranches += branches(
+            column: "auto_transcribe",
+            resultMissing: "LENGTH(TRIM(COALESCE(c.llm_transcript_md,'')))=0",
+            extra: "\(media) AND (LENGTH(TRIM(c.url))>0 OR c.meta LIKE '%audio_url%' OR c.meta LIKE '%video_url%')",
+            fallbackIds: sourceIds { $0.autoTranscribe })
+
+        let whereParts = ["s.enabled=1"]
+        let bodyColumns = lightweight
+            ? "SUBSTR(COALESCE(NULLIF(TRIM(c.content_md),''),NULLIF(TRIM(c.content_html),''),c.excerpt,''),1,1200) AS content_md, NULL AS content_html"
+            : "c.content_md, c.content_html"
+        let orderSQL = order == .newest ? "DESC" : "ASC"
+        let limitSQL = limit.map { "LIMIT \($0)" } ?? ""
+        let sql = """
+        WITH pending_ids(id) AS (
+            \(candidateBranches.joined(separator: "\nUNION\n"))
+        )
+        SELECT c.id,c.source_id,c.ctype,c.title,c.url,c.language,
+               \(bodyColumns),c.excerpt,c.llm_score,c.llm_summary,c.llm_translated_md,
+               c.llm_transcript_md,c.auto_score,c.auto_translate,c.auto_summarize,
+               c.auto_transcribe,c.meta,c.read_at
+        FROM pending_ids p
+        JOIN content c ON c.id=p.id
+        JOIN content_source s ON s.id=c.source_id
+        WHERE \(whereParts.joined(separator: " AND "))
+        ORDER BY c.id \(orderSQL)
+        \(limitSQL);
+        """
+        return db.queryRows(sql).compactMap { row in
+            guard let id = Int64(row["id"] ?? ""), let sourceId = Int64(row["source_id"] ?? "") else {
+                return nil
+            }
+            let meta = row["meta"] ?? "{}"
+            return PendingRow(
+                id: id, sourceId: sourceId, ctype: row["ctype"] ?? "article",
+                title: row["title"] ?? "", url: row["url"] ?? "", language: row["language"],
+                md: row["content_md"], html: row["content_html"], excerpt: row["excerpt"],
+                hasScore: row["llm_score"] != nil,
+                hasSummary: row["llm_summary"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                hasTranslated: row["llm_translated_md"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                hasTranscript: row["llm_transcript_md"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                autoScore: row["auto_score"].flatMap(Int64.init),
+                autoTranslate: row["auto_translate"].flatMap(Int64.init),
+                autoSummarize: row["auto_summarize"].flatMap(Int64.init),
+                autoTranscribe: row["auto_transcribe"].flatMap(Int64.init),
+                audioUrl: Self.parseAudioUrl(meta),
+                isUnread: row["read_at"] == nil)
+        }
+    }
+
+    nonisolated private func makePendingTask(
+        row: PendingRow, policies: [Int64: SrcPolicy], ignoreWatermark: Bool,
+        skip: [String: Bool], writeBackExtractedBody: Bool
+    ) -> PendingTask? {
+        guard let source = policies[row.sourceId], source.enabled else { return nil }
+        let body = Self.resolveBody(md: row.md, html: row.html, excerpt: row.excerpt)
+        if writeBackExtractedBody,
+           (row.md == nil || row.md?.isEmpty == true), let html = row.html, !html.isEmpty {
+            let extracted = Self.resolveBody(md: nil, html: html, excerpt: nil)
+            if !extracted.isEmpty {
+                db.execute("UPDATE content SET content_md=? WHERE id=?", params: [extracted, row.id])
+            }
+        }
+        func enabled(_ itemValue: Int64?, fallback: Bool) -> Bool {
+            if itemValue == 1 { return true }
+            if itemValue == 0 { return false }
+            return ignoreWatermark ? fallback : false
+        }
+        let isChineseMedia = row.isMedia && ContentLanguage.isChinese(
+            declared: row.language, fallbackText: row.title + "\n" + body)
+        let needsTranslate = enabled(row.autoTranslate, fallback: source.policy.autoTranslate)
+            && !isChineseMedia && !row.hasTranslated && !body.isEmpty
+        let needsScore = enabled(row.autoScore, fallback: source.policy.autoScore)
+            && !row.hasScore && !body.isEmpty
+        let needsSummary = enabled(row.autoSummarize, fallback: source.policy.autoSummarize)
+            && !row.hasSummary && !body.isEmpty && !row.isMedia
+        let needsTranscribe = enabled(row.autoTranscribe, fallback: source.policy.autoTranscribe)
+            && !row.hasTranscript && row.isMedia && (row.audioUrl != nil || !row.url.isEmpty)
+
+        // 先确定调用归属，再应用退避：翻译退避时不能退化成单独评分，评分退避时
+        // 也不能退化成单独摘要，否则同一正文仍会产生重复调用。
+        let ownsTranslate = needsTranslate
+        let ownsScore = needsScore && !ownsTranslate
+        let ownsSummary = needsSummary && !ownsTranslate && !ownsScore
+        let doTranslate = ownsTranslate && skip["translate"] != true
+        let doScore = ownsScore && skip["score"] != true
+        let doSummary = ownsSummary && skip["summarize"] != true
+        let doTranscribe = needsTranscribe && skip["transcribe"] != true
+        guard doTranslate || doScore || doSummary || doTranscribe else { return nil }
+        let outputPolicy = PipelinePolicy(
+            autoScore: needsScore, autoTranslate: needsTranslate,
+            autoTranscribe: needsTranscribe, autoSummarize: needsSummary)
+        return PendingTask(
+            id: row.id, sourceId: row.sourceId, title: row.title, url: row.url,
+            body: body, language: row.language, audioUrl: row.audioUrl, policy: outputPolicy,
+            allowLegacyFallback: ignoreWatermark,
+            needScore: doScore, needTranslate: doTranslate,
+            needSummary: doSummary, needTranscribe: doTranscribe)
+    }
+
+    /// 获得执行名额后重新读取整条内容，字段变化会让任务自动消失或使用最新正文。
+    private func revalidatedPendingTask(contentId: Int64,
+                                        allowLegacyFallback: Bool = false) -> PendingTask? {
+        let policies = fetchEffectivePolicies()
+        guard let row = fetchPendingRows(
+            policies: policies, ignoreWatermark: allowLegacyFallback, onlySourceId: nil,
+            onlyContentId: contentId, afterId: nil, order: .newest,
+            boundary: nil, limit: 1, lightweight: false).first else { return nil }
+        let skip = failureSkipMap(contentIds: [contentId])[contentId] ?? [:]
+        return makePendingTask(row: row, policies: policies, ignoreWatermark: allowLegacyFallback,
+                               skip: skip, writeBackExtractedBody: true)
     }
 
 #if DEBUG
@@ -616,7 +756,8 @@ public final class PipelineWorker: ObservableObject {
                                   afterId: Int64 = 0) -> [Int64] {
         collectPendingTasks(ignoreWatermark: ignoreWatermark,
                             onlySourceId: onlySourceId,
-                            afterId: afterId).tasks.map(\.id)
+                            afterId: afterId,
+                            maxTasks: batchLimit).map(\.id)
     }
 
     func pendingTaskKindsForTesting(ignoreWatermark: Bool,
@@ -624,7 +765,8 @@ public final class PipelineWorker: ObservableObject {
                                     afterId: Int64 = 0) -> [Int64: Set<String>] {
         let tasks = collectPendingTasks(ignoreWatermark: ignoreWatermark,
                                         onlySourceId: onlySourceId,
-                                        afterId: afterId).tasks
+                                        afterId: afterId,
+                                        maxTasks: batchLimit)
         return Dictionary(uniqueKeysWithValues: tasks.map { task in
             var kinds: Set<String> = []
             if task.needScore { kinds.insert("score") }
@@ -633,6 +775,21 @@ public final class PipelineWorker: ObservableObject {
             if task.needTranscribe { kinds.insert("transcribe") }
             return (task.id, kinds)
         })
+    }
+
+    func revalidatedTaskKindsForTesting(contentId: Int64) -> Set<String> {
+        guard let task = revalidatedPendingTask(contentId: contentId) else { return [] }
+        var kinds: Set<String> = []
+        if task.needScore { kinds.insert("score") }
+        if task.needTranslate { kinds.insert("translate") }
+        if task.needSummary { kinds.insert("summarize") }
+        if task.needTranscribe { kinds.insert("transcribe") }
+        return kinds
+    }
+
+    func refreshCountsForTesting() -> PendingBreakdown {
+        applyPendingSnapshot(calculatePendingSnapshot())
+        return pendingBreakdown
     }
 #endif
 
@@ -664,6 +821,7 @@ public final class PipelineWorker: ObservableObject {
         let sql = """
         SELECT id, url, content_html FROM content
         WHERE source_id = ? AND ctype = 'article' AND is_duplicate = 0
+          AND deleted_at IS NULL
         ORDER BY id DESC LIMIT 50;
         """
         guard db.prepare(sql, &stmt) else { return 0 }
@@ -707,6 +865,16 @@ public final class PipelineWorker: ObservableObject {
         fetchEffectivePolicies()
     }
 
+    /// 全文失败补抓独立调度：AI 引擎不等待网络抓取，且同一时间最多一个恢复任务。
+    private func scheduleFullTextRecovery() {
+        guard FeatureBoard.fulltext.enabled, fullTextRecoveryTask == nil else { return }
+        fullTextRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            _ = await self.backfillFullText()
+            self.fullTextRecoveryTask = nil
+        }
+    }
+
     /// 全文回填：水位线后抓取失败/未抓的文章(fetch_status 0/3, 非媒体)，按源 fetch_mode 重试。
     /// 返回本轮成功补到全文的条数。每轮限 10 条防一轮跑太久。
     private func backfillFullText() async -> Int {
@@ -720,6 +888,7 @@ public final class PipelineWorker: ObservableObject {
         SELECT id, source_id, url, content_html FROM content
         WHERE id > \(watermark)
           AND is_duplicate = 0
+          AND deleted_at IS NULL
           AND fetch_status IN (0, 1, 3)
           AND ctype = 'article'
           AND source_id IS NOT NULL
@@ -750,57 +919,73 @@ public final class PipelineWorker: ObservableObject {
     }
 
     /// 从 DB 刷新待处理/已处理/死信计数，更新 @Published 属性以反映实时状态
-    private func refreshCounts() {
-        guard db.open() else { return }
-        // per-item 标记三态：0=跳过 1=处理 NULL=回退读源配置
-        let policies = fetchEffectivePolicies()
-        var pending = 0
-        let rows = db.queryRows("""
-            SELECT id, source_id, ctype,
-                   auto_score, auto_translate, auto_summarize, auto_transcribe,
-                   llm_score, llm_translated_md, llm_summary, llm_transcript_md, meta
-            FROM content
-            WHERE id > \(watermark) AND is_duplicate=0 AND deleted_at IS NULL
-              AND fetch_status IN (2,4) AND LENGTH(content_md)>100
-            """)
-        for r in rows {
-            guard let sidStr = r["source_id"],
-                  let sid = Int64(sidStr),
-                  let pol = policies[sid] else { continue }
-
-            func eff(_ key: String) -> Bool {
-                let val = r[key].flatMap { Int64($0) }
-                if val == 1 { return true }
-                if val == 0 { return false }
-                // NULL → fallback to source config
-                switch key {
-                case "auto_score": return pol.policy.autoScore
-                case "auto_translate": return pol.policy.autoTranslate
-                case "auto_summarize": return pol.policy.autoSummarize
-                case "auto_transcribe": return pol.policy.autoTranscribe
-                default: return false
-                }
-            }
-
-            let needScore = eff("auto_score") && (Int64(r["llm_score"] ?? "x") == nil)
-            let needTranslate = eff("auto_translate") && (r["llm_translated_md"]?.isEmpty ?? true)
-            let needSummary = eff("auto_summarize") && (r["llm_summary"]?.isEmpty ?? true)
-            let isMedia = (r["ctype"] == "podcast" || r["ctype"] == "video" || r["ctype"] == "youtube"
-                           || (r["meta"]?.contains("audio_url") ?? false))
-            let needTranscribe = eff("auto_transcribe") && (r["llm_transcript_md"]?.isEmpty ?? true) && isMedia
-
-            if needScore || needTranslate || needSummary || needTranscribe { pending += 1 }
-        }
-        pendingCount = pending
-        processedCount = db.scalarInt("SELECT COUNT(*) FROM content WHERE llm_score IS NOT NULL") ?? 0
-        deadLetterCount = countDeadLetters()
+    private struct PendingSnapshot: Sendable {
+        let breakdown: PendingBreakdown
+        let contentIds: Set<Int64>
+        let processed: Int
+        let deadLetters: Int
     }
 
-    private func fetchEffectivePolicies() -> [Int64: SrcPolicy] {
+    nonisolated private func calculatePendingSnapshot() -> PendingSnapshot {
+        guard db.open() else {
+            return PendingSnapshot(breakdown: PendingBreakdown(), contentIds: [],
+                                   processed: 0, deadLetters: 0)
+        }
+        let policies = fetchEffectivePolicies()
+        let rows = fetchPendingRows(
+            policies: policies, ignoreWatermark: false, onlySourceId: nil,
+            onlyContentId: nil, afterId: nil, order: .newest,
+            boundary: nil, limit: nil, lightweight: true)
+        let skipMap = failureSkipMap(contentIds: rows.map(\.id))
+        var breakdown = PendingBreakdown()
+        var contentIds: Set<Int64> = []
+        for row in rows {
+            guard let task = makePendingTask(
+                row: row, policies: policies, ignoreWatermark: false,
+                skip: skipMap[row.id] ?? [:], writeBackExtractedBody: false) else { continue }
+            breakdown.items += 1
+            if row.isUnread { breakdown.unread += 1 }
+            contentIds.insert(row.id)
+            if task.needScore { breakdown.score += 1 }
+            if task.needTranslate { breakdown.translate += 1 }
+            if task.needSummary { breakdown.summarize += 1 }
+            if task.needTranscribe { breakdown.transcribe += 1 }
+        }
+        return PendingSnapshot(
+            breakdown: breakdown, contentIds: contentIds,
+            processed: db.scalarInt("SELECT COUNT(*) FROM content WHERE llm_score IS NOT NULL") ?? 0,
+            deadLetters: countDeadLetters())
+    }
+
+    private func refreshCounts() {
+        countRefreshTask?.cancel()
+        countRefreshTask = Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            let snapshot = self.calculatePendingSnapshot()
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self.applyPendingSnapshot(snapshot) }
+        }
+    }
+
+    /// 源删除/策略批量变化后，立即在后台重算左栏待处理集合。
+    func requestPendingRefresh() {
+        refreshCounts()
+    }
+
+    private func applyPendingSnapshot(_ snapshot: PendingSnapshot) {
+        pendingBreakdown = snapshot.breakdown
+        pendingCount = snapshot.breakdown.items
+        pendingContentIds = snapshot.contentIds
+        processedCount = snapshot.processed
+        deadLetterCount = snapshot.deadLetters
+        NotificationCenter.default.post(name: .pipelinePendingUpdated, object: nil)
+    }
+
+    nonisolated private func fetchEffectivePolicies() -> [Int64: SrcPolicy] {
         guard db.open() else { return [:] }
         var stmt: OpaquePointer?
         var map: [Int64: SrcPolicy] = [:]
-        // 管线纯按源处理——folder 不再存管线覆盖值，无需 JOIN folder
+        // 内容处理纯按源处理——folder 不再存覆盖值，无需 JOIN folder
         let sql = "SELECT id, enabled, config FROM content_source;"
         guard db.prepare(sql, &stmt) else { return [:] }
         defer { sqlite3_finalize(stmt) }
@@ -821,27 +1006,9 @@ public final class PipelineWorker: ObservableObject {
         return map
     }
 
-    /// 单篇执行前重读源设置，避免长批次继续使用已失效的开关快照。
-    private func fetchCurrentPolicy(sourceId: Int64) -> SrcPolicy? {
-        guard let row = db.queryRows(
-            "SELECT enabled, config FROM content_source WHERE id = ?;",
-            params: [sourceId]).first,
-              row["enabled"] == "1" else { return nil }
-        let config = row["config"] ?? "{}"
-        let policy = PipelinePolicy.from(configJson: config)
-        var mode: FetchMode = .summary
-        if let data = config.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let raw = obj["fetch_mode"] as? String,
-           let parsed = FetchMode(rawValue: raw) {
-            mode = parsed
-        }
-        return SrcPolicy(enabled: true, policy: policy, fetchMode: mode)
-    }
-
     // MARK: 辅助
 
-    private static func parseAudioUrl(_ metaStr: String) -> String? {
+    nonisolated private static func parseAudioUrl(_ metaStr: String) -> String? {
         guard let data = metaStr.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return (obj["audio_url"] as? String) ?? (obj["video_url"] as? String)
@@ -896,7 +1063,7 @@ public final class PipelineWorker: ObservableObject {
     /// - 某 jtype 累计失败 >= 3 → 死信，永久跳过（除非手动重置）
     /// - 最近一次失败在 1h 内 → 退避，本轮跳过
     /// 原实现逐行 4 次 SQL，2000 行最坏 8000 次/120s 轮询，DB 往返开销失控。
-    private func failureSkipMap(contentIds: [Int64]) -> [Int64: [String: Bool]] {
+    nonisolated private func failureSkipMap(contentIds: [Int64]) -> [Int64: [String: Bool]] {
         guard !contentIds.isEmpty else { return [:] }
         // content_id 去重（同 id 不会重复，但保险）
         let uniqueIds = Array(Set(contentIds))
@@ -950,7 +1117,7 @@ public final class PipelineWorker: ObservableObject {
     }
 
     /// 解析 SQLite datetime('now') 的 UTC 字符串
-    private static func utcDate(_ s: String) -> Date? {
+    nonisolated private static func utcDate(_ s: String) -> Date? {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
         f.timeZone = TimeZone(identifier: "UTC")
@@ -961,7 +1128,7 @@ public final class PipelineWorker: ObservableObject {
 
     /// 死信任务数（连续失败 >=3，与 failureSkipMap 口径一致）。
     /// 用窗口函数算每组最近一次状态后的连续失败数，纯 SQL 一趟完成。
-    func countDeadLetters() -> Int {
+    nonisolated func countDeadLetters() -> Int {
         deadLetterPairs().count
     }
 
@@ -973,7 +1140,7 @@ public final class PipelineWorker: ObservableObject {
     /// 死信对（content_id, jtype, 连续失败次数）。窗口函数：
     /// 按 (content_id,jtype) 分组、id 倒序编号，rn 递增即时间倒序；
     /// 连续失败 = 从头开始 status=3 直到遇到第一个非 3。
-    private func deadLetterPairs() -> [(contentId: Int64, jtype: String, fails: Int)] {
+    nonisolated private func deadLetterPairs() -> [(contentId: Int64, jtype: String, fails: Int)] {
         // SQLite 窗口函数需要 3.25+，macOS 系统库满足。
         // 思路：每组按 id DESC 编号，取"前缀里全是 3"的最大前缀长度作为连续失败数。
         db.queryRows("""
@@ -1061,4 +1228,8 @@ extension Array {
         }
         return out
     }
+}
+
+extension Notification.Name {
+    static let pipelinePendingUpdated = Notification.Name("pipelinePendingUpdated")
 }

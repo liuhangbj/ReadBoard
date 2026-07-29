@@ -30,6 +30,55 @@ final class FailedJobServiceTests: XCTestCase {
         XCTAssertTrue(failures.contains { $0.contentId == failingId && $0.jtype == "translate" })
     }
 
+    func testPausedFailuresExposeSourceTitleAndConsecutiveFailureCount() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sourceId: Int64 = 9_500_020
+        let pausedId: Int64 = 9_500_021
+        let recoveredId: Int64 = 9_500_022
+        cleanup(ids: [pausedId, recoveredId])
+        db.execute("DELETE FROM content_source WHERE id = ?", params: [sourceId])
+        defer {
+            cleanup(ids: [pausedId, recoveredId])
+            db.execute("DELETE FROM content_source WHERE id = ?", params: [sourceId])
+        }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, enabled, config)
+            VALUES (?, 'rss', '失败来源测试', 'https://test.invalid/feed', 1, '{}');
+            """, params: [sourceId]))
+        for id in [pausedId, recoveredId] {
+            XCTAssertTrue(db.execute("""
+                INSERT INTO content (id, guid, source_id, ctype, source, title, url, fetch_status)
+                VALUES (?, ?, ?, 'article', 'rss', ?, ?, 2);
+                """, params: [id, "paused-failure-guid-\(id)", sourceId,
+                                "暂停任务测试 \(id)", "https://test.invalid/item/\(id)"]))
+        }
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_job (content_id, jtype, status, finished_at, error)
+            VALUES
+              (?, 'translate', 3, datetime('now', '-3 minutes'), '第一次失败'),
+              (?, 'translate', 3, datetime('now', '-2 minutes'), '第二次失败'),
+              (?, 'translate', 3, datetime('now', '-1 minute'), '最新失败'),
+              (?, 'score', 3, datetime('now', '-4 minutes'), '旧失败一'),
+              (?, 'score', 3, datetime('now', '-3 minutes'), '旧失败二'),
+              (?, 'score', 3, datetime('now', '-2 minutes'), '旧失败三'),
+              (?, 'score', 2, datetime('now', '-1 minute'), NULL);
+            """, params: [pausedId, pausedId, pausedId,
+                            recoveredId, recoveredId, recoveredId, recoveredId]))
+
+        let failures = FailedJobService.shared.pausedFailures()
+        let paused = try XCTUnwrap(failures.first {
+            $0.contentId == pausedId && $0.jtype == "translate"
+        })
+        XCTAssertEqual(paused.title, "暂停任务测试 \(pausedId)")
+        XCTAssertEqual(paused.sourceName, "失败来源测试")
+        XCTAssertEqual(paused.consecutiveFailures, 3)
+        XCTAssertEqual(paused.error, "最新失败")
+        XCTAssertFalse(failures.contains { $0.contentId == recoveredId && $0.jtype == "score" })
+    }
+
     private func requireIsolatedDatabase() throws {
         guard ProcessInfo.processInfo.environment["READBOARD_DB"] != nil else {
             throw XCTSkip("需要 READBOARD_DB 指向临时数据库；跳过以免触碰真实库")

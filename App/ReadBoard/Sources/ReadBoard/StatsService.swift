@@ -3,7 +3,7 @@ import Foundation
 // MARK: - 统计面板数据
 // 源数量/内容量/管线处理量/失败率聚合。
 
-public struct StatsOverview {
+public struct StatsOverview: Sendable {
     var totalSources = 0
     var enabledSources = 0
     var totalContent = 0

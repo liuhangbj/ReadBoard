@@ -1406,8 +1406,8 @@ public struct CleanupPane: View {
                 TrashRestoreView()
             }
 
-            Section("管线死信任务") {
-                DeadLetterView()
+            Section("内容处理失败任务") {
+                FailedTaskView()
             }
         }
         .formStyle(.grouped)
@@ -1576,59 +1576,39 @@ public struct TrashRestoreView: View {
     }
 }
 
-// MARK: - 死信任务管理（管线失败 >=3 被永久跳过的）
+// MARK: - 失败任务管理（连续失败 >=3 后暂停处理）
 
-public struct DeadLetterView: View {
+public struct FailedTaskView: View {
     @StateObject private var worker = PipelineWorker.shared
-    @State private var items: [(contentId: Int64, jtype: String, fails: Int)] = []
+    @State private var showFailureList = false
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if items.isEmpty {
-                Text("无死信任务——连续失败 3 次的管线任务会出现在这里。")
-                    .font(.caption).foregroundStyle(Color.rbText3)
-            } else {
-                ForEach(items.indices, id: \.self) { idx in
-                    let it = items[idx]
-                    HStack {
-                        Text("内容 #\(it.contentId) · \(it.jtype)")
-                            .font(.callout)
-                            .foregroundStyle(Color.rbText)
-                        Text("失败 \(it.fails) 次")
-                            .font(.caption2).foregroundStyle(Color.rbScoreLow)
-                        Spacer()
-                        Button("重置重试") {
-                            worker.resetDeadLetter(contentId: it.contentId, jtype: it.jtype)
-                            reload()
-                        }
-                        .controlSize(.small)
-                    }
-                }
-                HStack {
-                    Spacer()
-                    Button("全部重试") {
-                        worker.retryAllDeadLetters()
-                        // 延迟 reload 给 worker 起跑时间（立即查可能还没出结果）
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { reload() }
-                    }
-                    .controlSize(.small)
-                    .help("重置全部死信标记并立即重跑（不等下轮调度）")
-                    Button("全部重置", role: .destructive) {
-                        worker.resetAllDeadLetters()
-                        reload()
-                    }
-                    .controlSize(.small)
-                    .help("只删失败标记，等下轮调度自动重试")
-                }
+        HStack(spacing: 10) {
+            Image(systemName: worker.deadLetterCount > 0
+                  ? "exclamationmark.triangle.fill"
+                  : "checkmark.circle.fill")
+                .foregroundStyle(worker.deadLetterCount > 0 ? Color.rbScoreLow : Color.rbScoreHigh)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(worker.deadLetterCount > 0
+                     ? "\(worker.deadLetterCount) 个失败任务已暂停"
+                     : "没有失败任务")
+                    .font(.callout)
+                    .foregroundStyle(Color.rbText)
+                Text("连续失败 3 次后暂停，避免重复调用和费用失控。")
+                    .font(.caption2)
+                    .foregroundStyle(Color.rbText3)
             }
-            Text("死信是连续失败 3 次被永久跳过的任务（防 LLM 费用失控）。重置后下轮 worker 会重新尝试。")
-                .font(.caption2).foregroundStyle(Color.rbText3)
+            Spacer()
+            Button("查看失败任务") { showFailureList = true }
+                .controlSize(.small)
+                .disabled(worker.deadLetterCount == 0)
         }
-        .onAppear(perform: reload)
-    }
-
-    private func reload() {
-        items = worker.deadLetters()
+        .onAppear { worker.requestPendingRefresh() }
+        .sheet(isPresented: $showFailureList, onDismiss: {
+            worker.requestPendingRefresh()
+        }) {
+            ContentFailureListSheet()
+        }
     }
 }
 
@@ -1648,8 +1628,6 @@ public struct ReaderPane: View {
     @AppStorage("reading.uiFontScale") private var uiFontScale: Double = 1.0
 
     // 文章列表外观
-    @AppStorage("list.showThumbnails") private var showThumbnails: Bool = true
-    @AppStorage("list.excerptLines") private var excerptLines: Int = 2
     @AppStorage("list.density") private var density: String = "comfortable"
     @AppStorage("list.showSource") private var showSource: Bool = true
     @AppStorage("list.showDate") private var showDate: Bool = true
@@ -1709,13 +1687,13 @@ public struct ReaderPane: View {
                 HStack {
                     Text("行距 \(Int(lineSpacing))")
                         .frame(width: 96, alignment: .leading)
-                    Slider(value: $lineSpacing, in: 0...24, step: 1)
+                    Slider(value: $lineSpacing, in: 0...20, step: 1)
                         .tint(Color.rbAccent)
                 }
                 HStack {
                     Text("内容宽度 \(Int(contentWidth))")
                         .frame(width: 96, alignment: .leading)
-                    Slider(value: $contentWidth, in: 600...1200, step: 20)
+                    Slider(value: $contentWidth, in: 600...1200, step: 50)
                         .tint(Color.rbAccent)
                 }
                 HStack {
@@ -1728,15 +1706,6 @@ public struct ReaderPane: View {
 
             // ── 文章列表外观 ──
             Section("文章列表") {
-                Toggle("显示缩略图（右侧小图）", isOn: $showThumbnails)
-                    .tint(Color.rbAccent)
-                Picker("摘要显示", selection: $excerptLines) {
-                    Text("不显示").tag(0)
-                    Text("1 行").tag(1)
-                    Text("2 行").tag(2)
-                    Text("3 行").tag(3)
-                }
-                .tint(Color.rbAccent)
                 Picker("列表密度", selection: $density) {
                     Text("舒适").tag("comfortable")
                     Text("紧凑").tag("compact")

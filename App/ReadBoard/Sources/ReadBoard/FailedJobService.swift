@@ -12,6 +12,18 @@ public struct FailedJob: Identifiable, Hashable, Sendable {
     let title: String        // 关联 content.title
 }
 
+/// 连续失败达到暂停阈值的内容处理任务，供数据看板详情页展示和精确重试。
+public struct PausedContentFailure: Identifiable, Hashable, Sendable {
+    public let id: Int64             // 最近一次 content_job.id
+    let contentId: Int64
+    let jtype: String
+    let error: String?
+    let finishedAt: String?
+    let title: String
+    let sourceName: String
+    let consecutiveFailures: Int
+}
+
 public final class FailedJobService: @unchecked Sendable {
     static let shared = FailedJobService()
     private let db = Database.shared
@@ -44,6 +56,63 @@ public final class FailedJobService: @unchecked Sendable {
                     title: r["title"] ?? "(已删除)"
                 )
             }
+    }
+
+    /// 连续失败至少 3 次、已被 Worker 暂停的任务。与 Worker 的失败计数使用同一口径。
+    func pausedFailures(limit: Int = 200) -> [PausedContentFailure] {
+        db.queryRows("""
+            WITH ranked AS (
+              SELECT j.*,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY j.content_id, j.jtype ORDER BY j.id DESC
+                     ) AS rn
+              FROM content_job j
+            ),
+            consec AS (
+              SELECT content_id, jtype, COUNT(*) AS fails
+              FROM ranked
+              WHERE rn <= (
+                SELECT COALESCE(MIN(rn) - 1, 999999) FROM ranked r2
+                WHERE r2.content_id = ranked.content_id
+                  AND r2.jtype = ranked.jtype
+                  AND r2.status != 3
+              ) AND status = 3
+              GROUP BY content_id, jtype
+            )
+            SELECT r.id, r.content_id, r.jtype, r.error, r.finished_at,
+                   COALESCE(c.title, '(内容已删除)') AS title,
+                   COALESCE(s.name, '未知来源') AS source_name,
+                   consec.fails
+            FROM ranked r
+            JOIN consec ON consec.content_id = r.content_id AND consec.jtype = r.jtype
+            LEFT JOIN content c ON c.id = r.content_id
+            LEFT JOIN content_source s ON s.id = c.source_id
+            WHERE r.rn = 1 AND r.status = 3 AND consec.fails >= 3
+            ORDER BY consec.fails DESC, r.finished_at DESC
+            LIMIT ?;
+            """, params: [limit]).map { row in
+                PausedContentFailure(
+                    id: Int64(row["id"] ?? "0") ?? 0,
+                    contentId: Int64(row["content_id"] ?? "0") ?? 0,
+                    jtype: row["jtype"] ?? "",
+                    error: row["error"].flatMap { $0.isEmpty ? nil : $0 },
+                    finishedAt: row["finished_at"],
+                    title: row["title"] ?? "(内容已删除)",
+                    sourceName: row["source_name"] ?? "未知来源",
+                    consecutiveFailures: Int(row["fails"] ?? "0") ?? 0
+                )
+            }
+    }
+
+    func retry(_ failure: PausedContentFailure) async -> Bool {
+        await retry(FailedJob(
+            id: failure.id,
+            contentId: failure.contentId,
+            jtype: failure.jtype,
+            error: failure.error,
+            finishedAt: failure.finishedAt,
+            title: failure.title
+        ))
     }
 
     /// 手动重试某条失败 job（按 jtype 重跑对应管线）

@@ -297,6 +297,8 @@ struct RBSegmented<Item: Hashable>: View {
     let items: [(Item, String)]
     @Binding var selection: Item
     var fontSize: CGFloat = 11
+    /// 阅读器文稿标签使用：让每个标签等分占满可用宽度；其他筛选器继续保持紧凑宽度。
+    var fillsAvailableWidth = false
 
     var body: some View {
         HStack(spacing: 2) {
@@ -313,6 +315,7 @@ struct RBSegmented<Item: Hashable>: View {
                     Text(label)
                         .font(.system(size: fontSize, weight: active ? .medium : .regular))
                         .foregroundStyle(active ? Color.rbAccent : Color.rbText2)
+                        .frame(maxWidth: fillsAvailableWidth ? .infinity : nil, alignment: .center)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                         .background(
@@ -321,8 +324,10 @@ struct RBSegmented<Item: Hashable>: View {
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .frame(maxWidth: fillsAvailableWidth ? .infinity : nil)
             }
         }
+        .frame(maxWidth: fillsAvailableWidth ? .infinity : nil)
         .padding(2)
         .background(Capsule().fill(Color.rbSurface))
         .overlay(
@@ -365,108 +370,255 @@ struct RSSIcon: View {
     }
 }
 
-/// 播客音频播放器（AVPlayer 播放远程音频流）
-/// 播放/暂停 + 进度条 + 时间显示，纸墨系配色
+enum AudioPlaybackSettings {
+    static let speeds: [Double] = [0.75, 1.0, 1.25, 1.5, 2.0]
+
+    nonisolated static func clampedTime(_ value: Double, duration: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        let upper = duration.isFinite && duration > 0 ? duration : max(value, 0)
+        return min(max(value, 0), upper)
+    }
+}
+
+/// AVPlayer 生命周期与观察器集中管理。播放器仍然惰性创建：不点播放不会请求远程媒体。
+@MainActor
+final class AudioPlayerController: ObservableObject {
+    @Published private(set) var isPlaying = false
+    @Published private(set) var isBuffering = false
+    @Published private(set) var currentTime: Double = 0
+    @Published private(set) var duration: Double = 0
+    @Published private(set) var errorMessage: String?
+
+    private let audioURL: String
+    private var player: AVPlayer?
+    private var timeObserver: Any?
+    private var preferredRate: Float = 1.0
+
+    init(audioURL: String) {
+        self.audioURL = audioURL
+    }
+
+    func setPreferredRate(_ rate: Double) {
+        let safeRate = AudioPlaybackSettings.speeds.contains(rate) ? rate : 1.0
+        preferredRate = Float(safeRate)
+        player?.defaultRate = preferredRate
+        if isPlaying { player?.rate = preferredRate }
+    }
+
+    func togglePlay() {
+        prepareIfNeeded()
+        guard let player else { return }
+        if player.timeControlStatus == .playing || player.rate > 0 {
+            player.pause()
+            isPlaying = false
+        } else {
+            errorMessage = nil
+            isBuffering = true
+            player.defaultRate = preferredRate
+            player.play()
+        }
+    }
+
+    func skip(by seconds: Double) {
+        prepareIfNeeded()
+        seek(to: currentTime + seconds)
+    }
+
+    func seek(to seconds: Double) {
+        prepareIfNeeded()
+        guard let player else { return }
+        let target = AudioPlaybackSettings.clampedTime(seconds, duration: duration)
+        currentTime = target
+        player.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 600),
+            toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 600))
+    }
+
+    func cleanup() {
+        if let timeObserver, let player { player.removeTimeObserver(timeObserver) }
+        timeObserver = nil
+        player?.pause()
+        player = nil
+        isPlaying = false
+        isBuffering = false
+    }
+
+    private func prepareIfNeeded() {
+        guard player == nil else { return }
+        guard let url = URL(string: audioURL), let scheme = url.scheme,
+              scheme == "http" || scheme == "https" else {
+            errorMessage = "媒体地址无效"
+            return
+        }
+        let player = AVPlayer(url: url)
+        player.defaultRate = preferredRate
+        self.player = player
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self, weak player] time in
+            MainActor.assumeIsolated {
+                guard let self, let player else { return }
+                self.updateState(player: player, time: time)
+            }
+        }
+    }
+
+    private func updateState(player: AVPlayer, time: CMTime) {
+        let seconds = time.seconds
+        if seconds.isFinite { currentTime = max(0, seconds) }
+        if let item = player.currentItem {
+            let itemDuration = item.duration.seconds
+            if itemDuration.isFinite && itemDuration > 0 { duration = itemDuration }
+            if item.status == .failed {
+                errorMessage = item.error?.localizedDescription ?? player.error?.localizedDescription ?? "媒体加载失败"
+            }
+        }
+        isPlaying = player.timeControlStatus == .playing
+        isBuffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+    }
+}
+
+/// 播客播放器：自定义纸墨控制条 + AVPlayer 播放引擎。
+/// 支持拖动进度、15 秒回退、30 秒前进、倍速、缓冲及失败提示；MP3/MP4 共用。
 struct AudioPlayerView: View {
     let audioUrl: String
     let title: String
-    @State private var player: AVPlayer?
-    @State private var isPlaying = false
-    @State private var currentTime: Double = 0
-    @State private var duration: Double = 0
-    @State private var timer: Timer?
+    @StateObject private var controller: AudioPlayerController
+    @AppStorage("player.playbackRate") private var playbackRate: Double = 1.0
+    @State private var isScrubbing = false
+    @State private var scrubTime: Double = 0
+
+    init(audioUrl: String, title: String) {
+        self.audioUrl = audioUrl
+        self.title = title
+        _controller = StateObject(wrappedValue: AudioPlayerController(audioURL: audioUrl))
+    }
 
     var body: some View {
-        VStack(spacing: 8) {
-            // 播放控制行
-            HStack(spacing: 12) {
-                // 播放/暂停按钮
-                Button {
-                    togglePlay()
-                } label: {
-                    Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.system(size: 32))
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Button { controller.skip(by: -15) } label: {
+                    Image(systemName: "gobackward.15")
+                        .font(.system(size: 15))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.staticQuiet)
+                .help("后退 15 秒")
+
+                Button { controller.togglePlay() } label: {
+                    Image(systemName: controller.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 30))
                         .foregroundStyle(Color.rbAccent)
+                        .frame(width: 34, height: 34)
                 }
                 .buttonStyle(.plain)
+                .help(controller.isPlaying ? "暂停" : "播放")
 
-                // 进度条 + 时间
-                VStack(spacing: 4) {
-                    // 进度条
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule()
-                                .fill(Color.rbSurface)
-                                .frame(height: 4)
-                            Capsule()
-                                .fill(Color.rbAccent)
-                                .frame(width: duration > 0 ? geo.size.width * CGFloat(currentTime / duration) : 0, height: 4)
+                Button { controller.skip(by: 30) } label: {
+                    Image(systemName: "goforward.30")
+                        .font(.system(size: 15))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.staticQuiet)
+                .help("前进 30 秒")
+
+                VStack(spacing: 1) {
+                    Slider(
+                        value: Binding(
+                            get: { isScrubbing ? scrubTime : controller.currentTime },
+                            set: { scrubTime = $0 }
+                        ),
+                        in: 0...max(controller.duration, 1),
+                        onEditingChanged: { editing in
+                            if editing {
+                                scrubTime = controller.currentTime
+                                isScrubbing = true
+                            } else {
+                                isScrubbing = false
+                                controller.seek(to: scrubTime)
+                            }
+                        }
+                    )
+                    .tint(Color.rbAccent)
+                    .disabled(controller.duration <= 0)
+                    .frame(height: 24)
+
+                    HStack {
+                        Text(Self.formatTime(isScrubbing ? scrubTime : controller.currentTime))
+                        Spacer()
+                        Text("−" + Self.formatTime(max(0, controller.duration - (isScrubbing ? scrubTime : controller.currentTime))))
+                    }
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(Color.rbText3)
+                }
+                // 以 Slider 轨道而不是“轨道 + 时间”的整体中心与播放按钮对齐。
+                .alignmentGuide(VerticalAlignment.center) { _ in 12 }
+
+                if controller.isBuffering {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 16)
+                        .help("正在缓冲")
+                }
+
+                Menu {
+                    ForEach(AudioPlaybackSettings.speeds, id: \.self) { rate in
+                        Button {
+                            playbackRate = rate
+                            controller.setPreferredRate(rate)
+                        } label: {
+                            if playbackRate == rate {
+                                Label(Self.formatRate(rate), systemImage: "checkmark")
+                            } else {
+                                Text(Self.formatRate(rate))
+                            }
                         }
                     }
-                    .frame(height: 4)
-
-                    // 时间显示
-                    HStack {
-                        Text(formatTime(currentTime))
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(Color.rbText3)
-                        Spacer()
-                        Text(formatTime(duration))
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(Color.rbText3)
-                    }
+                } label: {
+                    Text(Self.formatRate(playbackRate))
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(minWidth: 36)
                 }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("播放速度")
+            }
+
+            if let error = controller.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(Color.rbScoreLow)
+                    .lineLimit(2)
             }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
         .background(Color.rbSurface)
         .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
-        // ⚠️ 绝不 onAppear 创建 AVPlayer（16:49 定案）：打开播客文章即建播放器
-        // 会立刻开始缓冲远程音频流（网络+解码管线），叠加 0.5s 主 runloop 定时器
-        // 驱动 @State 每半秒重渲染——打开即渲染炸弹，连点时直接炸（08:49 播客闪退实锤）。
-        // 改为首次点播放才创建/启动；不点播放零成本。
-        .onDisappear { cleanup() }
+        .accessibilityLabel("\(title) 播放器")
+        .onAppear { controller.setPreferredRate(playbackRate) }
+        .onChange(of: playbackRate) { _, rate in controller.setPreferredRate(rate) }
+        .onDisappear { controller.cleanup() }
     }
 
-    /// 首次点播放：惰性创建播放器 + 启动进度定时器
-    private func ensurePlayer() {
-        guard player == nil, let url = URL(string: audioUrl) else { return }
-        player = AVPlayer(url: url)
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            guard let player = player else { return }
-            currentTime = player.currentTime().seconds
-            if let item = player.currentItem {
-                duration = item.duration.seconds.isFinite ? item.duration.seconds : 0
-            }
-            isPlaying = player.rate > 0
-        }
-    }
-
-    private func togglePlay() {
-        ensurePlayer()
-        guard let player = player else { return }
-        if isPlaying {
-            player.pause()
-        } else {
-            player.play()
-        }
-        isPlaying.toggle()
-    }
-
-    private func cleanup() {
-        timer?.invalidate()
-        timer = nil
-        player?.pause()
-        player = nil
-    }
-
-    private func formatTime(_ seconds: Double) -> String {
+    nonisolated static func formatTime(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "0:00" }
-        let mins = Int(seconds) / 60
-        let secs = Int(seconds) % 60
-        return String(format: "%d:%02d", mins, secs)
+        let total = Int(seconds)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, secs)
+            : String(format: "%d:%02d", minutes, secs)
     }
 
+    nonisolated static func formatRate(_ rate: Double) -> String {
+        if rate == floor(rate) { return "\(Int(rate))×" }
+        let decimals = rate * 10 == floor(rate * 10) ? 1 : 2
+        return String(format: "%.*f×", decimals, rate)
+    }
 }
 
 /// YouTube video player using yt-dlp -g (URL extraction only, no download) + AVPlayer.

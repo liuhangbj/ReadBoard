@@ -25,8 +25,16 @@ public struct ParsedFeed: Sendable {
     var language: String? = nil
     /// 按内容特征判定类型（收编 detectType 逻辑）
     var kind: FeedKind {
-        if entries.contains(where: { $0.meta["video_id"] != nil }) { return .video }
-        if entries.contains(where: { $0.meta["audio_url"] != nil }) { return .podcast }
+        // YouTube/media:content 是原生视频源；普通 RSS enclosure 即使承载 MP4，
+        // 仍是音视频播客，不能因为容器是 video/mp4 就把整条播客源改成 youtube。
+        if entries.contains(where: {
+            $0.meta["video_id"] != nil ||
+            ($0.meta["video_url"] != nil && $0.meta["enclosure_type"] == nil)
+        }) { return .video }
+        if entries.contains(where: {
+            $0.meta["audio_url"] != nil ||
+            ($0.meta["video_url"] != nil && $0.meta["enclosure_type"] != nil)
+        }) { return .podcast }
         return .article
     }
 }
@@ -393,10 +401,18 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
                     if rel == "alternate" && eURL.isEmpty { eURL = href }
                 }
             case "enclosure":
-                // podcast 音频
-                if let type = attr["type"], type.hasPrefix("audio"), let u = attr["url"] {
-                    eMeta["audio_url"] = u
-                    if let len = attr["length"] { eMeta["audio_length"] = len }
+                // RSS enclosure 既可能是音频，也可能是视频播客。二者都保留直链；
+                // 来源分类仍由 content_source.stype 决定，不把 video/mp4 播客混入视频平台。
+                if let rawType = attr["type"]?.lowercased(), let u = attr["url"] {
+                    if rawType.hasPrefix("audio") {
+                        eMeta["audio_url"] = u
+                    } else if rawType.hasPrefix("video") {
+                        eMeta["video_url"] = u
+                    }
+                    if rawType.hasPrefix("audio") || rawType.hasPrefix("video") {
+                        eMeta["enclosure_type"] = rawType
+                        if let len = attr["length"] { eMeta["media_length"] = len }
+                    }
                 }
             case "id":
                 // YouTube Atom: <yt:videoId> 单独处理；media:content 见下
@@ -405,6 +421,7 @@ private final class FeedXMLParser: NSObject, XMLParserDelegate {
                 // media:content / media:group 里的媒体
                 if element == "media:content", let u = attr["url"], let mt = attr["type"], mt.hasPrefix("video") {
                     eMeta["video_url"] = u
+                    eMeta["media_type"] = mt.lowercased()
                 }
             }
         } else {

@@ -16,7 +16,6 @@ public struct SourcesView: View {
     // @StateObject 而非 @ObservedObject——SourcesView 在 RootView switch 里反复创建，
     // @ObservedObject 不持所有权语义错误（虽是单例不泄漏，但 StateObject 才正确）
     @StateObject private var store = SourceStore.shared
-    @StateObject private var worker = PipelineWorker.shared
     @EnvironmentObject private var appTab: AppTab
     /// 内嵌于设置「多类型源」页时隐藏站点级导航元素（返回阅读 / 大页标题）
     var embeddedInSettings = false
@@ -50,15 +49,11 @@ public struct SourcesView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(Color.rbText3)
                 Spacer()
-                if store.isSyncing {
-                    ProgressView().scaleEffect(0.7)
-                    Text("同步中…").font(.caption).foregroundStyle(Color.rbText3)
-                } else {
-                    Button { Task { await store.syncAll() } } label: {
-                        Label("全部刷新", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.quiet)
+                Button { Task { await store.syncAll() } } label: {
+                    Label("全部刷新", systemImage: "arrow.clockwise")
                 }
+                .buttonStyle(.quiet)
+                .disabled(store.isSyncing)
                 Button { showAddFolder = true } label: {
                     Label("文件夹", systemImage: "folder.badge.plus")
                 }
@@ -83,73 +78,20 @@ public struct SourcesView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
 
-            // ── 同步/导入导出消息（状态横幅，hairline 描边）──
-            if !store.lastSyncMessage.isEmpty || !opmlMessage.isEmpty {
-                VStack(spacing: 4) {
-                    if !store.lastSyncMessage.isEmpty {
-                        StatusBanner {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 10))
-                                .foregroundStyle(Color.rbText3)
-                            Text(store.lastSyncMessage)
-                                .font(.caption)
-                                .foregroundStyle(Color.rbText3)
-                            Spacer()
-                        }
-                    }
-                    if !opmlMessage.isEmpty {
-                        StatusBanner {
-                            Image(systemName: "doc.badge.arrow.up")
-                                .font(.system(size: 10))
-                                .foregroundStyle(Color.rbAccent)
-                            Text(opmlMessage)
-                                .font(.caption)
-                                .foregroundStyle(Color.rbAccent)
-                            Spacer()
-                        }
-                    }
+            // OPML 导入导出属于本页操作；订阅更新进度已统一移到数据看板。
+            if !opmlMessage.isEmpty {
+                StatusBanner {
+                    Image(systemName: "doc.badge.arrow.up")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.rbAccent)
+                    Text(opmlMessage)
+                        .font(.caption)
+                        .foregroundStyle(Color.rbAccent)
+                    Spacer()
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            // ── 后台管线 worker 状态条（横幅样式与消息对齐）──
-            StatusBanner {
-                Image(systemName: "gearshape.2")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.rbText3)
-                if worker.isRunning {
-                    ProgressView().scaleEffect(0.6)
-                    Text("管线运行中…").font(.caption).foregroundStyle(Color.rbText2)
-                } else {
-                    Text("管线空闲").font(.caption).foregroundStyle(Color.rbText2)
-                }
-                Text("待处理 \(worker.pendingCount)").font(.caption2).foregroundStyle(Color.rbText3)
-                Text("已处理 \(worker.processedCount)").font(.caption2).foregroundStyle(Color.rbText3)
-                if worker.deadLetterCount > 0 {
-                    Text("死信 \(worker.deadLetterCount)").font(.caption2).foregroundStyle(Color.rbScoreLow)
-                }
-                Spacer()
-                Button {
-                    Task { await worker.runOnce() }
-                } label: {
-                    Label("立即扫描", systemImage: "play")
-                }
-                .disabled(worker.isRunning)
-                .controlSize(.small)
-                .buttonStyle(.quiet)
-            }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 8)
-            if let item = worker.currentItem {
-                HStack(spacing: 4) {
-                    ProgressView().scaleEffect(0.5)
-                    Text("正在处理：").font(.caption2).foregroundStyle(Color.rbText3)
-                    Text(item).font(.caption2).foregroundStyle(Color.rbText2).lineLimit(1)
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 6)
             }
 
             Hairline()
@@ -319,12 +261,15 @@ public struct FolderHeader: View {
             set: { if !$0 { pendingBackfillKey = nil } }
         )) {
             Button("处理所有历史内容") {
-                Task { await PipelineWorker.shared.backfillHistoryForFolder(folderId: folder.id) }
+                if let key = pendingBackfillKey,
+                   store.setHistoricalItemsEnabled(folderId: folder.id, key: key) {
+                    Task { await PipelineWorker.shared.backfillHistoryForFolder(folderId: folder.id) }
+                }
                 pendingBackfillKey = nil
             }
             Button("只处理新增", role: .cancel) { pendingBackfillKey = nil }
         } message: {
-            Text("「\(folder.name)」整组的\(pendingBackfillKey ?? "")已开启。\n\n• 处理历史：组内所有源的存量文章补跑管线（耗时很长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+            Text("「\(folder.name)」整组的\(pendingBackfillLabel)已开启。\n\n• 处理历史：组内所有源的存量内容补做相应处理（耗时很长，按量计费）\n• 只处理新增：历史不动，新抓的自动进入内容处理引擎")
         }
     }
 
@@ -351,7 +296,7 @@ public struct FolderHeader: View {
             get: { uniform ?? false },
             set: { newValue in
                 store.setFolderPolicy(id: folder.id, key: key, value: newValue)
-                if newValue { pendingBackfillKey = label }
+                if newValue { pendingBackfillKey = key }
             }
         ))
         .toggleStyle(.checkbox)
@@ -361,6 +306,11 @@ public struct FolderHeader: View {
         // 组内不一致时标灰提示（点击仍会批量统一成全开/全关）
         .foregroundStyle(inconsistent ? Color.rbText3 : Color.rbText)
         .help(inconsistent ? "组内源设置不一致（点击统一）" : "")
+    }
+
+    private var pendingBackfillLabel: String {
+        guard let key = pendingBackfillKey else { return "" }
+        return PIPELINE_DEFS.first(where: { $0.key == key })?.label ?? key
     }
 }
 
@@ -462,9 +412,11 @@ public struct SourceRow: View {
                 .buttonStyle(.quiet)
                 .alert("删除订阅源？", isPresented: $showDeleteConfirm) {
                     Button("取消", role: .cancel) {}
-                    Button("删除", role: .destructive) { store.removeSource(id: src.id) }
+                    Button("永久删除", role: .destructive) {
+                        Task { _ = await store.removeSource(id: src.id) }
+                    }
                 } message: {
-                    Text("「\(src.name)」将被移除。\n已抓取的内容会保留，但不再更新此源。")
+                    Text("将永久删除「\(src.name)」及其全部文章、AI 处理结果和应用内导出记录。此操作无法撤销；已经写入 Obsidian 的文件不会删除。")
                 }
             }
         }
@@ -624,18 +576,18 @@ public struct SourceRow: View {
         )) {
             Button("处理所有历史内容") {
                 if let key = pendingBackfillKey {
-                    let col = ["auto_score":"auto_score","auto_translate":"auto_translate",
-                               "auto_summarize":"auto_summarize","auto_transcribe":"auto_transcribe"][key] ?? key
-                    Database.shared.execute("UPDATE content SET \(col)=1 WHERE source_id=?", params: [src.id])
+                    if store.setHistoricalItemsEnabled(sourceId: src.id, key: key) {
+                        Task { await PipelineWorker.shared.backfillHistory(onlySourceId: src.id) }
+                    }
                 }
                 pendingBackfillKey = nil
             }
             Button("只处理新增", role: .cancel) {
-                // 不做额外动作：旧条目保持原值（0 或 NULL），新入库的自然继承源配置 1
+                // setPolicy 开启时已经把现有条目固定为 0；新入库条目继承源配置 1。
                 pendingBackfillKey = nil
             }
         } message: {
-            Text("「\(src.name)」的\(label)已开启。\n\n• 处理历史：存量文章补跑管线（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动走管线")
+            Text("「\(src.name)」的\(label)已开启。\n\n• 处理历史：存量内容补做相应处理（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动进入内容处理引擎")
         }
     }
 

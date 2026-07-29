@@ -7,6 +7,8 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
     public let id: Int64
     let ctype: String
     let source: String
+    /// 订阅源名称；source 仍保留 rss/podcast/youtube 等平台标识。
+    var sourceName: String? = nil
     let title: String
     let author: String?
     let url: String
@@ -24,7 +26,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
     let llmSummary: String?
     let llmTranslatedMd: String?
     let fetchStatus: Int
-    let feedId: Int64?
+    var feedId: Int64?
     let audioUrl: String?     // 播客/视频的音频流地址（来自 meta.audio_url）
     let readAt: String?       // 已读时间，nil = 未读
     var isRead: Bool { readAt != nil }
@@ -56,6 +58,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
                     llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
                     audioUrl: audioUrl, readAt: "now", starred: starred)
         copy.imageUrl = imageUrl
+        copy.sourceName = sourceName
         copy.hasTranslation = hasTranslation
         copy.hasTranscript = hasTranscript
         copy.isMedia = isMedia
@@ -74,6 +77,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
                     llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
                     audioUrl: audioUrl, readAt: readAt, starred: !starred)
         copy.imageUrl = imageUrl
+        copy.sourceName = sourceName
         copy.hasTranslation = hasTranslation
         copy.hasTranscript = hasTranscript
         copy.isMedia = isMedia
@@ -93,6 +97,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
                     llmTranslatedMd: llmTranslatedMd, fetchStatus: fetchStatus, feedId: feedId,
                     audioUrl: audioUrl, readAt: readAt, starred: starred)
         copy.imageUrl = imageUrl
+        copy.sourceName = sourceName
         copy.hasTranslation = hasTranslation
         copy.hasTranscript = hasTranscript
         copy.isMedia = isMedia
@@ -125,6 +130,31 @@ public struct SidebarNode: Identifiable, Hashable, Sendable {
     var children: [SidebarNode]?
 }
 
+struct LibraryCounts: Sendable {
+    var total = 0
+    var unread = 0
+    var exported = 0
+    var exportedUnread = 0
+    var articles = 0
+    var articleUnread = 0
+    var podcasts = 0
+    var podcastUnread = 0
+    var videos = 0
+    var videoUnread = 0
+}
+
+struct ReaderPayload: Sendable {
+    let contentMd: String?
+    let llmTranslatedMd: String?
+    let audioUrl: String?
+    let titleTranslated: String?
+    let llmTranscriptMd: String?
+    let videoId: String?
+    let score: Int?
+    let summary: String?
+    let policy: PipelinePolicy
+}
+
 // MARK: - SQLite 只读访问
 
 public final class Database: @unchecked Sendable {
@@ -133,6 +163,11 @@ public final class Database: @unchecked Sendable {
     private var db: OpaquePointer?
     /// 写连接：供写入（execute/upsertContent/markJob 等）。WAL 下读写并发互不阻塞
     private var wdb: OpaquePointer?
+    /// 阅读器专用读连接。列表统计、Worker 扫描再慢，也不能占住点文章所需的连接。
+    private var readerDB: OpaquePointer?
+    /// 中栏列表与左栏统计专用读连接，与 Worker/订阅抓取的通用读连接隔离。
+    private var listDB: OpaquePointer?
+    private let connectionLock = NSRecursiveLock()
 
     /// 串行队列：所有写操作 + 事务统一排队执行。
     /// 修 P0-3（跨线程脏写）：@MainActor 服务与非隔离服务并发访问 db/wdb，
@@ -180,7 +215,9 @@ public final class Database: @unchecked Sendable {
         // foreign_keys：content_source.folder_id / content.source_id 有 ON DELETE SET NULL 声明，
         // 不开 pragma 外键不生效（SQLite 默认关），删文件夹/源时子行外键悬挂
         for sql in ["PRAGMA journal_mode=WAL;", "PRAGMA synchronous=NORMAL;",
-                    "PRAGMA busy_timeout=5000;", "PRAGMA foreign_keys=ON;"] {
+                    "PRAGMA busy_timeout=5000;", "PRAGMA foreign_keys=ON;",
+                    "PRAGMA cache_size=-16384;", "PRAGMA mmap_size=268435456;",
+                    "PRAGMA temp_store=MEMORY;"] {
             if sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK {
                 sqlite3_step(stmt)
             }
@@ -191,6 +228,8 @@ public final class Database: @unchecked Sendable {
 
     @discardableResult
     func open() -> Bool {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
         do {
             try FileManager.default.createDirectory(
                 at: URL(fileURLWithPath: dbPath).deletingLastPathComponent(),
@@ -221,7 +260,22 @@ public final class Database: @unchecked Sendable {
                 configure(wdb)
             }
         }
-        return db != nil && wdb != nil
+        // 阅读器使用独立连接，避免后台列表/统计查询在 FULLMUTEX 上把单篇读取排队数百毫秒。
+        if readerDB == nil {
+            if sqlite3_open_v2(dbPath, &readerDB, flags, nil) != SQLITE_OK {
+                sqlite3_close(readerDB); readerDB = nil
+            } else {
+                configure(readerDB)
+            }
+        }
+        if listDB == nil {
+            if sqlite3_open_v2(dbPath, &listDB, flags, nil) != SQLITE_OK {
+                sqlite3_close(listDB); listDB = nil
+            } else {
+                configure(listDB)
+            }
+        }
+        return db != nil && wdb != nil && readerDB != nil && listDB != nil
     }
 
     // MARK: 迁移机制（PRAGMA user_version 版本化执行 Data/migrations/*.sql）
@@ -415,8 +469,12 @@ public final class Database: @unchecked Sendable {
     }
 
     func close() {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
         sqlite3_close(db); db = nil
         sqlite3_close(wdb); wdb = nil
+        sqlite3_close(readerDB); readerDB = nil
+        sqlite3_close(listDB); listDB = nil
     }
 
     // MARK: 事务（写连接 + 串行队列）
@@ -542,6 +600,11 @@ public final class Database: @unchecked Sendable {
     func queryRows(_ sql: String, params: [Any?] = []) -> [[String: String]] {
         guard open() else { return [] }
         let handle = onWriteQueue ? wdb : db
+        return queryRows(on: handle, sql, params: params)
+    }
+
+    private func queryRows(on handle: OpaquePointer?, _ sql: String,
+                           params: [Any?] = []) -> [[String: String]] {
         var stmt: OpaquePointer?
         var out: [[String: String]] = []
         guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
@@ -614,60 +677,52 @@ public final class Database: @unchecked Sendable {
     /// 这是订阅源视角的组织方式（你的文件夹结构），不是按内容类型分。
     func fetchSidebarTree() -> [SidebarNode] {
         guard open() else { return [] }
-        // 文件夹 + 其下源 + 内容数/未读数。
-        // ⚠️ 聚合 CTE 版（17:18 实测：1.693s → 21ms）：
-        // 原版每个源两条相关子查询 COUNT(*)（302 源 × 2 = 604 次全表扫）；
-        // 改为 content 单次分组聚合 + LEFT JOIN，配合迁移 017 覆盖索引只扫索引页。
-        let folderRows = queryRows("""
+        // 一次聚合同时返回文件夹源和独立源。旧实现把同一 CTE 执行两次，
+        // 每次刷新左栏都会重复扫描整个 content 计数索引。
+        guard open() else { return [] }
+        // 统计走通用后台读连接；中栏分页独占 listDB，不再被全库聚合挡住。
+        let rows = queryRows(on: db, """
             WITH agg AS (
                 SELECT source_id,
                        SUM(CASE WHEN is_duplicate = 0 AND deleted_at IS NULL THEN 1 ELSE 0 END) AS n,
                        SUM(CASE WHEN is_duplicate = 0 AND deleted_at IS NULL AND read_at IS NULL THEN 1 ELSE 0 END) AS unread
                 FROM content GROUP BY source_id
             )
-            SELECT f.id AS fid, f.name AS fname, s.id AS sid, s.name AS sname,
-                   COALESCE(agg.n, 0) AS n, COALESCE(agg.unread, 0) AS unread
-            FROM folder f
-            JOIN content_source s ON s.folder_id = f.id AND s.enabled = 1
-            LEFT JOIN agg ON agg.source_id = s.id
-            ORDER BY f.name, n DESC;
-            """)
-        // 无文件夹的独立源
-        let orphanRows = queryRows("""
-            WITH agg AS (
-                SELECT source_id,
-                       SUM(CASE WHEN is_duplicate = 0 AND deleted_at IS NULL THEN 1 ELSE 0 END) AS n,
-                       SUM(CASE WHEN is_duplicate = 0 AND deleted_at IS NULL AND read_at IS NULL THEN 1 ELSE 0 END) AS unread
-                FROM content GROUP BY source_id
-            )
-            SELECT s.id AS sid, s.name AS sname,
+            SELECT s.folder_id AS fid, f.name AS fname, s.id AS sid, s.name AS sname,
                    COALESCE(agg.n, 0) AS n, COALESCE(agg.unread, 0) AS unread
             FROM content_source s
+            LEFT JOIN folder f ON f.id = s.folder_id
             LEFT JOIN agg ON agg.source_id = s.id
-            WHERE s.folder_id IS NULL AND s.enabled = 1
-            ORDER BY n DESC;
+            WHERE s.enabled = 1
+            ORDER BY CASE WHEN s.folder_id IS NULL THEN 1 ELSE 0 END,
+                     f.name, n DESC;
             """)
 
         var tree: [SidebarNode] = []
-        // 按文件夹聚合
         var folderMap: [Int64: (name: String, sources: [SidebarNode])] = [:]
         var folderOrder: [Int64] = []
-        for r in folderRows {
-            guard let fidStr = r["fid"], let fid = Int64(fidStr) else { continue }
-            let fname = r["fname"] ?? "未命名"
+        var orphanNodes: [SidebarNode] = []
+        for r in rows {
             let sname = r["sname"] ?? "未命名源"
             let n = Int(r["n"] ?? "0") ?? 0
             let unread = Int(r["unread"] ?? "0") ?? 0
             let sid = Int64(r["sid"] ?? "0") ?? 0
             let sidStr = r["sid"] ?? ""
-            let node = SidebarNode(id: "s\(sidStr)", name: sname, count: n, unread: unread,
-                                   isFolder: false, filterKey: "source_id=\(sidStr)",
-                                   sourceId: sid, folderId: fid, children: nil)
-            if folderMap[fid] == nil {
-                folderMap[fid] = (fname, [])
-                folderOrder.append(fid)
+            if let fidStr = r["fid"], let fid = Int64(fidStr) {
+                let node = SidebarNode(id: "s\(sidStr)", name: sname, count: n, unread: unread,
+                                       isFolder: false, filterKey: "source_id=\(sidStr)",
+                                       sourceId: sid, folderId: fid, children: nil)
+                if folderMap[fid] == nil {
+                    folderMap[fid] = (r["fname"] ?? "未命名", [])
+                    folderOrder.append(fid)
+                }
+                folderMap[fid]?.sources.append(node)
+            } else {
+                orphanNodes.append(SidebarNode(
+                    id: "s\(sidStr)", name: sname, count: n, unread: unread,
+                    isFolder: false, filterKey: "source_id=\(sidStr)",
+                    sourceId: sid, folderId: nil, children: nil))
             }
-            folderMap[fid]?.sources.append(node)
         }
         for fid in folderOrder {
             guard let (fname, sources) = folderMap[fid] else { continue }
@@ -677,40 +732,33 @@ public final class Database: @unchecked Sendable {
                                     isFolder: true, filterKey: "folder_id=\(fid)",
                                     sourceId: nil, folderId: fid, children: sources))
         }
-        // 独立源（无文件夹）
-        for r in orphanRows {
-            let sname = r["sname"] ?? "未命名源"
-            let n = Int(r["n"] ?? "0") ?? 0
-            let unread = Int(r["unread"] ?? "0") ?? 0
-            let sid = Int64(r["sid"] ?? "0") ?? 0
-            let sidStr = r["sid"] ?? ""
-            tree.append(SidebarNode(id: "s\(sidStr)", name: sname, count: n, unread: unread,
-                                    isFolder: false, filterKey: "source_id=\(sidStr)",
-                                    sourceId: sid, folderId: nil, children: nil))
-        }
+        tree.append(contentsOf: orphanNodes)
         return tree
     }
 
     /// 拉取内容列表（轻列，不取正文 content_md/llm_translated_md/meta —— 正文点开再按 id 查）
     /// 可按 source/stype、sourceId、folderId 过滤 + 评分/未读/星标/标签/关键词/处理状态筛选
     func fetchContents(source: String? = nil, sourceId: Int64? = nil, folderId: Int64? = nil,
-                       minScore: Int? = nil, includeUnscored: Bool = false,
+                       minScore: Int? = nil, maxScore: Int? = nil,
+                       includeUnscored: Bool = false,
                        unreadOnly: Bool = false, exportedOnly: Bool = false,
                        keyword: String? = nil, starredOnly: Bool = false,
                        tagId: Int64? = nil,
                        processedFilters: [String: Int] = [:],
+                       contentCategory: String? = nil,
+                       restrictToContentIds: Set<Int64>? = nil,
                        sortOrder: String = "newest",
                        limit: Int = 200, offset: Int = 0) -> [ContentItem] {
         guard open() else { return [] }
         let useFTS = (keyword?.isEmpty == false) && ftsAvailable()
-        // 轻列：列表渲染够用，不扛正文。列序固定见 rowToListItem
-        // content_html 只用于抽首图（缩略图），不进 ContentItem.contentMd
+        // 轻列：列表渲染够用，不扛正文、HTML、译文或 meta。首图已经在入库时缓存到
+        // first_image_url，避免每次列表刷新搬运数 MB HTML 再逐条跑正则。
         var sql: String
         if useFTS {
             sql = """
             SELECT c.id, c.ctype, c.source, c.title, c.author, c.url, c.language, c.published_at,
                    c.excerpt, c.llm_score, c.llm_summary, c.fetch_status, c.read_at, c.starred,
-                   c.content_html,
+                   c.first_image_url,
                    (c.llm_translated_md IS NOT NULL AND c.llm_translated_md != '') AS has_trans,
                    (c.llm_transcript_md IS NOT NULL AND c.llm_transcript_md != '') AS has_transcript,
                    (c.ctype IN ('podcast','video','youtube') OR c.meta LIKE '%audio_url%') AS is_media,
@@ -718,43 +766,67 @@ public final class Database: @unchecked Sendable {
                    c.llm_title_translated AS title_translated,
                    (c.content_md IS NOT NULL AND LENGTH(c.content_md) > 500) AS has_fulltext,
                    (c.llm_excerpt_translated IS NOT NULL AND c.llm_excerpt_translated != '') AS has_excerpt_trans,
-                   (EXISTS (SELECT 1 FROM export_record er WHERE er.content_id = c.id AND er.status = 'delivered')) AS has_export
-            FROM content c JOIN content_fts f ON f.rowid = c.id
+                   (EXISTS (SELECT 1 FROM export_record er WHERE er.content_id = c.id AND er.status = 'delivered')) AS has_export,
+                   c.source_id, COALESCE(s.name, c.source) AS source_name
+            FROM content c
+            JOIN content_fts f ON f.rowid = c.id
+            LEFT JOIN content_source s ON s.id = c.source_id
             """
         } else {
             sql = """
-            SELECT id, ctype, source, title, author, url, language, published_at,
-                   excerpt, llm_score, llm_summary, fetch_status, read_at, starred,
-                   content_html,
-                   (llm_translated_md IS NOT NULL AND llm_translated_md != '') AS has_trans,
-                   (llm_transcript_md IS NOT NULL AND llm_transcript_md != '') AS has_transcript,
-                   (ctype IN ('podcast','video','youtube') OR meta LIKE '%audio_url%') AS is_media,
-                   substr(llm_translated_md, 1, 120) AS translated_head,
-                   llm_title_translated AS title_translated,
-                   (content_md IS NOT NULL AND LENGTH(content_md) > 500) AS has_fulltext,
-                   (llm_excerpt_translated IS NOT NULL AND llm_excerpt_translated != '') AS has_excerpt_trans,
-                   (EXISTS (SELECT 1 FROM export_record er WHERE er.content_id = content.id AND er.status = 'delivered')) AS has_export
-            FROM content
+            SELECT c.id, c.ctype, c.source, c.title, c.author, c.url, c.language, c.published_at,
+                   c.excerpt, c.llm_score, c.llm_summary, c.fetch_status, c.read_at, c.starred,
+                   c.first_image_url,
+                   (c.llm_translated_md IS NOT NULL AND c.llm_translated_md != '') AS has_trans,
+                   (c.llm_transcript_md IS NOT NULL AND c.llm_transcript_md != '') AS has_transcript,
+                   (c.ctype IN ('podcast','video','youtube') OR c.meta LIKE '%audio_url%') AS is_media,
+                   substr(c.llm_translated_md, 1, 120) AS translated_head,
+                   c.llm_title_translated AS title_translated,
+                   (c.content_md IS NOT NULL AND LENGTH(c.content_md) > 500) AS has_fulltext,
+                   (c.llm_excerpt_translated IS NOT NULL AND c.llm_excerpt_translated != '') AS has_excerpt_trans,
+                   (EXISTS (SELECT 1 FROM export_record er WHERE er.content_id = c.id AND er.status = 'delivered')) AS has_export,
+                   c.source_id, COALESCE(s.name, c.source) AS source_name
+            FROM content c
+            LEFT JOIN content_source s ON s.id = c.source_id
             """
         }
         var conds: [String] = []
         // 排除重复项——is_duplicate=1 的是同内容的副本，不该在列表里重复显示。
         // 与 totalCount/文件夹计数口径对齐（三处都排除重复和软删除），计数才相符。
-        conds.append(useFTS ? "c.is_duplicate = 0" : "is_duplicate = 0")
+        conds.append("c.is_duplicate = 0")
         // 排除已删除（软删除 guid 留底防重抓，列表不显示）
-        conds.append(useFTS ? "c.deleted_at IS NULL" : "deleted_at IS NULL")
-        let col = useFTS ? "c." : ""
+        conds.append("c.deleted_at IS NULL")
+        let col = "c."
         if source != nil { conds.append("\(col)source = ?") }
         if sourceId != nil { conds.append("\(col)source_id = ?") }
         if folderId != nil {
             conds.append("\(col)source_id IN (SELECT id FROM content_source WHERE folder_id = ?)")
         }
-        if minScore != nil {
-            // 含未评分：未评分（NULL）也纳入，避免筛选把未评分文章藏掉
-            conds.append(includeUnscored ? "(\(col)llm_score >= ? OR \(col)llm_score IS NULL)" : "\(col)llm_score >= ?")
+        if minScore != nil || maxScore != nil {
+            var scoreRange: [String] = []
+            if minScore != nil { scoreRange.append("\(col)llm_score >= ?") }
+            if maxScore != nil { scoreRange.append("\(col)llm_score <= ?") }
+            let range = scoreRange.joined(separator: " AND ")
+            // 含未评分：未评分（NULL）也纳入，避免筛选把未评分文章藏掉。
+            conds.append(includeUnscored ? "((\(range)) OR \(col)llm_score IS NULL)" : "(\(range))")
         }
         if unreadOnly { conds.append("\(col)read_at IS NULL") }
         if exportedOnly { conds.append("\(col)id IN (SELECT content_id FROM export_record WHERE status='delivered')") }
+        if let category = contentCategory {
+            switch category {
+            case "podcast": conds.append("\(col)ctype='podcast'")
+            case "video": conds.append("\(col)ctype IN ('video','youtube')")
+            case "article": conds.append("\(col)ctype NOT IN ('podcast','video','youtube')")
+            default: break
+            }
+        }
+        if let ids = restrictToContentIds {
+            if ids.isEmpty {
+                conds.append("0")
+            } else {
+                conds.append("\(col)id IN (\(ids.sorted().map(String.init).joined(separator: ",")))")
+            }
+        }
         if starredOnly { conds.append("\(col)starred = 1") }
         if tagId != nil {
             conds.append("\(col)id IN (SELECT content_id FROM content_tag WHERE tag_id = ?)")
@@ -787,7 +859,7 @@ public final class Database: @unchecked Sendable {
 
         var stmt: OpaquePointer?
         var items: [ContentItem] = []
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(listDB ?? db, sql, -1, &stmt, nil) == SQLITE_OK {
             var idx: Int32 = 1
             let binder: (String) -> Void = { s in
                 sqlite3_bind_text(stmt, idx, s, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)); idx += 1
@@ -796,6 +868,7 @@ public final class Database: @unchecked Sendable {
             if let sid = sourceId { sqlite3_bind_int64(stmt, idx, sid); idx += 1 }
             if let fid = folderId { sqlite3_bind_int64(stmt, idx, fid); idx += 1 }
             if let m = minScore { sqlite3_bind_int64(stmt, idx, Int64(m)); idx += 1 }
+            if let m = maxScore { sqlite3_bind_int64(stmt, idx, Int64(m)); idx += 1 }
             if let t = tagId { sqlite3_bind_int64(stmt, idx, t); idx += 1 }
             if useFTS {
                 binder(ftsQuery(keyword!))
@@ -817,12 +890,49 @@ public final class Database: @unchecked Sendable {
     /// 供手动 AI 按钮做开关判定：手动触发也尊重源级配置（用户关掉 AI 评分就是不想被评分）。
     func effectivePolicyFor(contentId: Int64) -> PipelinePolicy {
         // 管线纯按源处理——只读源自己的 config，不看文件夹
-        guard let row = queryRows("""
+        // 与 fetchSidebarTree 同属后台统计，不能占住中栏分页专用连接。
+        guard open(), let row = queryRows(on: db, """
             SELECT s.config AS src_cfg FROM content c
             JOIN content_source s ON c.source_id = s.id
             WHERE c.id = ?;
             """, params: [contentId]).first else { return PipelinePolicy() }
         return PipelinePolicy.from(configJson: row["src_cfg"] ?? "{}")
+    }
+
+    /// 阅读器一次性轻载：独立连接、单条 SQL，不取 content_html。
+    /// 这替代旧的“后台查一次并丢弃 + onAppear 主线程再查两次”。
+    func fetchReaderPayload(id: Int64) -> ReaderPayload? {
+        guard open(), let handle = readerDB else { return nil }
+        let sql = """
+        SELECT c.content_md, c.llm_translated_md, c.meta, c.llm_title_translated,
+               c.llm_transcript_md, c.llm_score, c.llm_summary, s.config
+        FROM content c
+        LEFT JOIN content_source s ON s.id = c.source_id
+        WHERE c.id = ?;
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, id)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        func text(_ index: Int32) -> String? {
+            guard let pointer = sqlite3_column_text(stmt, index) else { return nil }
+            return String(cString: pointer)
+        }
+        var audioUrl: String?
+        var videoId: String?
+        if let meta = text(2), let data = meta.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            audioUrl = (object["audio_url"] as? String) ?? (object["video_url"] as? String)
+            videoId = object["video_id"] as? String
+        }
+        let score = sqlite3_column_type(stmt, 5) == SQLITE_NULL
+            ? nil : Int(sqlite3_column_int(stmt, 5))
+        return ReaderPayload(
+            contentMd: text(0), llmTranslatedMd: text(1), audioUrl: audioUrl,
+            titleTranslated: text(3), llmTranscriptMd: text(4), videoId: videoId,
+            score: score, summary: text(6),
+            policy: PipelinePolicy.from(configJson: text(7) ?? "{}"))
     }
 
     /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl, contentHtml, titleTranslated, llmTranscriptMd, videoId)
@@ -835,7 +945,8 @@ public final class Database: @unchecked Sendable {
         var stmt: OpaquePointer?
         var result: (String?, String?, String?, String?, String?, String?, String?)?
         let _tPrep = Date()
-        let prepOK = sqlite3_prepare_v2(db, "SELECT content_md, llm_translated_md, meta, content_html, llm_title_translated, llm_transcript_md FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK
+        let handle = readerDB ?? db
+        let prepOK = sqlite3_prepare_v2(handle, "SELECT content_md, llm_translated_md, meta, content_html, llm_title_translated, llm_transcript_md FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK
         let prepMs = Int(Date().timeIntervalSince(_tPrep) * 1000)
         if prepOK {
             sqlite3_bind_int64(stmt, 1, id)
@@ -871,7 +982,7 @@ public final class Database: @unchecked Sendable {
         guard open() else { return nil }
         var stmt: OpaquePointer?
         var result: (Int?, String?)?
-        if sqlite3_prepare_v2(db, "SELECT llm_score, llm_summary FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(readerDB ?? db, "SELECT llm_score, llm_summary FROM content WHERE id = ?", -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_int64(stmt, 1, id)
             if sqlite3_step(stmt) == SQLITE_ROW {
                 let score = sqlite3_column_type(stmt, 0) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, 0))
@@ -943,19 +1054,38 @@ public final class Database: @unchecked Sendable {
     /// 筛选参数及其语义必须与 fetchContents 对齐，避免星标/处理状态视图误伤隐藏文章。
     @discardableResult
     func markAllRead(source: String? = nil, sourceId: Int64? = nil, folderId: Int64? = nil,
-                     minScore: Int? = nil, includeUnscored: Bool = false,
+                     minScore: Int? = nil, maxScore: Int? = nil,
+                     includeUnscored: Bool = false,
                      keyword: String? = nil, starredOnly: Bool = false,
                      tagId: Int64? = nil,
-                     processedFilters: [String: Int] = [:]) -> Int {
+                     processedFilters: [String: Int] = [:],
+                     contentCategory: String? = nil,
+                     restrictToContentIds: Set<Int64>? = nil) -> Int {
         var sql = "UPDATE content SET read_at = datetime('now') WHERE read_at IS NULL AND is_duplicate = 0 AND deleted_at IS NULL"
         var conds: [String] = []
         if source != nil { conds.append("source = ?") }
         if sourceId != nil { conds.append("source_id = ?") }
         if folderId != nil { conds.append("source_id IN (SELECT id FROM content_source WHERE folder_id = ?)") }
-        if minScore != nil {
-            conds.append(includeUnscored ? "(llm_score >= ? OR llm_score IS NULL)" : "llm_score >= ?")
+        if minScore != nil || maxScore != nil {
+            var scoreRange: [String] = []
+            if minScore != nil { scoreRange.append("llm_score >= ?") }
+            if maxScore != nil { scoreRange.append("llm_score <= ?") }
+            let range = scoreRange.joined(separator: " AND ")
+            conds.append(includeUnscored ? "((\(range)) OR llm_score IS NULL)" : "(\(range))")
         }
         if starredOnly { conds.append("starred = 1") }
+        if let category = contentCategory {
+            switch category {
+            case "podcast": conds.append("ctype='podcast'")
+            case "video": conds.append("ctype IN ('video','youtube')")
+            case "article": conds.append("ctype NOT IN ('podcast','video','youtube')")
+            default: break
+            }
+        }
+        if let ids = restrictToContentIds {
+            if ids.isEmpty { conds.append("0") }
+            else { conds.append("id IN (\(ids.sorted().map(String.init).joined(separator: ",")))") }
+        }
         if tagId != nil { conds.append("id IN (SELECT content_id FROM content_tag WHERE tag_id = ?)") }
         if let processedCondition = processedFilterCondition(processedFilters, columnPrefix: "") {
             conds.append(processedCondition)
@@ -968,19 +1098,20 @@ public final class Database: @unchecked Sendable {
         }
         if !conds.isEmpty { sql += " AND " + conds.joined(separator: " AND ") }
         execute(sql, params: buildMarkParams(source: source, sourceId: sourceId, folderId: folderId,
-                                             minScore: minScore, tagId: tagId,
+                                             minScore: minScore, maxScore: maxScore, tagId: tagId,
                                              keyword: keyword, useFTS: useFTS))
         return writeChanges()
     }
 
     private func buildMarkParams(source: String?, sourceId: Int64?, folderId: Int64?,
-                                 minScore: Int?, tagId: Int64?,
+                                 minScore: Int?, maxScore: Int?, tagId: Int64?,
                                  keyword: String?, useFTS: Bool) -> [Any?] {
         var params: [Any?] = []
         if let s = source { params.append(s) }
         if let sid = sourceId { params.append(Int(sid)) }
         if let fid = folderId { params.append(Int(fid)) }
         if let m = minScore { params.append(m) }
+        if let m = maxScore { params.append(m) }
         if let tid = tagId { params.append(Int(tid)) }
         if useFTS, let kw = keyword {
             params.append(ftsQuery(kw))
@@ -996,6 +1127,10 @@ public final class Database: @unchecked Sendable {
         var orConds: [String] = []
         for (key, state) in processedFilters where state != 0 {
             switch key {
+            case "fulltext":
+                orConds.append(state == 1
+                    ? "LENGTH(TRIM(COALESCE(\(col)content_md,''))) > 500"
+                    : "LENGTH(TRIM(COALESCE(\(col)content_md,''))) <= 500")
             case "score":
                 orConds.append(state == 1 ? "\(col)llm_score IS NOT NULL"
                                           : "\(col)llm_score IS NULL")
@@ -1048,6 +1183,36 @@ public final class Database: @unchecked Sendable {
         return n
     }
 
+    /// 左栏全局与内容类型计数一次完成，避免 total/unread/type 分别扫描大表。
+    func libraryCounts() -> LibraryCounts {
+        guard let row = queryRows("""
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread,
+                   SUM(CASE WHEN ctype NOT IN ('podcast','video','youtube') THEN 1 ELSE 0 END) AS articles,
+                   SUM(CASE WHEN ctype NOT IN ('podcast','video','youtube') AND read_at IS NULL THEN 1 ELSE 0 END) AS article_unread,
+                   SUM(CASE WHEN ctype='podcast' THEN 1 ELSE 0 END) AS podcasts,
+                   SUM(CASE WHEN ctype='podcast' AND read_at IS NULL THEN 1 ELSE 0 END) AS podcast_unread,
+                   SUM(CASE WHEN ctype IN ('video','youtube') THEN 1 ELSE 0 END) AS videos,
+                   SUM(CASE WHEN ctype IN ('video','youtube') AND read_at IS NULL THEN 1 ELSE 0 END) AS video_unread,
+                   (SELECT COUNT(DISTINCT er.content_id)
+                    FROM export_record er JOIN content ec ON ec.id=er.content_id
+                    WHERE er.status='delivered' AND ec.is_duplicate=0 AND ec.deleted_at IS NULL) AS exported,
+                   (SELECT COUNT(DISTINCT er.content_id)
+                    FROM export_record er JOIN content ec ON ec.id=er.content_id
+                    WHERE er.status='delivered' AND ec.is_duplicate=0
+                      AND ec.deleted_at IS NULL AND ec.read_at IS NULL) AS exported_unread
+            FROM content
+            WHERE is_duplicate=0 AND deleted_at IS NULL;
+            """).first else { return LibraryCounts() }
+        func value(_ key: String) -> Int { Int(row[key] ?? "0") ?? 0 }
+        return LibraryCounts(
+            total: value("total"), unread: value("unread"), exported: value("exported"),
+            exportedUnread: value("exported_unread"),
+            articles: value("articles"), articleUnread: value("article_unread"),
+            podcasts: value("podcasts"), podcastUnread: value("podcast_unread"),
+            videos: value("videos"), videoUnread: value("video_unread"))
+    }
+
     // MARK: 辅助
 
     /// 轻列列表行 → ContentItem（正文/audioUrl 留空，点开时 fetchContentBody 补）
@@ -1080,10 +1245,8 @@ public final class Database: @unchecked Sendable {
             readAt: text(12),
             starred: sqlite3_column_int(stmt, 13) == 1
         )
-        // 抽首图（列 14 content_html，可能不存在——旧查询无此列时容错）
-        if sqlite3_column_count(stmt) > 14, let html = text(14) {
-            item.imageUrl = Self.firstImageUrl(in: html)
-        }
+        // 首图已经在 first_image_url 缓存列中，不再把完整 HTML 带进列表查询。
+        if sqlite3_column_count(stmt) > 14 { item.imageUrl = text(14) }
         // 列表标签轻量标记（列 15 has_trans / 16 has_transcript / 17 is_media / 18 translated_head / 19 title_translated / 20 has_fulltext / 21 has_excerpt_trans）
         if sqlite3_column_count(stmt) > 16 {
             item.hasTranslation = sqlite3_column_int(stmt, 15) == 1
@@ -1103,6 +1266,12 @@ public final class Database: @unchecked Sendable {
         }
         if sqlite3_column_count(stmt) > 22 {
             item.hasExport = sqlite3_column_int(stmt, 22) == 1
+        }
+        if sqlite3_column_count(stmt) > 23 {
+            item.feedId = int64(23)
+        }
+        if sqlite3_column_count(stmt) > 24 {
+            item.sourceName = text(24)
         }
         return item
     }

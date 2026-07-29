@@ -26,7 +26,7 @@ public struct PipelinePolicy: Hashable, Sendable {
     }
 }
 
-public struct FeedSource: Identifiable, Hashable {
+public struct FeedSource: Identifiable, Hashable, Sendable {
     public let id: Int64
     let stype: String          // rss / podcast / youtube / wechat
     let name: String
@@ -119,6 +119,11 @@ public final class SourceStore: ObservableObject {
     enum SyncError: LocalizedError {
         case alreadyRunning
         var errorDescription: String? { "已有抓取任务正在运行" }
+    }
+
+    struct SourceRetryResult: Sendable {
+        let success: Bool
+        let message: String
     }
 
     // MARK: 自动抓取调度
@@ -216,8 +221,7 @@ public final class SourceStore: ObservableObject {
     /// 文件夹级批量设置管线开关：把该值写入组内每个源的 config（不写 folder.config）。
     /// 设计：文件夹的值没有意义，实际处理只按单个源——文件夹选项仅作批量设置入口 + 打钩显示组内一致性。
     func setFolderPolicy(id: Int64, key: String, value: Bool) {
-        let col = ["auto_score":"auto_score","auto_translate":"auto_translate",
-                   "auto_summarize":"auto_summarize","auto_transcribe":"auto_transcribe"][key] ?? key
+        guard let column = pipelineColumn(for: key) else { return }
         var sids: [Int64] = []
         for src in sources(inFolder: id) {
             sids.append(src.id)
@@ -229,10 +233,11 @@ public final class SourceStore: ObservableObject {
                 db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, src.id])
             }
         }
-        // 关→开：不碰 per-item；开→关：文件夹内所有源的条目一次批量置零
-        if !value, !sids.isEmpty {
+        // 与单源入口一致：开关变化后，当前已有条目先统一冻结为 0。
+        // 只有用户随后明确选择“处理所有历史”时才会批量改成 1。
+        if !sids.isEmpty {
             let placeholders = sids.map { _ in "?" }.joined(separator: ",")
-            db.execute("UPDATE content SET \(col)=0 WHERE source_id IN (\(placeholders)) AND \(col) IS NOT 0",
+            db.execute("UPDATE content SET \(column)=0 WHERE source_id IN (\(placeholders)) AND \(column) IS NOT 0",
                        params: sids)
         }
         reload()
@@ -536,10 +541,62 @@ public final class SourceStore: ObservableObject {
         reload()
     }
 
-    func removeSource(id: Int64) {
-        // 只删除订阅关系；历史内容由 ON DELETE SET NULL 保留，仍可在“全部”中阅读和搜索。
-        db.execute("DELETE FROM content_source WHERE id = ?", params: [id])
+    /// 永久删除订阅源及其全部内容。
+    /// 大批内容删除放到后台写队列，避免确认后主界面冻结；返回实际删除的内容数。
+    @discardableResult
+    func removeSource(id: Int64) async -> Int {
+        let deleted = await Task.detached(priority: .userInitiated) {
+            Self.hardDeleteSource(id: id)
+        }.value
         reload()
+        PipelineWorker.shared.requestPendingRefresh()
+        NotificationCenter.default.post(name: .contentUpdated, object: nil)
+        return deleted
+    }
+
+    /// 删除主内容前修复跨源去重指针：若其他源的副本指向即将删除的原件，提升一个副本为原件，
+    /// 其余副本改指向它。export_record 从 v24 起没有 content 外键，必须显式清理。
+    nonisolated private static func hardDeleteSource(id sourceId: Int64) -> Int {
+        let db = Database.shared
+        var deletedContents = 0
+        let committed = db.transaction {
+            let originals = db.queryRows("""
+                SELECT id FROM content
+                WHERE source_id = ? AND is_duplicate = 0;
+                """, params: [sourceId]).compactMap { Int64($0["id"] ?? "") }
+
+            for originalId in originals {
+                let replacement = db.queryRows("""
+                    SELECT id FROM content
+                    WHERE duplicate_of = ?
+                      AND (source_id IS NULL OR source_id <> ?)
+                    ORDER BY (deleted_at IS NULL) DESC, id ASC
+                    LIMIT 1;
+                    """, params: [originalId, sourceId]).first
+                    .flatMap { Int64($0["id"] ?? "") }
+                guard let replacement else { continue }
+                guard db.execute("""
+                    UPDATE content SET is_duplicate = 0, duplicate_of = NULL
+                    WHERE id = ?;
+                    """, params: [replacement]) else { return false }
+                guard db.execute("""
+                    UPDATE content SET duplicate_of = ?
+                    WHERE duplicate_of = ? AND id <> ?
+                      AND (source_id IS NULL OR source_id <> ?);
+                    """, params: [replacement, originalId, replacement, sourceId]) else { return false }
+            }
+
+            guard db.execute("""
+                DELETE FROM export_record
+                WHERE content_id IN (SELECT id FROM content WHERE source_id = ?);
+                """, params: [sourceId]) else { return false }
+            guard db.execute("DELETE FROM content WHERE source_id = ?", params: [sourceId]) else {
+                return false
+            }
+            deletedContents = db.writeChanges()
+            return db.execute("DELETE FROM content_source WHERE id = ?", params: [sourceId])
+        }
+        return committed ? deletedContents : 0
     }
 
     func setEnabled(id: Int64, enabled: Bool) {
@@ -549,20 +606,59 @@ public final class SourceStore: ObservableObject {
 
     // MARK: 管线开关
 
+    /// 把 UI/配置使用的管线 key 映射到 content 的条目级开关列。
+    /// 列名只能来自这张白名单，禁止把外部字符串直接拼进 SQL。
+    private func pipelineColumn(for key: String) -> String? {
+        switch key {
+        case "auto_score": return "auto_score"
+        case "auto_translate": return "auto_translate"
+        case "auto_summarize": return "auto_summarize"
+        case "auto_transcribe": return "auto_transcribe"
+        default: return nil
+        }
+    }
+
+    /// 用户明确选择“处理所有历史内容”时调用。
+    /// 开启只覆盖仍在内容库中的非重复历史条目；软删除和重复内容不能重新进入 Worker。
+    @discardableResult
+    func setHistoricalItemsEnabled(sourceId: Int64, key: String) -> Bool {
+        guard let column = pipelineColumn(for: key) else { return false }
+        return db.execute("""
+            UPDATE content SET \(column) = 1
+            WHERE source_id = ? AND deleted_at IS NULL AND is_duplicate = 0;
+            """, params: [sourceId])
+    }
+
+    /// 文件夹入口与单源入口使用完全相同的历史回填语义。
+    @discardableResult
+    func setHistoricalItemsEnabled(folderId: Int64, key: String) -> Bool {
+        guard let column = pipelineColumn(for: key) else { return false }
+        return db.execute("""
+            UPDATE content SET \(column) = 1
+            WHERE source_id IN (SELECT id FROM content_source WHERE folder_id = ?)
+              AND deleted_at IS NULL AND is_duplicate = 0;
+            """, params: [folderId])
+    }
+
     /// 切换某条管线开关，合并写回 config JSON
     func setPolicy(id: Int64, key: String, value: Bool) {
+        guard let column = pipelineColumn(for: key) else { return }
         let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
         var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
         obj[key] = value
         if let data = try? JSONSerialization.data(withJSONObject: obj),
-           let str = String(data: data, encoding: .utf8) {
-            db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id])
-        }
-        // 关→开：不碰 per-item 字段，由 UI 弹窗决定；开→关：该源所有条目立刻置 0
-        if !value {
-            let col = ["auto_score":"auto_score","auto_translate":"auto_translate",
-                       "auto_summarize":"auto_summarize","auto_transcribe":"auto_transcribe"][key] ?? key
-            db.execute("UPDATE content SET \(col)=0 WHERE source_id=? AND \(col) IS NOT 0", params: [id])
+               let str = String(data: data, encoding: .utf8) {
+            _ = db.transaction {
+                guard db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id]) else {
+                    return false
+                }
+                // 开启时先把“开启瞬间已经存在”的条目冻结为 0：
+                // - 选择“只处理新增”时不再需要第二次写库；
+                // - 选择“处理历史”时，弹窗确认后再显式改成 1；
+                // - 此后新入库条目仍会继承源 config 中的 1。
+                return db.execute("UPDATE content SET \(column)=0 WHERE source_id=? AND \(column) IS NOT 0",
+                                  params: [id])
+            }
         }
         reload()
     }
@@ -614,22 +710,55 @@ public final class SourceStore: ObservableObject {
         return try await syncOneUnlocked(src)
     }
 
+    /// 数据看板的问题源重试入口：成功时清除旧错误，失败时把本次错误写回源健康状态。
+    func retrySource(id: Int64) async -> SourceRetryResult {
+        guard let source = sources.first(where: { $0.id == id }) else {
+            return SourceRetryResult(success: false, message: "订阅源已不存在")
+        }
+        guard !isSyncing else {
+            return SourceRetryResult(success: false, message: "已有源更新任务正在运行")
+        }
+        do {
+            let added = try await syncOne(source)
+            let message = "\(source.name)：更新成功，新增 \(added) 条"
+            lastSyncMessage = message
+            reload()
+            return SourceRetryResult(success: true, message: message)
+        } catch {
+            let message = error.localizedDescription
+            db.execute("UPDATE content_source SET error = ? WHERE id = ?", params: [message, id])
+            lastSyncMessage = "\(source.name)：更新失败"
+            reload()
+            return SourceRetryResult(success: false, message: message)
+        }
+    }
+
     /// 已持有 isSyncing 锁时执行实际抓取；只允许 syncAll/syncOne 调用。
     private func syncOneUnlocked(_ src: FeedSource) async throws -> Int {
         let feed = try await FeedFetcher.fetch(urlString: src.identifier)
         // 频道级语言可安全回填该源的历史空值；单条 entry 的语言在 upsertContent 中优先处理。
         if let feedLanguage = ContentLanguage.normalize(feed.language) {
-            db.execute("""
-                UPDATE content SET language = ?
-                WHERE source_id = ? AND (language IS NULL OR TRIM(language) = '');
-                """, params: [feedLanguage, src.id])
+            let sourceId = src.id
+            _ = await Task.detached(priority: .utility) {
+                Database.shared.execute("""
+                    UPDATE content SET language = ?
+                    WHERE source_id = ? AND (language IS NULL OR TRIM(language) = '');
+                    """, params: [feedLanguage, sourceId])
+            }.value
         }
         var added = 0
         for entry in feed.entries {
-            if let newId = upsertContent(source: src.stype, sourceId: src.id, entry: entry, pipeline: src.policy) {
+            let source = src.stype
+            let sourceId = src.id
+            let pipeline = src.policy
+            let newId = await Task.detached(priority: .utility) {
+                Self.upsertContent(source: source, sourceId: sourceId,
+                                   entry: entry, pipeline: pipeline)
+            }.value
+            if let newId {
                 added += 1
                 // 新文章: 按源的 fetch_mode 立即抓全文（播客跳过——无正文，YouTube 需要 defuddle 抓原文）
-                if entry.meta["audio_url"] == nil {
+                if entry.meta["audio_url"] == nil && entry.meta["video_url"] == nil {
                     await FullTextFetcher.shared.fetchAndStore(
                         contentId: newId, url: entry.url,
                         feedHtml: entry.html.isEmpty ? nil : entry.html,
@@ -643,8 +772,12 @@ public final class SourceStore: ObservableObject {
                 await ExportService.shared.runPending(trigger: "ready", contentId: newId)
             }
         }
-        db.execute("UPDATE content_source SET last_fetched_at = datetime('now'), error = NULL WHERE id = ?",
-                   params: [src.id])
+        let sourceId = src.id
+        _ = await Task.detached(priority: .utility) {
+            Database.shared.execute(
+                "UPDATE content_source SET last_fetched_at = datetime('now'), error = NULL WHERE id = ?",
+                params: [sourceId])
+        }.value
         return added
     }
 
@@ -694,20 +827,19 @@ public final class SourceStore: ObservableObject {
 
     /// 把一条 feed entry 写进 content（按 source+guid 去重 + 跨源内容去重），返回新插入的 content id（已存在返回 nil）
     /// R3: 判重+插入包进事务——Timer 调度与手动同步并发时，原来的"先 SELECT 再 INSERT"两条语句间存在竞态会重复插入。
-    private func upsertContent(source: String, sourceId: Int64, entry: ParsedEntry, pipeline: PipelinePolicy = PipelinePolicy()) -> Int64? {
-        let ctype: String
-        if entry.meta["video_id"] != nil { ctype = "video" }
-        else if entry.meta["audio_url"] != nil { ctype = "podcast" }
-        else { ctype = "article" }
+    nonisolated private static func upsertContent(source: String, sourceId: Int64, entry: ParsedEntry,
+                                                  pipeline: PipelinePolicy = PipelinePolicy()) -> Int64? {
+        let db = Database.shared
+        let ctype = contentType(source: source, meta: entry.meta)
 
         // ── 跨源内容去重：url 规范化(去追踪参数) + 标题归一化 → content_hash ──
-        let normUrl = Self.normalizeUrl(entry.url)
-        let normTitle = Self.normalizeTitle(entry.title)
-        let hash = Self.contentHash(url: normUrl, title: normTitle)
+        let normUrl = normalizeUrl(entry.url)
+        let normTitle = normalizeTitle(entry.title)
+        let hash = contentHash(url: normUrl, title: normTitle)
         let published = entry.published.map { ISO8601DateFormatter().string(from: $0) }
         let language: String? = {
             if let declared = ContentLanguage.normalize(entry.language) { return declared }
-            let sample = entry.title + "\n" + Self.stripHtml(entry.html)
+            let sample = entry.title + "\n" + stripHtml(entry.html)
             return ContentLanguage.looksChinese(sample) ? "zh" : nil
         }()
         let metaJson = (try? JSONSerialization.data(withJSONObject: entry.meta))
@@ -717,41 +849,55 @@ public final class SourceStore: ObservableObject {
         // 事务内完成"查重 + 判 dup + 插入"，并发下不会出现两条重复主记录
         let committed = db.transaction {
             // 同源同 guid 已存在则跳过
-            if let existingId = self.db.scalarInt("SELECT id FROM content WHERE source = ? AND guid = ?",
-                                                   params: [source, entry.guid]) {
-                if let language {
-                    self.db.execute("""
-                        UPDATE content SET language = ?
-                        WHERE id = ? AND (language IS NULL OR TRIM(language) = '');
-                        """, params: [language, existingId])
+            if let existing = db.queryRows(
+                "SELECT id, meta FROM content WHERE source = ? AND guid = ? LIMIT 1",
+                params: [source, entry.guid]).first,
+               let existingId = Int64(existing["id"] ?? "") {
+                var mergedMeta = (existing["meta"]?.data(using: .utf8))
+                    .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] } ?? [:]
+                for (key, value) in entry.meta { mergedMeta[key] = value }
+                let mergedMetaJson = (try? JSONSerialization.data(withJSONObject: mergedMeta))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? metaJson
+                guard db.execute("""
+                    UPDATE content
+                    SET source_id = ?, ctype = ?, meta = ?,
+                        language = CASE
+                            WHEN language IS NULL OR TRIM(language) = '' THEN ?
+                            ELSE language
+                        END,
+                        updated_at = datetime('now')
+                    WHERE id = ?;
+                    """, params: [sourceId, ctype, mergedMetaJson, language, existingId]) else {
+                    return false
                 }
                 return true   // 已存在，提交空事务返回 nil
             }
             var isDup = 0
             var dupOf: Int64? = nil
-            if let existingId = self.db.scalarInt("SELECT id FROM content WHERE content_hash = ? AND is_duplicate = 0 LIMIT 1",
-                                                  params: [hash]) {
+            if let existingId = db.scalarInt("SELECT id FROM content WHERE content_hash = ? AND is_duplicate = 0 LIMIT 1",
+                                             params: [hash]) {
                 isDup = 1
                 dupOf = Int64(existingId)
             }
             // 播客/视频：简介(entry.html)剥标签写进 excerpt——播客的「摘要」存摘要字段，
             // content_html 之后可随统一规则删除（文章 content_html 是全文原料另行处理）
             let excerptForInsert: String? = (ctype == "podcast" || ctype == "video")
-                ? Self.stripHtml(entry.html) : nil
-            let ok = self.db.execute(
+                ? stripHtml(entry.html) : nil
+            let ok = db.execute(
                 """
-                INSERT INTO content (ctype, guid, source, source_id, title, author, url, language, published_at, content_html, excerpt, fetch_status, meta, content_hash, is_duplicate, duplicate_of, auto_score, auto_translate, auto_summarize, auto_transcribe)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)
+                INSERT INTO content (ctype, guid, source, source_id, title, author, url, language, published_at, content_html, first_image_url, excerpt, fetch_status, meta, content_hash, is_duplicate, duplicate_of, auto_score, auto_translate, auto_summarize, auto_transcribe)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)
                 """,
                 params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url,
-                         language, published, entry.html, excerptForInsert, metaJson, hash, isDup,
+                         language, published, entry.html, Database.firstImageUrl(in: entry.html),
+                         excerptForInsert, metaJson, hash, isDup,
                          dupOf.map { Int($0) },
                          pipeline.autoScore ? 1 : 0,
                          pipeline.autoTranslate ? 1 : 0,
                          pipeline.autoSummarize ? 1 : 0,
                          pipeline.autoTranscribe ? 1 : 0]
             )
-            if ok { newId = self.db.lastInsertId() }
+            if ok { newId = db.lastInsertId() }
             return ok
         }
         guard committed, let cid = newId else { return nil }
@@ -761,17 +907,26 @@ public final class SourceStore: ObservableObject {
         return cid
     }
 
+    /// 主分类表达用户订阅的内容来源；播客 enclosure 使用 MP4 只改变媒体载体，不改变分类。
+    nonisolated static func contentType(source: String, meta: [String: String]) -> String {
+        if source == "podcast" { return "podcast" }
+        if source == "youtube" || source == "video" { return "video" }
+        if meta["video_id"] != nil || meta["video_url"] != nil { return "video" }
+        if meta["audio_url"] != nil { return "podcast" }
+        return "article"
+    }
+
 #if DEBUG
     /// 隔离数据库测试入口：验证 ParsedEntry.language 确实写入 content.language。
     func upsertContentForTesting(source: String, sourceId: Int64, entry: ParsedEntry) -> Int64? {
-        upsertContent(source: source, sourceId: sourceId, entry: entry)
+        Self.upsertContent(source: source, sourceId: sourceId, entry: entry)
     }
 #endif
 
     // MARK: 内容去重辅助
 
     /// 剥 HTML 标签成纯文本（压空白）——播客简介入 excerpt 用
-    static func stripHtml(_ html: String) -> String {
+    nonisolated static func stripHtml(_ html: String) -> String {
         var text = html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
         text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)
@@ -779,7 +934,7 @@ public final class SourceStore: ObservableObject {
     }
 
     /// url 规范化：去 utm_*/fbclid/gclid 等追踪参数 + 去 fragment + 去尾斜杠 + 小写 scheme/host
-    static func normalizeUrl(_ urlString: String) -> String {
+    nonisolated static func normalizeUrl(_ urlString: String) -> String {
         guard var comps = URLComponents(string: urlString) else { return urlString.lowercased() }
         comps.scheme = comps.scheme?.lowercased()
         comps.host = comps.host?.lowercased()
@@ -803,14 +958,14 @@ public final class SourceStore: ObservableObject {
     }
 
     /// 标题归一化：去空白/标点/小写，用于跨源同题判重
-    static func normalizeTitle(_ title: String) -> String {
+    nonisolated static func normalizeTitle(_ title: String) -> String {
         title.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .joined()
     }
 
     /// 内容 hash：规范化 url + 归一化标题 的 SHA256（url 优先, 空 url 退化为纯标题）
-    static func contentHash(url: String, title: String) -> String {
+    nonisolated static func contentHash(url: String, title: String) -> String {
         let basis = url.isEmpty ? "t:\(title)" : "u:\(url)|t:\(title)"
         let digest = SHA256.hash(data: Data(basis.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()

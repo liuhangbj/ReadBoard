@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ImageIO
 
 // MARK: - 阅读器主题（颜色规范抄自 Obsidian 主题）
 // 每套主题是一个完整的颜色系统，渲染器的每个元素（标题层级/正文/引用/
@@ -300,23 +301,38 @@ enum ReadingFont: Hashable {
     private nonisolated(unsafe) static var resolvedPresetFamilies: [ReadingFont: String] = [:]
 
     func font(size: CGFloat) -> Font {
+        guard let family = resolvedFamilyName() else { return .system(size: size) }
+        return .custom(family, size: size)
+    }
+
+    /// AppKit 文本桥接使用同一套字体解析，避免标题换成 NSTextView 后忽略阅读器字体设置。
+    func nsFont(size: CGFloat, bold: Bool = false) -> NSFont {
+        guard let family = resolvedFamilyName(), let base = NSFont(name: family, size: size) else {
+            return NSFont.systemFont(ofSize: size, weight: bold ? .bold : .regular)
+        }
+        return bold
+            ? NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask)
+            : base
+    }
+
+    private func resolvedFamilyName() -> String? {
         switch self {
         case .system:
-            return .system(size: size)
+            return nil
+        case .custom(let name):
+            return name
         case .heiti, .kaiti, .fangsong:
             if let cached = Self.resolvedPresetFamilies[self] {
-                return cached.isEmpty ? .system(size: size) : .custom(cached, size: size)
+                return cached.isEmpty ? nil : cached
             }
             // 预置中文字体：按候选名找系统里实际装的，找不到回退系统默认（负缓存同键）
             let available = Set(NSFontManager.shared.availableFontFamilies)
             for candidate in presetFamilyCandidates where available.contains(candidate) {
                 Self.resolvedPresetFamilies[self] = candidate
-                return .custom(candidate, size: size)
+                return candidate
             }
             Self.resolvedPresetFamilies[self] = ""
-            return .system(size: size)
-        case .custom(let name):
-            return .custom(name, size: size)
+            return nil
         }
     }
 
@@ -365,28 +381,28 @@ struct MarkdownBodyView: View {
     let fontSize: Double
     let lineSpacing: Double
 
-    // 渲染单元：把「连续的纯段落」聚合成单个 Text，使其可被一次拖选跨多段；
-    // 标题/列表/引用/代码/图片/元信息保留独立 block 渲染（各有视觉容器，不该跨选）。
+    // 渲染单元：把连续的正文、标题和列表聚合成单个 Text，使普通文章内容可跨段拖选；
+    // 引用卡、代码、图片、分割线和元信息保留独立组件，避免为选区牺牲现有视觉与交互。
     // ⚠️ 安全性（对照 07-27 崩溃潮教训）：仍用数组下标 id —— 绝不用 MdBlock.id
     // （其 `var id: UUID { UUID() }` 每次新值 → 全量重建崩溃）。合并只在 .task 算一次，
     // 绝不进 body，也不引入任何在视图更新期写的 @State。
     private struct RenderUnit {
         let index: Int                          // 在 units 中的稳定下标（= 渲染顺序）
-        let blocks: [MdBlock]                   // 1 个独立 block，或若干连续段落
-        var isMergedParagraph: Bool { blocks.count > 1 }
+        let blocks: [MdBlock]                   // 1 个独立 block，或若干连续正文块
+        var isMergedTextFlow: Bool { blocks.count > 1 }
     }
 
     @State private var units: [RenderUnit] = []
 
     private var p: ThemePalette { theme.palette(for: mode) }
 
-    /// 由 parse 结果构建渲染单元：连续 paragraph 合并，其余保持单行。
+    /// 由 parse 结果构建渲染单元：正文/标题/列表属于同一选择流，其余块保持独立。
     /// 纯函数、无副作用，仅在 .task 中执行一次（绝不进 body，避免渲染风暴）。
     private static func buildUnits(_ blocks: [MdBlock]) -> [RenderUnit] {
         var out: [RenderUnit] = []
         var buf: [MdBlock] = []
         for b in blocks {
-            if case .paragraph = b {
+            if isTextFlowBlock(b) {
                 buf.append(b)
             } else {
                 if !buf.isEmpty { out.append(RenderUnit(index: out.count, blocks: buf)); buf = [] }
@@ -397,14 +413,28 @@ struct MarkdownBodyView: View {
         return out
     }
 
+    /// 回归测试入口：验证正文、标题和列表保持在同一可选择文本单元中。
+    static func selectionUnitBlockCountsForTesting(markdown: String) -> [Int] {
+        buildUnits(MarkdownRenderer.parse(markdown)).map { $0.blocks.count }
+    }
+
+    private static func isTextFlowBlock(_ block: MdBlock) -> Bool {
+        switch block {
+        case .heading, .paragraph, .listItem:
+            return true
+        case .quote, .codeBlock, .divider, .image, .frontmatter:
+            return false
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        LazyVStack(alignment: .leading, spacing: 12) {
             // 下标 id：同一位置单元身份稳定，body 重算不重建 → 选区/图片状态保留
             ForEach(units.indices, id: \.self) { i in
                 let u = units[i]
-                if u.isMergedParagraph {
-                    // 合并段落：单个 Text —— 可一次跨段拖选
-                    Text(attributedMergedParagraph(u.blocks))
+                if u.isMergedTextFlow {
+                    // 单个 Text 承载连续正文流，选择范围可跨段落、章节标题和列表。
+                    Text(attributedTextFlow(u.blocks))
                         .font(fontChoice.font(size: fontSize))
                         .lineSpacing(lineSpacing)
                         .foregroundStyle(p.text)
@@ -423,16 +453,40 @@ struct MarkdownBodyView: View {
         }
     }
 
-    /// 把若干段落拼成单个 AttributedString（段落间空一行），供一次跨段拖选。
+    /// 把连续正文、标题和列表拼成单个 AttributedString，供一次跨段拖选。
     /// inline() 已为每个 run 设好 font/颜色（加粗、行内代码、链接），此处的 .font/.lineSpacing
     /// 只作用于未显式设属性的 run，不会覆盖行内样式。
-    private func attributedMergedParagraph(_ blocks: [MdBlock]) -> AttributedString {
+    private func attributedTextFlow(_ blocks: [MdBlock]) -> AttributedString {
         var result = AttributedString()
-        for (idx, b) in blocks.enumerated() {
-            if case .paragraph(let text) = b {
-                if idx > 0 { result.append(AttributedString("\n\n")) }
-                result.append(MarkdownRenderer.inline(text, palette: p, fontSize: fontSize))
+        var previousWasList = false
+        for (idx, block) in blocks.enumerated() {
+            let isList: Bool
+            if case .listItem = block { isList = true } else { isList = false }
+            if idx > 0 {
+                result.append(AttributedString(previousWasList && isList ? "\n" : "\n\n"))
             }
+
+            switch block {
+            case .heading(let level, let text):
+                var heading = MarkdownRenderer.inline(text, palette: p, fontSize: headingSize(level))
+                heading.font = headingFont(level)
+                heading.foregroundColor = headingColor(level)
+                result.append(heading)
+
+            case .paragraph(let text):
+                result.append(MarkdownRenderer.inline(text, palette: p, fontSize: fontSize))
+
+            case .listItem(let ordered, let index, let text):
+                var marker = AttributedString(ordered ? "\(index).  " : "•  ")
+                marker.font = fontChoice.font(size: fontSize)
+                marker.foregroundColor = p.listMarker
+                result.append(marker)
+                result.append(MarkdownRenderer.inline(text, palette: p, fontSize: fontSize))
+
+            case .quote, .codeBlock, .divider, .image, .frontmatter:
+                break
+            }
+            previousWasList = isList
         }
         return result
     }
@@ -594,17 +648,82 @@ struct RBRemoteImage: View {
         guard let u = URL(string: url), let scheme = u.scheme, scheme.hasPrefix("http") else {
             failed = true; return
         }
-        do {
-            var req = URLRequest(url: u)
-            req.timeoutInterval = 15
-            req.setValue("Mozilla/5.0 (Macintosh) ReadBoard", forHTTPHeaderField: "User-Agent")
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            if let http = resp as? HTTPURLResponse, http.statusCode != 200 { failed = true; return }
-            guard let img = NSImage(data: data) else { failed = true; return }
-            nsImage = img
-        } catch {
+        var req = URLRequest(url: u)
+        req.timeoutInterval = 15
+        req.setValue("Mozilla/5.0 (Macintosh) ReadBoard", forHTTPHeaderField: "User-Agent")
+        guard let box = await RBImagePipeline.shared.image(
+            url: u, maxPixelSize: 2048, request: req) else {
             failed = true
+            return
         }
+        nsImage = box.image
+    }
+}
+
+/// 解码后的图片容器显式声明跨任务可传递；NSImage 只读，生成后不再修改。
+final class RBImageBox: @unchecked Sendable {
+    let image: NSImage
+    let cost: Int
+    init(image: NSImage, cost: Int) {
+        self.image = image
+        self.cost = cost
+    }
+}
+
+/// 正文与列表共用的图片管线：内存缓存、同 URL 请求合并、后台缩采样。
+/// 不再把手机原图按原始像素完整解码进显存。
+actor RBImagePipeline {
+    static let shared = RBImagePipeline()
+
+    private let cache: NSCache<NSString, RBImageBox> = {
+        let cache = NSCache<NSString, RBImageBox>()
+        cache.totalCostLimit = 160 * 1024 * 1024
+        return cache
+    }()
+    private var inFlight: [String: Task<RBImageBox?, Never>] = [:]
+
+    func image(url: URL, maxPixelSize: Int, request: URLRequest? = nil) async -> RBImageBox? {
+        let key = "\(maxPixelSize)|\(url.absoluteString)"
+        if let cached = cache.object(forKey: key as NSString) { return cached }
+        if let running = inFlight[key] { return await running.value }
+
+        let task: Task<RBImageBox?, Never> = Task.detached(priority: .utility) {
+            var req = request ?? URLRequest(url: url)
+            req.timeoutInterval = min(max(req.timeoutInterval, 1), 20)
+            if req.value(forHTTPHeaderField: "User-Agent") == nil {
+                req.setValue("Mozilla/5.0 (Macintosh) ReadBoard", forHTTPHeaderField: "User-Agent")
+            }
+            do {
+                let (data, response) = try await URLSession.shared.data(for: req)
+                if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                    return nil
+                }
+                return Self.downsample(data: data, maxPixelSize: maxPixelSize)
+            } catch {
+                return nil
+            }
+        }
+        inFlight[key] = task
+        let result = await task.value
+        inFlight[key] = nil
+        if let result { cache.setObject(result, forKey: key as NSString, cost: result.cost) }
+        return result
+    }
+
+    nonisolated private static func downsample(data: Data, maxPixelSize: Int) -> RBImageBox? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        let image = NSImage(cgImage: cgImage,
+                            size: NSSize(width: cgImage.width, height: cgImage.height))
+        return RBImageBox(image: image, cost: cgImage.bytesPerRow * cgImage.height)
     }
 }
 

@@ -1,50 +1,10 @@
 import SwiftUI
 
-// MARK: - 管理面板
-// 统一承载：统计概览 / 源健康 / 失败重试 / 过滤规则
+// MARK: - 数据看板入口
 
 public struct ManageView: View {
-    @State private var tab = 0
-    @EnvironmentObject private var appTab: AppTab
-
     public var body: some View {
-        VStack(spacing: 0) {
-            // 页头：返回 + 居中分段（三段式平衡布局）
-            HStack {
-                // 返回阅读（左栏底部导航切过来的入口）
-                Button { appTab.selection = 0 } label: {
-                    Label("阅读", systemImage: "chevron.left")
-                }
-                .buttonStyle(.quiet)
-                .help("返回阅读")
-                Spacer()
-                Picker("", selection: $tab) {
-                    Text("统计").tag(0)
-                    Text("源健康").tag(1)
-                    Text("失败重试").tag(2)
-                    Text("过滤规则").tag(4)
-                }
-                .pickerStyle(.segmented)
-                .tint(Color.rbAccent)
-                .frame(maxWidth: 380)
-                Spacer()
-                // 右侧占位平衡返回按钮宽度，让分段真正居中
-                Color.clear.frame(width: 64, height: 1)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 4)
-
-            Group {
-                switch tab {
-                case 0: StatsPane()
-                case 1: SourceHealthPane()
-                case 2: FailedJobPane()
-                default: FilterRulePane()
-                }
-            }
-        }
-        .frame(minWidth: 640, minHeight: 480)
+        DataDashboardView()
     }
 }
 
@@ -74,7 +34,7 @@ public struct StatsPane: View {
 
                 // 管线 job 分布
                 VStack(alignment: .leading, spacing: 10) {
-                    SectionLabel(text: "管线处理（成功/失败）")
+                    SectionLabel(text: "内容处理（成功/失败）")
                     ForEach(jobTypes, id: \.jtype) { j in
                         HStack(spacing: 10) {
                             Text(j.jtype)
@@ -244,57 +204,6 @@ public struct SourceHealthPane: View {
                 SourceHealthService.shared.problemSources()
             }.value
             problems = r
-        }
-    }
-}
-
-// MARK: 失败重试
-
-public struct FailedJobPane: View {
-    @State private var failures: [FailedJob] = []
-    @State private var retrying: Set<Int64> = []
-
-    public var body: some View {
-        List {
-            if failures.isEmpty {
-                ContentUnavailableView("没有失败任务", systemImage: "checkmark.circle",
-                    description: Text("管线运行正常"))
-            }
-            ForEach(failures) { job in
-                HStack(spacing: 10) {
-                    RBadge(text: job.jtype, color: .rbScoreLow)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(job.title).font(.callout).foregroundStyle(Color.rbText).lineLimit(1)
-                        if let err = job.error {
-                            Text(err).font(.caption).foregroundStyle(Color.rbText3).lineLimit(1)
-                        }
-                    }
-                    Spacer()
-                    Button {
-                        retrying.insert(job.id)
-                        Task {
-                            _ = await FailedJobService.shared.retry(job)
-                            await MainActor.run {
-                                retrying.remove(job.id)
-                                failures = FailedJobService.shared.recentFailures()
-                            }
-                        }
-                    } label: {
-                        if retrying.contains(job.id) { ProgressView().scaleEffect(0.6) }
-                        else { Text("重试") }
-                    }
-                    .controlSize(.small)
-                    .buttonStyle(.quiet)
-                    .disabled(retrying.contains(job.id))
-                }
-                .padding(.vertical, 3)
-            }
-        }
-        .task {
-            let r = await Task.detached(priority: .userInitiated) {
-                FailedJobService.shared.recentFailures()
-            }.value
-            failures = r
         }
     }
 }
