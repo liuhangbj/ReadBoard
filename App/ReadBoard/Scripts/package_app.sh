@@ -49,6 +49,13 @@ mkdir -p "$TMP_APP/Contents/MacOS" "$TMP_APP/Contents/Resources"
 
 cp -p "$BIN" "$TMP_APP/Contents/MacOS/ReadBoard"
 cp -p "$PACKAGING_DIR/Info.plist" "$TMP_APP/Contents/Info.plist"
+if [ -n "${READBOARD_VERSION:-}" ]; then
+    VERSION="${READBOARD_VERSION#v}"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \
+        "$TMP_APP/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${READBOARD_BUILD_NUMBER:-1}" \
+        "$TMP_APP/Contents/Info.plist"
+fi
 ditto "$RESOURCE_PAYLOAD" "$TMP_APP/Contents/Resources"
 
 # 从源码 PNG 生成标准 icns，不把编译后的 App 或 Assets.car 提交到 Git。

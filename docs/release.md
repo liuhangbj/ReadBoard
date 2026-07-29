@@ -22,4 +22,14 @@
 
 签名证书、证书密码和公证凭证只能放入 GitHub Actions Secrets，不能写入源码、脚本或配置文件。
 
+发布工作流需要配置以下仓库 Secrets：
+
+- `DEVELOPER_ID_CERTIFICATE_BASE64`：Developer ID Application 的 P12 文件经 Base64 编码后的内容。
+- `DEVELOPER_ID_CERTIFICATE_PASSWORD`：导出 P12 时设置的密码。
+- `APPLE_API_KEY_ID`：App Store Connect 团队 API Key ID。
+- `APPLE_API_ISSUER_ID`：App Store Connect Issuer ID。
+- `APPLE_API_PRIVATE_KEY_BASE64`：团队 API Key 的 P8 文件经 Base64 编码后的内容。
+
+必须使用团队 API Key；个人 API Key 不能调用 `notarytool`。
+
 当前机器只有 Apple Development 证书；在取得 Developer ID Application 证书前，发布工作流只做结构准备，不创建面向用户的未签名版本。
