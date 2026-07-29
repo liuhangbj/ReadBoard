@@ -72,6 +72,10 @@ public enum DependencyPaths {
                 home + "/models",
                 home + "/.cache/whisper",
             ]
+            let standardNames = [
+                "ggml-medium.bin", "ggml-small.bin",
+                "ggml-tiny.bin", "ggml-large-v3.bin",
+            ]
             let fm = FileManager.default
             var seen: Set<String> = []
             var found: [String] = []
@@ -84,7 +88,17 @@ public enum DependencyPaths {
                     found.append(dir + "/" + f)
                 }
             }
-            return found.sorted()
+            // 即使全新机器尚未下载模型，也要提供稳定候选位置供设置页展示。
+            // resolve() 会在返回前检查文件是否真实存在，不会把候选误判为已安装。
+            let installed = found.sorted()
+            var candidates = installed
+            for dir in searchDirs {
+                for name in standardNames {
+                    let path = dir + "/" + name
+                    if seen.insert(path).inserted { candidates.append(path) }
+                }
+            }
+            return candidates
         }
     }
 
