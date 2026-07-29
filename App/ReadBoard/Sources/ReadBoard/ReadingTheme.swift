@@ -100,8 +100,9 @@ enum ReadingTheme: String, CaseIterable, Identifiable {
 
     /// 读系统外观（亮色/暗色）
     private static func systemAppearance() -> Mode {
-        let appearance = NSApp.effectiveAppearance
-        return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+        // UserDefaults 的搜索域包含 NSGlobalDomain，可同步读取系统外观，
+        // 避免在非 MainActor 的主题计算中直接访问 NSApp。
+        UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark" ? .dark : .light
     }
 
     // MARK: Primary（ceciliamay/obsidian-primary）——Bauhaus 红黄蓝 + 泛黄杂志

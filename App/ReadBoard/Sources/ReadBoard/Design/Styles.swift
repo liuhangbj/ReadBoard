@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import AVFoundation
 import AVKit
 import WebKit
@@ -634,7 +635,7 @@ struct YouTubePlayerView: View {
     @State private var isPlaying = false
     @State private var currentTime: Double = 0
     @State private var duration: Double = 0
-    @State private var timer: Timer?
+    private let playbackTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     private var ytdlpBin: String { DependencyPaths.resolve(.ytdlp) ?? "yt-dlp" }
 
@@ -742,6 +743,9 @@ struct YouTubePlayerView: View {
         .padding(12)
         .background(Color.rbSurface)
         .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
+        .onReceive(playbackTimer) { _ in
+            refreshPlaybackState()
+        }
         .onDisappear { cleanup() }
     }
 
@@ -790,14 +794,15 @@ struct YouTubePlayerView: View {
         player = p
         p.play()
         isPlaying = true
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] _ in
-            guard let p = player else { return }
-            currentTime = p.currentTime().seconds
-            if let item = p.currentItem {
-                duration = item.duration.seconds.isFinite ? item.duration.seconds : 0
-            }
-            isPlaying = p.rate > 0
+    }
+
+    private func refreshPlaybackState() {
+        guard let p = player else { return }
+        currentTime = p.currentTime().seconds
+        if let item = p.currentItem {
+            duration = item.duration.seconds.isFinite ? item.duration.seconds : 0
         }
+        isPlaying = p.rate > 0
     }
 
     private func togglePlay() {
@@ -813,8 +818,6 @@ struct YouTubePlayerView: View {
     }
 
     private func cleanup() {
-        timer?.invalidate()
-        timer = nil
         player?.pause()
         player = nil
     }
