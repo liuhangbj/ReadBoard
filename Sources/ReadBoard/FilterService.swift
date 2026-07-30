@@ -95,9 +95,6 @@ public final class FilterService: @unchecked Sendable {
             db.execute("UPDATE content SET read_at = datetime('now') WHERE id = ?", params: [contentId])
         } else if action == "star" {
             db.execute("UPDATE content SET starred = 1 WHERE id = ?", params: [contentId])
-        } else if action.hasPrefix("tag:") {
-            let tagName = String(action.dropFirst(4))
-            TagService.shared.tag(contentId: contentId, tagName: tagName)
-        }
+        } // TODO: tag 体系下一版实现
     }
 }

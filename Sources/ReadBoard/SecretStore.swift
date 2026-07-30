@@ -152,7 +152,7 @@ public enum SecretStore {
         } catch { return nil }
     }
 
-    // MARK: - 公开 API（对齐原 KeychainHelper 语义）
+    // MARK: - 公开 API
 
     /// 保存一条凭证。成功返回 true；失败返回 false 且**不残留半截状态**。
     static func save(_ value: String, forKey key: String) -> Bool {

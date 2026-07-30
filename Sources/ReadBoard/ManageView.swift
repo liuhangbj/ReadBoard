@@ -210,51 +210,6 @@ public struct SourceHealthPane: View {
 
 // MARK: 标签管理
 
-public struct TagManagePane: View {
-    @State private var tagCounts: [(tag: Tag, count: Int)] = []
-    @State private var newTag = ""
-
-    public var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                TextField("新建标签", text: $newTag)
-                    .textFieldStyle(.roundedBorder)
-                Button("添加") {
-                    if !newTag.trimmingCharacters(in: .whitespaces).isEmpty {
-                        TagService.shared.addTag(name: newTag)
-                        newTag = ""
-                        reload()
-                    }
-                }
-                .buttonStyle(.primaryCapsule)
-                .disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            .padding()
-
-            List {
-                ForEach(tagCounts, id: \.tag.id) { item in
-                    HStack {
-                        Image(systemName: "tag.fill").foregroundStyle(Color.rbAccent)
-                        Text(item.tag.name).foregroundStyle(Color.rbText)
-                        Spacer()
-                        Text("\(item.count) 条")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(Color.rbText3)
-                        Button(role: .destructive) {
-                            TagService.shared.removeTag(id: item.tag.id)
-                            reload()
-                        } label: { Image(systemName: "trash").foregroundStyle(Color.rbText3) }
-                        .buttonStyle(.quiet)
-                    }
-                }
-            }
-        }
-        .onAppear { reload() }
-    }
-
-    private func reload() { tagCounts = TagService.shared.tagCounts() }
-}
-
 // MARK: 过滤规则
 
 public struct FilterRulePane: View {
