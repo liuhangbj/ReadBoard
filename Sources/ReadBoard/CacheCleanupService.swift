@@ -190,92 +190,39 @@ public final class CacheCleanupService: ObservableObject {
     /// 星标和带标签的内容永久保护；备份失败时不修改任何候选内容。
     @discardableResult
     func runRetention() -> Int {
+        guard deleteEnabled && deleteAfterDays > 0 else { return 0 }
         var deleted = 0
-        if deleteEnabled && deleteAfterDays > 0 {
-            let toDelete = db.queryRows("""
-                SELECT id, entry_id, feed_id, source_id, ctype, guid, source, title, author, url,
-                       language, published_at, fetched_at, content_html, content_md, excerpt,
-                       word_count, reading_minutes, fetch_status, fetch_engine, fetch_error,
-                       fetched_full_at, llm_score, llm_summary, llm_translated_md,
-                       llm_excerpt_translated, llm_title_translated, llm_transcript_md,
-                       llm_model, llm_processed_at, content_hash, is_duplicate, duplicate_of,
-                       read_at, starred, deleted_at, meta, created_at, updated_at
-                FROM content
-                WHERE read_at IS NOT NULL AND starred = 0
-                  AND read_at < datetime('now', '-\(safeDays(deleteAfterDays)) days')
-                  AND id NOT IN (SELECT content_id FROM content_tag)
-                  AND deleted_at IS NULL;
-                """)
-
-            // 整批备份成功才开始清理；文件写入采用原子替换，避免留下半截 JSONL。
-            if toDelete.isEmpty || backupBeforeDelete(rows: toDelete) != nil {
-                for row in toDelete {
-                    guard let cid = Int64(row["id"] ?? "") else { continue }
-                    if db.execute("""
-                        UPDATE content SET
-                            deleted_at = datetime('now'),
-                            content_html = NULL,
-                            content_md = NULL,
-                            excerpt = NULL,
-                            llm_summary = NULL,
-                            llm_translated_md = NULL,
-                            llm_excerpt_translated = NULL,
-                            llm_title_translated = NULL,
-                            llm_transcript_md = NULL,
-                            llm_model = NULL,
-                            fetch_error = NULL
-                        WHERE id = ? AND deleted_at IS NULL;
-                        """, params: [cid]) {
-                        deleted += db.writeChanges()
-                    }
-                }
-            }
+        let candidates = db.queryRows("""
+            SELECT id FROM content
+            WHERE read_at IS NOT NULL AND starred = 0
+              AND read_at < datetime('now', '-\(safeDays(deleteAfterDays)) days')
+              AND deleted_at IS NULL;
+            """)
+        for row in candidates {
+            guard let cid = Int64(row["id"] ?? "") else { continue }
+            db.execute("""
+                UPDATE content SET
+                    deleted_at = datetime('now'),
+                    content_html = NULL,
+                    content_md = NULL,
+                    excerpt = NULL,
+                    llm_summary = NULL,
+                    llm_translated_md = NULL,
+                    llm_excerpt_translated = NULL,
+                    llm_title_translated = NULL,
+                    llm_transcript_md = NULL,
+                    llm_model = NULL,
+                    updated_at = datetime('now')
+                WHERE id = ?;
+                """, params: [cid])
+            deleted += 1
         }
-
-        // content_job 日志表膨胀控制：只留最近 30 天。
-        db.execute("DELETE FROM content_job WHERE finished_at < datetime('now', '-30 days');")
         return deleted
     }
 
+
     /// 把本次即将清理的完整内容快照写入 JSONL。返回文件路径表示已可靠落盘；失败返回 nil。
     /// 参数直接使用 runRetention 的候选快照，避免备份和清理分别查询时范围发生漂移。
-    private func backupBeforeDelete(rows: [[String: String]]) -> String? {
-        guard !rows.isEmpty else { return nil }
-        let stamp: String = {
-            let f = DateFormatter(); f.dateFormat = "yyyyMMdd"; return f.string(from: Date())
-        }()
-        let dir = Database.dataDirectory + "/trash/\(stamp)"
-        do {
-            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        } catch {
-            return nil
-        }
-        var lines: [String] = []
-        for r in rows {
-            var snapshot = r
-            snapshot["trash_schema"] = "2"
-            guard JSONSerialization.isValidJSONObject(snapshot),
-                  let data = try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys]),
-                  let line = String(data: data, encoding: .utf8) else { return nil }
-            lines.append(line)
-        }
-        guard lines.count == rows.count else { return nil }
-        let millis = Int64(Date().timeIntervalSince1970 * 1_000)
-        let file = "\(dir)/deleted-\(millis)-\(UUID().uuidString).jsonl"
-        do {
-            try (lines.joined(separator: "\n") + "\n")
-                .write(toFile: file, atomically: true, encoding: .utf8)
-            let size = (try FileManager.default.attributesOfItem(atPath: file)[.size] as? NSNumber)?.int64Value ?? 0
-            guard size > 0 else {
-                try? FileManager.default.removeItem(atPath: file)
-                return nil
-            }
-            return file
-        } catch {
-            try? FileManager.default.removeItem(atPath: file)
-            return nil
-        }
-    }
 
     /// 清全文 HTML。只有已经生成 content_md、未读未标且超过保留天数的内容会被清理；
     /// content_md 仍保留在数据库，阅读器不依赖原始 HTML。
