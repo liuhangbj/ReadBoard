@@ -569,36 +569,26 @@ final class DependencyPathsTests: XCTestCase {
     }
 }
 
-final class KeychainTests: XCTestCase {
+final class SecretStoreTests: XCTestCase {
 
-    /// Keychain 在某些运行环境（WorkBuddy 沙箱/CI）会被 OS 拦（errSecInteractionNotAllowed /
-    /// 100001 Operation not permitted）——这不是代码问题，是环境权限。
-    /// 测试只验证：调用不崩溃、状态码可读、能区分成功/失败。
     func testSaveLoadDelete() {
         let key = "test.readboard.xctest"
-        let status = KeychainHelper.saveWithStatus("secret-token-123", forKey: key)
-        if status != errSecSuccess {
-            let msg = SecCopyErrorMessageString(status, nil) as String? ?? "?"
-            // 环境拦截：跳过而非失败（记录以便诊断）
-            print("⏭ Keychain 不可用（\(status) \(msg)），跳过读写断言")
-            return
-        }
-        XCTAssertEqual(KeychainHelper.load(forKey: key), "secret-token-123")
-        XCTAssertTrue(KeychainHelper.exists(forKey: key))
-        KeychainHelper.delete(forKey: key)
-        XCTAssertNil(KeychainHelper.load(forKey: key))
-        XCTAssertFalse(KeychainHelper.exists(forKey: key))
+        _ = SecretStore.delete(forKey: key)
+        XCTAssertTrue(SecretStore.save("secret-token-123", forKey: key))
+        XCTAssertEqual(SecretStore.load(forKey: key), "secret-token-123")
+        XCTAssertTrue(SecretStore.exists(forKey: key))
+        XCTAssertTrue(SecretStore.delete(forKey: key))
+        XCTAssertNil(SecretStore.load(forKey: key))
+        XCTAssertFalse(SecretStore.exists(forKey: key))
     }
 
     func testOverwrite() {
         let key = "test.readboard.overwrite"
-        guard KeychainHelper.saveWithStatus("v1", forKey: key) == errSecSuccess else {
-            print("⏭ Keychain 不可用，跳过覆盖断言")
-            return
-        }
-        _ = KeychainHelper.save("v2", forKey: key)
-        XCTAssertEqual(KeychainHelper.load(forKey: key), "v2")
-        KeychainHelper.delete(forKey: key)
+        _ = SecretStore.delete(forKey: key)
+        XCTAssertTrue(SecretStore.save("v1", forKey: key))
+        XCTAssertTrue(SecretStore.save("v2", forKey: key))
+        XCTAssertEqual(SecretStore.load(forKey: key), "v2")
+        XCTAssertTrue(SecretStore.delete(forKey: key))
     }
 }
 

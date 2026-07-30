@@ -161,7 +161,20 @@ public final class TranscribePipeline: @unchecked Sendable {
         } else {
             // 视频页 / 非直链：yt-dlp 抽最佳音频
             let tmpl = workDir + "/ydl.%(ext)s"
-            try await run(ytdlpBin, ["-x", "--audio-format", "mp3", "-o", tmpl, target])
+            var args = ["-x", "--audio-format", "mp3", "-o", tmpl, target]
+            // Finder 启动的 GUI App 通常只有 /usr/bin:/bin 等系统 PATH。
+            // yt-dlp 虽由绝对路径启动，但其后处理仍会从 PATH 查找 ffmpeg/ffprobe；
+            // 显式传入二者所在目录，避免 Homebrew 安装正常却被误报为缺失。
+            if let ffmpeg = DependencyPaths.resolve(.ffmpeg) {
+                let directory = (ffmpeg as NSString).deletingLastPathComponent
+                args.insert(contentsOf: ["--ffmpeg-location", directory], at: 0)
+            }
+            // 新版 yt-dlp 解析 YouTube 的签名需要 JavaScript runtime。
+            // GUI App 同样不能依赖 PATH，显式交付已经解析到的 Node 绝对路径。
+            if let node = DependencyPaths.resolve(.node) {
+                args.insert(contentsOf: ["--js-runtimes", "node:\(node)"], at: 0)
+            }
+            try await run(ytdlpBin, args)
             // 找产出文件
             let files = try FileManager.default.contentsOfDirectory(atPath: workDir)
             guard let f = files.first(where: { $0.hasPrefix("ydl.") }) else {

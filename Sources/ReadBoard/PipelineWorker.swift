@@ -403,6 +403,7 @@ public final class PipelineWorker: ObservableObject {
     }
 
     private func endActiveTask(contentId: Int64) {
+        refreshCounts()
         currentItems.removeAll { $0.id == contentId }
     }
 
