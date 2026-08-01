@@ -6,12 +6,22 @@ import Foundation
 /// 当前源码 Target 内的 Resources。运行数据始终落在 Application Support，
 /// 不再依赖源码仓库路径。
 enum AppResourceLocator {
+    static var applicationSupportDirectoryName: String {
+        let configured = ProcessInfo.processInfo.environment["READBOARD_APPLICATION_SUPPORT_NAME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let configured, !configured.isEmpty,
+              !configured.contains("/"), configured != ".", configured != ".." else {
+            return "ReadBoard"
+        }
+        return configured
+    }
+
     static let applicationSupportDirectory: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory,
                                             in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support",
                    isDirectory: true)
-        return base.appendingPathComponent("ReadBoard", isDirectory: true)
+        return base.appendingPathComponent(applicationSupportDirectoryName, isDirectory: true)
     }()
 
     static var modelsDirectory: URL {

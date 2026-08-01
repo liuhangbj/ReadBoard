@@ -7,7 +7,8 @@ enum Trace {
     /// 日志文件（用户目录，稳定可 tail）
     static var logFileURL: URL {
         let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/ReadBoard", isDirectory: true)
+            .appendingPathComponent("Library/Logs", isDirectory: true)
+            .appendingPathComponent(AppResourceLocator.applicationSupportDirectoryName, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("readboard.log")
     }

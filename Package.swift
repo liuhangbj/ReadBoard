@@ -4,6 +4,10 @@ import PackageDescription
 let package = Package(
     name: "ReadBoard",
     platforms: [.macOS(.v14)],
+    products: [
+        .library(name: "ReadBoardCore", targets: ["ReadBoard"]),
+        .executable(name: "ReadBoardMain", targets: ["ReadBoardMain"])
+    ],
     targets: [
         .target(
             name: "ReadBoard",
