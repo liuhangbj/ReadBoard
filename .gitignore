@@ -6,6 +6,9 @@
 .v-old.bak
 .swiftpm/
 **/.swiftpm/
+.workbuddy/
+podcast_field_content_diff.md
+podcast_field_diff_report.json
 
 # 运行时数据必须位于 ~/Library/Application Support/ReadBoard
 Data/

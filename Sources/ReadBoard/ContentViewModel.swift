@@ -54,7 +54,7 @@ public final class ContentViewModel: ObservableObject {
     }
     @Published var totalCount: Int = 0
     @Published var totalUnread: Int = 0   // 全部文章未读数（左栏「全部文章」行显示 未读/总数）
-    @Published var totalPending: Int = 0  // Worker 精确待处理内容数（同一内容只计一次）
+    @Published var totalPending: Int = 0  // 尚未达到条目设定处理标准的内容数
     @Published var totalPendingUnread: Int = 0
     @Published var totalExported: Int = 0  // 已导出文章数
     @Published var totalExportedUnread: Int = 0
@@ -100,7 +100,6 @@ public final class ContentViewModel: ObservableObject {
     /// nonisolated(unsafe)：NSObjectProtocol 非 Sendable，@MainActor 类的 deinit 是非隔离的，
     /// 直接访问存储属性会被 Swift 6 并发检查拦。observer token 本身线程安全（removeObserver 可任意线程调）。
     private nonisolated(unsafe) var updateObserver: NSObjectProtocol?
-    private nonisolated(unsafe) var pendingObserver: NSObjectProtocol?
 
     init() {
         // 评分/翻译完成后刷新列表。
@@ -128,11 +127,6 @@ public final class ContentViewModel: ObservableObject {
             // 0.75s 合并：连发只跑最后一次 reload，风暴砍成一次。
             MainActor.assumeIsolated { self?.scheduleContentReload() }
         }
-        pendingObserver = NotificationCenter.default.addObserver(
-            forName: .pipelinePendingUpdated, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.pendingSetDidChange() }
-        }
     }
 
     /// 通知防抖用的可取消工作项（连发 contentUpdated 时只保留最后一个）
@@ -151,24 +145,13 @@ public final class ContentViewModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: work)
     }
 
-    private func pendingSetDidChange() {
-        totalPending = PipelineWorker.shared.pendingContentIds.count
-        totalPendingUnread = PipelineWorker.shared.pendingBreakdown.unread
-        if selectedFilter == "pending" { reload() }
-    }
-
     deinit {
         if let obs = updateObserver {
-            NotificationCenter.default.removeObserver(obs)
-        }
-        if let obs = pendingObserver {
             NotificationCenter.default.removeObserver(obs)
         }
     }
 
     func loadAll() {
-        totalPending = PipelineWorker.shared.pendingContentIds.count
-        totalPendingUnread = PipelineWorker.shared.pendingBreakdown.unread
         reload()
         refreshLibraryStats()
     }
@@ -198,9 +181,9 @@ public final class ContentViewModel: ObservableObject {
         let starredOnly = readFilter == .starred
         let exportedOnly = selectedFilter == "exported"
         let category = selectedContentCategory
-        let pendingIds: Set<Int64>? = pendingOnly ? PipelineWorker.shared.pendingContentIds : nil
         let processed = processedStates.mapValues { $0.rawValue }
         let sort = sortOrder.rawValue
+        let unmetOnly = pendingOnly
         let pageSize = Self.pageSize
         Task.detached(priority: .userInitiated) {
             let page = Database.shared.fetchContents(sourceId: sourceId, folderId: folderId,
@@ -213,7 +196,7 @@ public final class ContentViewModel: ObservableObject {
                                         starredOnly: starredOnly,
                                         processedFilters: processed,
                                         contentCategory: category,
-                                        restrictToContentIds: pendingIds,
+                                        unmetProcessingOnly: unmetOnly,
                                         sortOrder: sort,
                                         limit: pageSize, offset: 0)
             await MainActor.run { [weak self] in
@@ -222,8 +205,6 @@ public final class ContentViewModel: ObservableObject {
                 self.hasMore = page.count >= Self.pageSize
                 // 修 P1-6：筛选变化（哪怕改排序）不再销毁正在读的文章——保留 selectedItem，
                 // 用户继续读完当前篇，不因筛选/排序变化被关掉。
-                self.totalPending = PipelineWorker.shared.pendingContentIds.count
-                self.totalPendingUnread = PipelineWorker.shared.pendingBreakdown.unread
                 // 全量重查后 DB 已权威——清空乐观已读标记（防与「标为未读」等操作打架）
                 self.readMarks.removeAll()
             }
@@ -249,6 +230,8 @@ public final class ContentViewModel: ObservableObject {
     private func apply(_ counts: LibraryCounts) {
         totalCount = counts.total
         totalUnread = counts.unread
+        totalPending = counts.pending
+        totalPendingUnread = counts.pendingUnread
         totalExported = counts.exported
         totalExportedUnread = counts.exportedUnread
         articleCount = counts.articles
@@ -271,7 +254,7 @@ public final class ContentViewModel: ObservableObject {
         if item.hasExport {
             totalExportedUnread = max(0, totalExportedUnread + delta)
         }
-        if PipelineWorker.shared.pendingContentIds.contains(item.id) {
+        if item.hasUnmetProcessing {
             totalPendingUnread = max(0, totalPendingUnread + delta)
         }
         guard let sourceId = item.feedId else { return }
@@ -305,13 +288,13 @@ public final class ContentViewModel: ObservableObject {
         let sourceId = selectedSourceId
         let folderId = selectedFolderId
         let category = selectedContentCategory
-        let pendingIds: Set<Int64>? = pendingOnly ? PipelineWorker.shared.pendingContentIds : nil
         let unscored = includeUnscored
         let unreadOnly = readFilter == .unread
         let exportedOnly = selectedFilter == "exported"
         let starredOnly = readFilter == .starred
         let processed = processedStates.mapValues { $0.rawValue }
         let sort = sortOrder.rawValue
+        let unmetOnly = pendingOnly
         let offset = items.count
         let pageSize = Self.pageSize
         Task.detached(priority: .userInitiated) {
@@ -321,7 +304,7 @@ public final class ContentViewModel: ObservableObject {
                 includeUnscored: unscored, unreadOnly: unreadOnly,
                 exportedOnly: exportedOnly, keyword: kw.isEmpty ? nil : kw,
                 starredOnly: starredOnly, processedFilters: processed,
-                contentCategory: category, restrictToContentIds: pendingIds,
+                contentCategory: category, unmetProcessingOnly: unmetOnly,
                 sortOrder: sort, limit: pageSize, offset: offset)
             await MainActor.run { [weak self] in
                 guard let self, self.items.count == offset else { return }
@@ -447,7 +430,7 @@ public final class ContentViewModel: ObservableObject {
                                starredOnly: readFilter == .starred,
                                processedFilters: processedStates.mapValues { $0.rawValue },
                                contentCategory: selectedContentCategory,
-                               restrictToContentIds: pendingOnly ? PipelineWorker.shared.pendingContentIds : nil)
+                               unmetProcessingOnly: pendingOnly)
         reload()
         refreshLibraryStats()
         PipelineWorker.shared.requestPendingRefresh()

@@ -119,6 +119,11 @@ final class PipelineWorkerConcurrencyTests: XCTestCase {
     }
 
     @MainActor
+    func testWorkerUsesSmallBatchesForLiveListProgress() {
+        XCTAssertEqual(PipelineWorker.shared.batchLimit, 10)
+    }
+
+    @MainActor
     func testDerivedQueueRevalidatesChangedItemState() throws {
         guard ProcessInfo.processInfo.environment["READBOARD_DB"] != nil else {
             throw XCTSkip("需要 READBOARD_DB 指向临时数据库")

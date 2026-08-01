@@ -402,9 +402,20 @@ public final class ExportService: @unchecked Sendable {
         return result
     }
     private static func renderTpl(_ t: String, content: EC, useTranslatedTitle: Bool = false) -> String {
-        var r=t; let d=content.publishedAt.isEmpty ? Date() : ISO8601DateFormatter().date(from:content.publishedAt) ?? Date()
+        var r=t; let d=templateDate(from:content.publishedAt) ?? Date()
         let df=DateFormatter();df.dateFormat="yyyy-MM-dd";let yf=DateFormatter();yf.dateFormat="yyyy";let mf=DateFormatter();mf.dateFormat="MM"
         for (k,v) in ["{id}":String(content.id),"{title}":sanitizeFilename(useTranslatedTitle && content.titleTranslated?.isEmpty == false ? content.titleTranslated! : content.title),"{source}":sanitizeFilename(content.source),"{author}":sanitizeFilename(content.author),"{ctype}":content.ctype,"{score}":content.score.map(String.init) ?? "unscored","{date}":df.string(from:d),"{year}":yf.string(from:d),"{month}":mf.string(from:d)]{r=r.replacingOccurrences(of:k,with:v)}; return r
+    }
+    private static func templateDate(from value:String)->Date? {
+        let trimmed=value.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard !trimmed.isEmpty else{return nil}
+        if let date=ISO8601DateFormatter().date(from:trimmed){return date}
+        let formatter=DateFormatter();formatter.calendar=Calendar(identifier:.gregorian);formatter.locale=Locale(identifier:"en_US_POSIX");formatter.timeZone=TimeZone(secondsFromGMT:0)
+        for format in ["yyyy-MM-dd HH:mm:ss","yyyy-MM-dd"]{
+            formatter.dateFormat=format
+            if let date=formatter.date(from:trimmed){return date}
+        }
+        return nil
     }
 
     private static let dfFields=["title","source","author","url","score","published","id"]

@@ -4,6 +4,8 @@ import Foundation
 // 探测每个源最适合的全文提取方式, 缓存进 content_source.config.fetch_mode:
 //   feed_full  — feed 自带 content_html ≥800 字符, 直接用 defuddle 转 md
 //   defuddle   — defuddle 直连原页抓得动
+//   youtube_subtitle  — YouTube 字幕提取
+//   bilibili_subtitle — Bilibili 字幕提取
 //   cdp        — 需要浏览器渲染(Chrome CDP/微信绕过)。暂未收编——engine 返回 NEEDS_CDP 退出码 3，降级 summary
 //   summary    — 抓不到全文, 只留摘要
 // 执行时按 mode 走对应路径, 结果写 content_md + fetch_status + fetch_engine。
@@ -12,13 +14,30 @@ import Foundation
 public enum FetchMode: String, CaseIterable, Sendable {
     case feedFull = "feed_full"
     case defuddle = "defuddle"
+    case youtubeSubtitle = "youtube_subtitle"
+    case bilibiliSubtitle = "bilibili_subtitle"
     case summary = "summary"
 
     var displayName: String {
         switch self {
         case .feedFull: return "feed 自带全文"
         case .defuddle: return "defuddle 本地"
+        case .youtubeSubtitle: return "YouTube字幕提取"
+        case .bilibiliSubtitle: return "Bilibili字幕提取"
         case .summary: return "仅摘要"
+        }
+    }
+
+    var isPlatformSubtitle: Bool {
+        self == .youtubeSubtitle || self == .bilibiliSubtitle
+    }
+
+    /// 平台专属提取路径只能由 source.stype 决定，不能从笼统的 FeedKind.video 推断。
+    static func platformDefault(for sourceType: String) -> FetchMode? {
+        switch sourceType {
+        case "youtube": return .youtubeSubtitle
+        case "bilibili": return .bilibiliSubtitle
+        default: return nil
         }
     }
 }
@@ -76,20 +95,12 @@ public final class FullTextFetcher: @unchecked Sendable {
         let samples = Array(feed.entries.prefix(2))
         guard !samples.isEmpty else { return .summary }
 
-        // 播客：feed 不提供可读文本，只有音频，不应误判为全文。
-        // 直接显示"摘要"（= 留 feed 自带的 show notes / 简介），不跑 defuddle 探测。
+        // 播客：按用户决定固定为 summary 模式。
+        // 注意 summary 模式现在也会把 feed 自带的 description/show notes 写入 content_md，
+        // 因此「固定 summary」≠「不落盘正文」——播客正文在 summary 路径下照常进入 content_md，
+        // 与文章一样走统一落盘逻辑（详见 tryFetch 的 .summary 分支 + writeBackFeedHtmlAsMd）。
         if feed.kind == .podcast {
             return .summary
-        }
-
-        // YouTube（video）：feed 同样不提供可读文本，但「可提取全文」靠视频页抓字幕 +
-        // 转录管线，而非 feed 自带。旧逻辑 `kind != .article` 一刀切把 YouTube 也判成
-        // summary，导致自动检测永远"仅摘要"退化、没法用 defuddle。这里明确改成返回
-        // .defuddle——标记该源走 defuddle 抓取（对视频页抓标题/简介，再交转录管线出稿），
-        // 而不是"仅摘要"终态。（不进下面的实时 defuddle 网络探测：视频页正文价值低，
-        // 且重新检测时对每篇跑 defuddle 既慢又多半空手而归）
-        if feed.kind == .video {
-            return .defuddle
         }
 
         // 第 1 级：feed 自带全文?
@@ -117,10 +128,33 @@ public final class FullTextFetcher: @unchecked Sendable {
         // 从给定模式开始，逐级降级尝试
         var currentMode = mode
         while true {
-            let success = tryFetch(contentId: contentId, url: url, feedHtml: feedHtml, mode: currentMode)
+            let success: Bool
+            switch currentMode {
+            case .youtubeSubtitle:
+                if let md = try? await YouTubeSubtitleFetcher.fetchMarkdown(videoURL: url),
+                   md.count >= 40 {
+                    storeMd(contentId: contentId, md: md, engine: currentMode.rawValue)
+                    success = true
+                } else {
+                    markFetched(contentId: contentId, ok: false, engine: currentMode.rawValue)
+                    success = false
+                }
+            case .bilibiliSubtitle:
+                if let md = try? await BilibiliFetcher.fetchSubtitleMarkdown(videoURL: url),
+                   md.count >= 40 {
+                    storeMd(contentId: contentId, md: md, engine: currentMode.rawValue)
+                    success = true
+                } else {
+                    markFetched(contentId: contentId, ok: false, engine: currentMode.rawValue)
+                    success = false
+                }
+            default:
+                success = tryFetch(contentId: contentId, url: url, feedHtml: feedHtml, mode: currentMode)
+            }
             if success {
                 // 降级成功了——更新源的 fetch_mode 为降级后的模式
-                if currentMode != mode {
+                // 平台字幕缺失只影响当前视频，不能把整个频道永久降级成「仅摘要」。
+                if currentMode != mode && !mode.isPlatformSubtitle {
                     updateSourceFetchMode(contentId: contentId, newMode: currentMode)
                 }
                 return true
@@ -177,7 +211,17 @@ public final class FullTextFetcher: @unchecked Sendable {
 
         case .summary:
             markFetched(contentId: contentId, ok: true, engine: mode.rawValue)
-            backfillExcerptIfEmpty(contentId: contentId, feedHtml: feedHtml)
+            // summary 模式不再「只留摘要」。按统一落盘目标：把 feed 自带的
+            // body（文章=feed HTML / 播客=show notes description；均以 feedHtml 传入，
+            // 解析器已把 description 并入 entry.html）写入 content_md。
+            // 与 feedFull 保持一致：html→markdown 后落盘；defuddle 对短片段/show notes 返空，
+            // 故此处走「剥离 HTML 当纯文本」的降级写法（参照 backfillExcerptIfEmpty 的剥标签口径），
+            // 把可读正文直接落 content_md，实现「所有提取模式都能落盘 content_md」。
+            writeBackFeedHtmlAsMd(contentId: contentId, feedHtml: feedHtml)
+            return false
+
+        case .youtubeSubtitle, .bilibiliSubtitle:
+            // 两个字幕路径包含异步网络/进程操作，由 fetchAndStore 处理。
             return false
         }
     }
@@ -187,6 +231,7 @@ public final class FullTextFetcher: @unchecked Sendable {
         switch mode {
         case .feedFull: return .defuddle
         case .defuddle: return .summary
+        case .youtubeSubtitle, .bilibiliSubtitle: return .summary
         case .summary: return nil
         }
     }
@@ -202,7 +247,9 @@ public final class FullTextFetcher: @unchecked Sendable {
         NotificationCenter.default.post(name: .contentUpdated, object: nil)
     }
 
-    /// summary 模式兜底：excerpt 空时从 content_html 剥标签生成
+    /// summary 模式兜底（仅 fetch_mode 显式设为"仅摘要"或三级判定降级到底时触发）：
+    /// 不发起抓取，excerpt 空时从 content_html 剥标签生成展示摘要。
+    /// 注意：正常文章/播客/视频源已不再默认落在此模式（见 probeMode 三级判定）。
     private func backfillExcerptIfEmpty(contentId: Int64, feedHtml: String?) {
         let hasExcerpt = (db.scalarInt(
             "SELECT LENGTH(COALESCE(excerpt,'')) FROM content WHERE id = ?",
@@ -217,6 +264,28 @@ public final class FullTextFetcher: @unchecked Sendable {
         guard !text.isEmpty else { return }
         db.execute("UPDATE content SET excerpt = ? WHERE id = ?",
                    params: [String(text.prefix(300)), contentId])
+    }
+
+    /// summary 模式的正文落盘：把 feed 自带正文（feedHtml）写入 content_md。
+    /// 与 .feedFull 路径目标一致——保证「summary 模式也能落盘 content_md」，
+    /// 所有类型/所有提取模式在提取阶段都产出 content_md，供 LLM 评分/翻译/摘要统一使用。
+    /// 口径参照 backfillExcerptIfEmpty（剥离 HTML 标签 + 压空白），并已实测：
+    /// 短 show notes / 摘要类片段喂给 defuddle 会返回空，故此处直接剥标签当纯文本落盘，
+    /// 不依赖 defuddle。幂等：content_md 已存在则跳过，不覆盖既有抽取结果。
+    private func writeBackFeedHtmlAsMd(contentId: Int64, feedHtml: String?) {
+        let hasMd = (db.scalarInt(
+            "SELECT LENGTH(COALESCE(content_md,'')) FROM content WHERE id = ?",
+            params: [contentId]) ?? 0) > 0
+        guard !hasMd, let html = feedHtml, !html.isEmpty else { return }
+        // 与 backfillExcerptIfEmpty 一致：剥 HTML 标签 + 压空白。这里不截断（保留全文正文）。
+        var text = html.replacingOccurrences(of: "<[^>]+>", with: " ",
+                                             options: .regularExpression)
+        text = text.replacingOccurrences(of: "\\s+", with: " ",
+                                         options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        db.execute("UPDATE content SET content_md = ?, fetch_status = 2, fetch_engine = ? WHERE id = ?",
+                   params: [text, FetchMode.summary.rawValue, contentId])
     }
 
     private func markFetched(contentId: Int64, ok: Bool, engine: String) {

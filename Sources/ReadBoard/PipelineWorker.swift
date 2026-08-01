@@ -114,8 +114,9 @@ public final class PipelineWorker: ObservableObject {
 
     /// 扫描间隔（秒）
     var interval: TimeInterval = 120
-    /// 每轮最多处理条数（防一次跑太久）
-    var batchLimit = 100
+    /// 每轮最多处理条数。资源通道默认 LLM=2、Whisper=1；保持小批次可减少
+    /// 排队 Task 和取消延迟。成功批次会立即进入下一轮，不会额外等待 120 秒。
+    var batchLimit = 10
 
     /// contentId 级互斥锁（修 P1-10）：正在处理的内容 id 集合。
     /// 手动触发（阅读区按钮）和 worker 都先 tryLock——防止手动+worker 对同一篇
@@ -315,6 +316,11 @@ public final class PipelineWorker: ObservableObject {
             var total = BatchResult()
             for await result in group {
                 total.merge(result)
+                // 单篇产生有效结果后立即唤醒中栏/待处理视图。ContentViewModel 已有
+                // 0.75 秒防抖，会把并发完成的通知合并，避免逐条重绘风暴。
+                if result.succeededContents > 0 {
+                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
+                }
                 if Task.isCancelled { group.cancelAll() }
             }
             return total
@@ -633,10 +639,12 @@ public final class PipelineWorker: ObservableObject {
             column: "auto_translate",
             resultMissing: "LENGTH(TRIM(COALESCE(c.llm_translated_md,'')))=0",
             extra: "\(articleOrMedia) AND \(body)", fallbackIds: sourceIds { $0.autoTranslate })
+        // 摘要候选分支允许媒体：媒体入库时已抓字幕稿(content_md)，与文章共用合并调用体系，
+        // 失败可经 content_job 退避/死信自愈，不再依赖转录链尾那次无重试的内嵌调用。
         candidateBranches += branches(
             column: "auto_summarize",
             resultMissing: "LENGTH(TRIM(COALESCE(c.llm_summary,'')))=0",
-            extra: "c.ctype NOT IN ('podcast','video','youtube') AND \(body)",
+            extra: "\(body)",
             fallbackIds: sourceIds { $0.autoSummarize })
         candidateBranches += branches(
             column: "auto_transcribe",
@@ -711,8 +719,11 @@ public final class PipelineWorker: ObservableObject {
             && !isChineseMedia && !row.hasTranslated && !body.isEmpty
         let needsScore = enabled(row.autoScore, fallback: source.policy.autoScore)
             && !row.hasScore && !body.isEmpty
+        // 文章/播客/视频/YouTube 统一以 content_md 为正文源（入库时由 fetch_mode 收编，
+        // 含播客 show notes 与视频字幕稿），因此摘要可与文章一样走合并调用：
+        // 只要 body(content_md) 非空即可，不再按类型/isMedia 排除。
         let needsSummary = enabled(row.autoSummarize, fallback: source.policy.autoSummarize)
-            && !row.hasSummary && !body.isEmpty && !row.isMedia
+            && !row.hasSummary && !body.isEmpty
         let needsTranscribe = enabled(row.autoTranscribe, fallback: source.policy.autoTranscribe)
             && !row.hasTranscript && row.isMedia && (row.audioUrl != nil || !row.url.isEmpty)
 
@@ -891,7 +902,7 @@ public final class PipelineWorker: ObservableObject {
           AND is_duplicate = 0
           AND deleted_at IS NULL
           AND fetch_status IN (0, 1, 3)
-          AND ctype = 'article'
+          AND ctype IN ('article', 'podcast', 'video')
           AND source_id IS NOT NULL
         ORDER BY id DESC LIMIT 10;
         """

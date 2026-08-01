@@ -4,6 +4,130 @@ import AppKit
 
 // MARK: - 纯逻辑单元测试（不触网、不触库——触库的走集成测试）
 
+final class PlatformSubtitleFetchModeTests: XCTestCase {
+    func testYouTubeStreamCacheExpiresAndSeparatesVideoIds() async throws {
+        let cache = YouTubeStreamURLCache(ttl: 10)
+        let now = Date(timeIntervalSince1970: 1_000)
+        let first = try XCTUnwrap(URL(string: "https://cdn.example/video-a.mp4"))
+        let second = try XCTUnwrap(URL(string: "https://cdn.example/video-b.mp4"))
+        await cache.store(first, for: "a", now: now)
+        await cache.store(second, for: "b", now: now)
+        let aBeforeExpiry = await cache.value(for: "a", now: now.addingTimeInterval(9))
+        let bBeforeExpiry = await cache.value(for: "b", now: now.addingTimeInterval(9))
+        let aAtExpiry = await cache.value(for: "a", now: now.addingTimeInterval(10))
+        let bStillValid = await cache.value(for: "b", now: now.addingTimeInterval(9))
+        XCTAssertEqual(aBeforeExpiry, first)
+        XCTAssertEqual(bBeforeExpiry, second)
+        XCTAssertNil(aAtExpiry)
+        XCTAssertEqual(bStillValid, second)
+    }
+
+    func testYouTubeStreamResolutionWhenNetworkTestsEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["READBOARD_NETWORK_TESTS"] == "1" else {
+            throw XCTSkip("网络播放地址回归测试默认关闭")
+        }
+        let url = try await YouTubeStreamResolver.resolve(videoId: "CABDIzdTNLU")
+        XCTAssertTrue(url.scheme == "https" || url.scheme == "http")
+    }
+
+    func testYouTubeResolverProcessStopsPromptlyOnCancellation() async throws {
+        let started = Date()
+        let task = Task {
+            try await YouTubeStreamResolver.runProcessForTesting(
+                "/bin/sh", args: ["-c", "sleep 10; echo late"], timeout: 20)
+        }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("取消后不应返回进程输出")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
+    }
+
+    func testBilibiliVideoUsesItsOwnPlayer() {
+        XCTAssertEqual(VideoPlayerPlatform.resolve(source: "bilibili"), .bilibili)
+        XCTAssertEqual(VideoPlayerPlatform.resolve(source: "youtube"), .youtube)
+        XCTAssertEqual(VideoPlayerPlatform.resolve(source: "video"), .youtube)
+    }
+
+    func testPlatformModesComeFromSourceType() {
+        XCTAssertEqual(FetchMode.platformDefault(for: "youtube"), .youtubeSubtitle)
+        XCTAssertEqual(FetchMode.platformDefault(for: "bilibili"), .bilibiliSubtitle)
+        XCTAssertNil(FetchMode.platformDefault(for: "rss"))
+        XCTAssertNil(FetchMode.platformDefault(for: "video"))
+    }
+
+    func testVideoFeedKindDoesNotForceAPlatformMode() {
+        let entry = ParsedEntry(
+            guid: "video-1", title: "普通视频 RSS", url: "https://example.invalid/video",
+            published: nil, html: String(repeating: "正文", count: 500), author: nil,
+            meta: ["video_id": "not-a-youtube-platform-proof"])
+        let feed = ParsedFeed(title: "普通视频", siteURL: nil, entries: [entry])
+        XCTAssertEqual(feed.kind, .video)
+        XCTAssertEqual(FullTextFetcher.shared.probeMode(forFeed: feed), .feedFull)
+    }
+
+    func testBilibiliSubtitleJSONBecomesParagraphMarkdown() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "body": [
+                ["from": 0, "to": 1, "content": "第一句。"],
+                ["from": 1, "to": 2, "content": "第二句。"],
+                ["from": 2, "to": 3, "content": "第二句。"]
+            ]
+        ])
+        let markdown = try XCTUnwrap(BilibiliFetcher.parseSubtitleMarkdown(data))
+        XCTAssertTrue(markdown.contains("第一句。第二句。"))
+        XCTAssertEqual(markdown.components(separatedBy: "第二句。").count - 1, 1)
+    }
+
+    func testYouTubePrefersOriginalAutomaticCaption() {
+        let metadata: [String: Any] = [
+            "automatic_captions": [
+                "zh-Hans": [["ext": "json3", "url": "https://example.invalid/translated"]],
+                "en-orig": [["ext": "json3", "url": "https://example.invalid/original"]]
+            ]
+        ]
+        XCTAssertEqual(
+            YouTubeSubtitleFetcher.selectedTrackURL(from: metadata)?.absoluteString,
+            "https://example.invalid/original")
+    }
+
+    func testYouTubeJSON3BecomesReadableMarkdown() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "events": [
+                ["segs": [["utf8": "Hello"], ["utf8": " world."]]],
+                ["segs": [["utf8": "This is ReadBoard."]]]
+            ]
+        ])
+        let markdown = try XCTUnwrap(YouTubeSubtitleFetcher.parseSubtitleMarkdown(data))
+        XCTAssertEqual(markdown, "Hello world. This is ReadBoard.")
+    }
+
+    func testYouTubeNetworkSubtitleExtractionWhenEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["READBOARD_NETWORK_TESTS"] == "1" else {
+            throw XCTSkip("网络字幕回归测试默认关闭")
+        }
+        let markdown = try await YouTubeSubtitleFetcher.fetchMarkdown(
+            videoURL: "https://www.youtube.com/watch?v=CABDIzdTNLU")
+        XCTAssertGreaterThan(try XCTUnwrap(markdown).count, 1_000)
+    }
+
+    func testBilibiliNetworkSubtitleExtractionWhenEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["READBOARD_NETWORK_TESTS"] == "1" else {
+            throw XCTSkip("网络字幕回归测试默认关闭")
+        }
+        guard BilibiliAuth.sessdata != nil else { throw XCTSkip("当前测试进程没有 Bilibili 登录态") }
+        let videoURL = ProcessInfo.processInfo.environment["READBOARD_BILIBILI_TEST_URL"]
+            ?? "https://www.bilibili.com/video/BV1z63862ERk/"
+        let markdown = try await BilibiliFetcher.fetchSubtitleMarkdown(
+            videoURL: videoURL)
+        XCTAssertGreaterThan(try XCTUnwrap(markdown, "该视频没有返回可用字幕：\(videoURL)").count, 1_000)
+    }
+}
+
 final class TruncateKeepEndsTests: XCTestCase {
 
     func testShortTextUnchanged() {
@@ -39,6 +163,34 @@ final class TruncateKeepEndsTests: XCTestCase {
         let body = String(repeating: "正", count: 11000) + "结论：买入黄金"
         let out = LLMPipeline.truncateKeepEnds(body, maxChars: 12000)
         XCTAssertTrue(out.hasSuffix("结论：买入黄金"), "结尾结论必须保留")
+    }
+}
+
+final class TranslationChunkingTests: XCTestCase {
+    func testProblemArticleLengthIsSplitIntoSafeChunksWithoutLoss() {
+        let text = String(repeating: "文", count: 12_643)
+        let chunks = LLMPipeline.translationChunks(text)
+        XCTAssertEqual(chunks.map(\.count), [6_000, 6_000, 643])
+        XCTAssertEqual(chunks.joined(), text)
+        XCTAssertTrue(chunks.allSatisfy { $0.count <= LLMPipeline.maxSingleTranslationChars })
+    }
+
+    func testParagraphBoundariesArePreservedWhenPossible() {
+        let paragraphs = [String(repeating: "甲", count: 3_000),
+                          String(repeating: "乙", count: 2_000),
+                          String(repeating: "丙", count: 2_000)]
+        let text = paragraphs.joined(separator: "\n\n")
+        let chunks = LLMPipeline.translationChunks(text)
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertEqual(chunks.joined(separator: "\n\n"), text)
+    }
+
+    func testFallbackErrorKeepsEveryModelReason() {
+        let reason = LLMPipeline.describeError(
+            LLMError.providersFailed("deepseek-v4-flash：最终内容为空；kimi-k2p6：请求超时"))
+        XCTAssertTrue(reason.contains("deepseek-v4-flash"))
+        XCTAssertTrue(reason.contains("kimi-k2p6"))
+        XCTAssertTrue(reason.contains("请求超时"))
     }
 }
 

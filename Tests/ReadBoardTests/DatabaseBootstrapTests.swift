@@ -8,7 +8,7 @@ final class DatabaseBootstrapTests: XCTestCase {
             throw XCTSkip("需要 READBOARD_DB 指向临时数据库；跳过以免触碰真实库")
         }
         XCTAssertTrue(Database.shared.open())
-        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 27)
+        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 29)
 
         let requiredColumns = ["deleted_at", "llm_translated_md", "llm_transcript_md",
                                "first_image_url"]
@@ -83,6 +83,71 @@ final class DatabaseBootstrapTests: XCTestCase {
         XCTAssertEqual(db.markAllRead(sourceId: sid, restrictToContentIds: [videoId]), 1)
         XCTAssertEqual(db.scalarInt("SELECT read_at IS NOT NULL FROM content WHERE id=?",
                                     params: [videoId]), 1)
+    }
+
+    func testUnmetProcessingViewUsesItemStandardsInsteadOfWorkerSnapshot() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_211_001
+        let scoreId: Int64 = 9_211_011
+        let summaryId: Int64 = 9_211_012
+        let completedId: Int64 = 9_211_013
+        let transcriptId: Int64 = 9_211_014
+        let disabledId: Int64 = 9_211_015
+        let duplicateId: Int64 = 9_211_016
+        let ids = [scoreId, summaryId, completedId, transcriptId, disabledId, duplicateId]
+        cleanup(ids: ids, sourceIds: [sid])
+        defer { cleanup(ids: ids, sourceIds: [sid]) }
+        let before = db.libraryCounts()
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config, enabled)
+            VALUES (?, 'rss', '处理标准测试源', ?, '{}', 1);
+            """, params: [sid, "https://test.invalid/unmet-\(sid)"]))
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content
+                (id,source_id,ctype,guid,source,title,url,read_at,
+                 auto_score,auto_summarize,auto_translate,auto_transcribe,
+                 llm_score,llm_summary,llm_translated_md,llm_transcript_md,is_duplicate)
+            VALUES
+                (?,?,'article',?,'rss','缺评分',?,NULL, 1,0,0,0, NULL,NULL,NULL,NULL,0),
+                (?,?,'article',?,'rss','缺摘要',?,'2026-08-01', 0,1,0,0, NULL,'  ',NULL,NULL,0),
+                (?,?,'article',?,'rss','翻译完成',?,NULL, 0,0,1,0, NULL,NULL,'译文',NULL,0),
+                (?,?,'podcast',?,'podcast','缺转录',?,NULL, 0,0,0,1, NULL,NULL,NULL,NULL,0),
+                (?,?,'article',?,'rss','未要求处理',?,NULL, 0,0,0,0, NULL,NULL,NULL,NULL,0),
+                (?,?,'article',?,'rss','重复项',?,NULL, 1,0,0,0, NULL,NULL,NULL,NULL,1);
+            """, params: [
+                scoreId, sid, "unmet-guid-\(scoreId)", "https://test.invalid/item/\(scoreId)",
+                summaryId, sid, "unmet-guid-\(summaryId)", "https://test.invalid/item/\(summaryId)",
+                completedId, sid, "unmet-guid-\(completedId)", "https://test.invalid/item/\(completedId)",
+                transcriptId, sid, "unmet-guid-\(transcriptId)", "https://test.invalid/item/\(transcriptId)",
+                disabledId, sid, "unmet-guid-\(disabledId)", "https://test.invalid/item/\(disabledId)",
+                duplicateId, sid, "unmet-guid-\(duplicateId)", "https://test.invalid/item/\(duplicateId)"
+            ]))
+
+        let pending = db.fetchContents(sourceId: sid, unmetProcessingOnly: true)
+        XCTAssertEqual(Set(pending.map(\.id)), Set([scoreId, summaryId, transcriptId]))
+        XCTAssertTrue(pending.allSatisfy(\.hasUnmetProcessing))
+        XCTAssertFalse(try XCTUnwrap(db.fetchContents(sourceId: sid).first { $0.id == completedId }).hasUnmetProcessing)
+
+        let counts = db.libraryCounts()
+        XCTAssertEqual(counts.pending, before.pending + 3)
+        XCTAssertEqual(counts.pendingUnread, before.pendingUnread + 2)
+        XCTAssertEqual(db.markAllRead(sourceId: sid, unmetProcessingOnly: true), 2)
+        XCTAssertEqual(db.scalarInt("SELECT read_at IS NOT NULL FROM content WHERE id=?", params: [disabledId]), 0)
+
+        XCTAssertTrue(db.execute("""
+            UPDATE content SET llm_score=88 WHERE id=?;
+            """, params: [scoreId]))
+        XCTAssertTrue(db.execute("""
+            UPDATE content SET llm_summary='摘要' WHERE id=?;
+            """, params: [summaryId]))
+        XCTAssertTrue(db.execute("""
+            UPDATE content SET llm_transcript_md='转录稿' WHERE id=?;
+            """, params: [transcriptId]))
+        XCTAssertTrue(db.fetchContents(sourceId: sid, unmetProcessingOnly: true).isEmpty)
+        XCTAssertEqual(db.libraryCounts().pending, before.pending)
     }
 
     func testLibraryCountsExposeUnreadExportedContents() throws {
@@ -592,7 +657,7 @@ final class DatabaseBootstrapTests: XCTestCase {
     }
 
     @MainActor
-    func testRetentionBacksUpClearsLargeFieldsAndRestoresSoftDeletedRow() throws {
+    func testRetentionSoftDeletesAndClearsLargeFieldsWithoutTrashBackup() throws {
         try requireIsolatedDatabase()
         let db = Database.shared
         XCTAssertTrue(db.open())
@@ -651,31 +716,12 @@ final class DatabaseBootstrapTests: XCTestCase {
                          "清理后大字段 \(field) 应释放")
         }
 
-        let batches = service.listTrash()
-        let batch = try XCTUnwrap(batches.first(where: { trashBatch in
-            guard let text = try? String(contentsOfFile: trashBatch.path, encoding: .utf8) else { return false }
-            return text.contains("retention-restore-guid-\(cid)")
-        }))
-        let jsonl = try String(contentsOfFile: batch.path, encoding: .utf8)
-        XCTAssertTrue(jsonl.contains("# 完整正文"))
-        XCTAssertTrue(jsonl.contains("# 完整译文"))
-        XCTAssertTrue(jsonl.contains("# 完整转录"))
-
-        XCTAssertEqual(service.restoreTrash(batch: batch).restored, 1)
-        XCTAssertNil(db.scalarString("SELECT deleted_at FROM content WHERE id = ?", params: [cid]))
-        XCTAssertEqual(db.scalarString("SELECT content_html FROM content WHERE id = ?", params: [cid]),
-                       "<p>完整 HTML</p>")
-        XCTAssertEqual(db.scalarString("SELECT content_md FROM content WHERE id = ?", params: [cid]), "# 完整正文")
-        XCTAssertEqual(db.scalarString("SELECT llm_translated_md FROM content WHERE id = ?", params: [cid]),
-                       "# 完整译文")
-        XCTAssertEqual(db.scalarString("SELECT llm_transcript_md FROM content WHERE id = ?", params: [cid]),
-                       "# 完整转录")
-        XCTAssertEqual(db.scalarString("SELECT llm_summary FROM content WHERE id = ?", params: [cid]), "AI 摘要")
-        XCTAssertEqual(db.scalarInt("SELECT llm_score FROM content WHERE id = ?", params: [cid]), 87)
+        XCTAssertTrue(service.listTrash().isEmpty,
+                      "当前版本采用静默软删除，不再为 retention 生成 JSONL 回收站")
     }
 
     @MainActor
-    func testRetentionDoesNotClearDatabaseWhenTrashBackupFails() throws {
+    func testRetentionDoesNotDependOnTrashDirectory() throws {
         try requireIsolatedDatabase()
         let db = Database.shared
         XCTAssertTrue(db.open())
@@ -712,11 +758,10 @@ final class DatabaseBootstrapTests: XCTestCase {
             service.deleteAfterDays = oldDays
         }
 
-        XCTAssertEqual(service.runRetention(), 0)
-        XCTAssertNil(db.scalarString("SELECT deleted_at FROM content WHERE id = ?", params: [cid]))
-        XCTAssertEqual(db.scalarString("SELECT content_md FROM content WHERE id = ?", params: [cid]), "# 不能丢")
-        XCTAssertEqual(db.scalarString("SELECT llm_translated_md FROM content WHERE id = ?", params: [cid]),
-                       "# 译文不能丢")
+        XCTAssertEqual(service.runRetention(), 1)
+        XCTAssertNotNil(db.scalarString("SELECT deleted_at FROM content WHERE id = ?", params: [cid]))
+        XCTAssertNil(db.scalarString("SELECT content_md FROM content WHERE id = ?", params: [cid]))
+        XCTAssertNil(db.scalarString("SELECT llm_translated_md FROM content WHERE id = ?", params: [cid]))
     }
 
     private func requireIsolatedDatabase() throws {

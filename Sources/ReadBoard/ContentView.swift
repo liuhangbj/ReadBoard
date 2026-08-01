@@ -503,7 +503,7 @@ public struct ContentView: View {
         .buttonStyle(.rowHover)
     }
 
-    /// 左栏「待处理」严格显示 Worker 规划器当前认定仍需进入内容处理引擎的内容。
+    /// 左栏「待处理」显示尚未达到条目 auto_* 所要求处理标准的全部内容。
     private var pendingRow: some View {
         let scale = uiFontScale
         let active = vm.selectedFilter == "pending"
@@ -886,7 +886,7 @@ public struct ContentView: View {
             Button("重新检测") { Task { await sourceStore.redetectFetchMode(id: src.id) } }
             Divider()
             // ── 五层级手动选择 ──
-            ForEach(FetchMode.allCases, id: \.rawValue) { fm in
+            ForEach(fetchModes(for: src.stype), id: \.rawValue) { fm in
                 Button {
                     Task { await sourceStore.setFetchMode(id: src.id, mode: fm.rawValue) }
                 } label: {
@@ -906,6 +906,14 @@ public struct ContentView: View {
                 }
             }
         }
+    }
+
+    /// 平台源只显示自己的字幕路径与「仅摘要」；普通源不暴露平台专属模式。
+    private func fetchModes(for sourceType: String) -> [FetchMode] {
+        if let platformMode = FetchMode.platformDefault(for: sourceType) {
+            return [platformMode, .summary]
+        }
+        return FetchMode.allCases.filter { !$0.isPlatformSubtitle }
     }
 
     // MARK: 文件夹抓取设置（与订阅源统一：打钩反映组内是否一致）
@@ -962,7 +970,7 @@ public struct ContentView: View {
             Button("重新检测") { Task { await sourceStore.redetectFolderFetchMode(folderId: fid) } }
             Divider()
             // 五层级手动选择（打钩：全组都是该手动模式）
-            ForEach(FetchMode.allCases, id: \.rawValue) { fm in
+            ForEach(FetchMode.allCases.filter { !$0.isPlatformSubtitle }, id: \.rawValue) { fm in
                 Button {
                     sourceStore.setFolderFetchMode(folderId: fid, mode: fm)
                 } label: {
@@ -1486,7 +1494,9 @@ public struct ArticleRow: View {
                 HStack(alignment: .top, spacing: 6) {
                     Text(displayTitle)
                         .font(.system(size: RB.F.rowTitle * scale, weight: (unreadBold && !isRead) ? .semibold : .regular))
-                        .foregroundStyle(isRead ? Color.rbText2 : Color.rbText)
+                        // 系统 List 高亮在窗口活跃/非活跃时都会压暗背景；选中标题固定用
+                        // 浅灰，避免已读项继续沿用 rbText2 后与高亮底混在一起。
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.82) : (isRead ? Color.rbText2 : Color.rbText))
                         .lineLimit(isCompact ? 1 : 2)
                         .fixedSize(horizontal: false, vertical: true)
                     if item.starred {
@@ -1887,8 +1897,14 @@ public struct ReadingView: View {
                             .padding(.vertical, 4)
                     } else if (item.ctype == "video" || item.ctype == "youtube"),
                               let vid = loadedVideoId, !vid.isEmpty {
-                        YouTubePlayerView(videoId: vid, title: item.title)
-                            .padding(.vertical, 4)
+                        switch VideoPlayerPlatform.resolve(source: item.source) {
+                        case .bilibili:
+                            BilibiliPlayerView(bvid: vid, title: item.title, pageURL: item.url)
+                                .padding(.vertical, 4)
+                        case .youtube:
+                            YouTubePlayerView(videoId: vid, title: item.title)
+                                .padding(.vertical, 4)
+                        }
                     }
 
                     // ── LLM 操作条（胶囊按钮组 + 状态提示，精致排版）──
@@ -1918,8 +1934,9 @@ public struct ReadingView: View {
                         if let msg = statusMsg {
                             Text(msg)
                                 .font(.caption)
-                                .foregroundStyle(Color.rbText3)
+                                .foregroundStyle(msg.contains("失败") ? Color.rbScoreLow : Color.rbText3)
                                 .lineLimit(1)
+                                .help(msg)
                         } else if !llmAvailable, !isMediaItem {
                             Label("未配置 LLM Key", systemImage: "exclamationmark.triangle")
                                 .font(.caption)
@@ -2314,11 +2331,18 @@ public struct ReadingView: View {
         processingStates.begin(contentId: cid, message: "内容处理中…")
         Task {
             var results: [String] = []
-            if policy.autoScore, pipeline.isAvailable { results.append(await pipeline.score(contentId: cid, title: item.title, body: body) ? "评分✅" : "评分❌") }
-            if policy.autoTranslate, !skipMediaTranslation, pipeline.isAvailable {
-                results.append(await pipeline.translate(contentId: cid, title: item.title, body: body) ? "翻译✅" : "翻译❌")
+            if policy.autoScore, pipeline.isAvailable {
+                let ok = await pipeline.score(contentId: cid, title: item.title, body: body)
+                results.append(ok ? "评分✅" : "评分❌ \(pipeline.lastError ?? "未知错误")")
             }
-            if policy.autoSummarize, pipeline.isAvailable { results.append(await pipeline.summarize(contentId: cid, title: item.title, body: body) ? "摘要✅" : "摘要❌") }
+            if policy.autoTranslate, !skipMediaTranslation, pipeline.isAvailable {
+                let ok = await pipeline.translate(contentId: cid, title: item.title, body: body)
+                results.append(ok ? "翻译✅" : "翻译❌ \(pipeline.lastError ?? "未知错误")")
+            }
+            if policy.autoSummarize, pipeline.isAvailable {
+                let ok = await pipeline.summarize(contentId: cid, title: item.title, body: body)
+                results.append(ok ? "摘要✅" : "摘要❌ \(pipeline.lastError ?? "未知错误")")
+            }
             if policy.autoTranscribe, isMediaItem {
                 results.append(await transcriber.transcribe(contentId: cid, title: item.title, audioUrl: audioUrl, pageUrl: item.url, language: item.language) ? "转录✅" : "转录❌")
             }
@@ -2384,11 +2408,13 @@ public struct ReadingView: View {
         processingStates.begin(contentId: cid, message: "AI 评分中…")
         Task {
             let ok = await pipeline.score(contentId: cid, title: item.title, body: contentBody)
+            let failure = pipeline.lastError ?? "未知错误"
+            if !ok { Trace.e("手动评分失败 id=\(cid)：\(failure)", category: "llm.manual") }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 processingStates.finish(
                     contentId: cid,
-                    message: ok ? "✅ AI 评分完成" : "❌ AI 评分失败")
+                    message: ok ? "✅ AI 评分完成" : "❌ AI 评分失败：\(failure)")
                 if ok {
                     refreshLoadedBody()
                     Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
@@ -2420,11 +2446,13 @@ public struct ReadingView: View {
             } else {
                 ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
             }
+            let failure = pipeline.lastError ?? "未知错误"
+            if !ok { Trace.e("手动翻译失败 id=\(cid)：\(failure)", category: "llm.manual") }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 processingStates.finish(
                     contentId: cid,
-                    message: ok ? "✅ 翻译完成" : "❌ 翻译失败")
+                    message: ok ? "✅ 翻译完成" : "❌ 翻译失败：\(failure)")
                 if ok {
                     refreshLoadedBody()
                     Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
@@ -2446,11 +2474,13 @@ public struct ReadingView: View {
         processingStates.begin(contentId: cid, message: "摘要中…")
         Task {
             let ok = await pipeline.summarize(contentId: cid, title: item.title, body: contentBody)
+            let failure = pipeline.lastError ?? "未知错误"
+            if !ok { Trace.e("手动摘要失败 id=\(cid)：\(failure)", category: "llm.manual") }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 processingStates.finish(
                     contentId: cid,
-                    message: ok ? "✅ 摘要完成" : "❌ 摘要失败")
+                    message: ok ? "✅ 摘要完成" : "❌ 摘要失败：\(failure)")
                 if ok {
                     refreshLoadedBody()
                     Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }

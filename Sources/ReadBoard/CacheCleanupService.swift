@@ -4,7 +4,7 @@ import SQLite3
 // MARK: - 缓存清理统一服务
 // 缓存散落各处：转录临时目录、超期备份、retention 天数、抓完丢弃的全文 HTML、DB 膨胀。
 // 统一一个服务：各项可配置（UserDefaults 持久化）+ 统计占用 + 一键清理。
-// 安全红线：星标/有标签的内容 retention 不动（沿用 RetentionService 的保护）；HTML 只在 content_md 已生成后清理；
+// 安全红线：星标内容 retention 不动；HTML 只在 content_md 已生成后清理；
 // 备份滚动只删超额的旧文件；临时目录只删 readboard- 前缀自己建的。
 
 @MainActor
@@ -107,7 +107,6 @@ public final class CacheCleanupService: ObservableObject {
             WHERE content_html IS NOT NULL AND LENGTH(content_html) > 0
               AND content_md IS NOT NULL AND LENGTH(content_md) > 0
               AND read_at IS NULL AND starred = 0 AND deleted_at IS NULL
-              AND id NOT IN (SELECT content_id FROM content_tag)
               AND updated_at < datetime('now', '-\(safeDays(cleanHtmlAfterDays)) days');
             """) ?? 0
 
@@ -185,9 +184,9 @@ public final class CacheCleanupService: ObservableObject {
         return removed
     }
 
-    /// 已读内容超期后先写入 JSONL 回收站，再软删除并释放正文/AI 结果等大字段。
+    /// 已读内容超期后静默软删除，并释放正文和 AI 结果等大字段。
     /// guid、source、url、title 等最小元数据留在数据库中，继续承担防重复抓取作用。
-    /// 星标和带标签的内容永久保护；备份失败时不修改任何候选内容。
+    /// 星标内容永久保护；当前版本不为自动清理生成回收站文件。
     @discardableResult
     func runRetention() -> Int {
         guard deleteEnabled && deleteAfterDays > 0 else { return 0 }
@@ -212,6 +211,7 @@ public final class CacheCleanupService: ObservableObject {
                     llm_title_translated = NULL,
                     llm_transcript_md = NULL,
                     llm_model = NULL,
+                    fetch_error = NULL,
                     updated_at = datetime('now')
                 WHERE id = ?;
                 """, params: [cid])
@@ -219,11 +219,6 @@ public final class CacheCleanupService: ObservableObject {
         }
         return deleted
     }
-
-
-    /// 把本次即将清理的完整内容快照写入 JSONL。返回文件路径表示已可靠落盘；失败返回 nil。
-    /// 参数直接使用 runRetention 的候选快照，避免备份和清理分别查询时范围发生漂移。
-
     /// 清全文 HTML。只有已经生成 content_md、未读未标且超过保留天数的内容会被清理；
     /// content_md 仍保留在数据库，阅读器不依赖原始 HTML。
     @discardableResult
@@ -233,7 +228,6 @@ public final class CacheCleanupService: ObservableObject {
             WHERE content_html IS NOT NULL AND LENGTH(content_html) > 0
               AND content_md IS NOT NULL AND LENGTH(content_md) > 0
               AND read_at IS NULL AND starred = 0 AND deleted_at IS NULL
-              AND id NOT IN (SELECT content_id FROM content_tag)
               AND updated_at < datetime('now', '-\(safeDays(cleanHtmlAfterDays)) days');
             """)
         return db.writeChanges()

@@ -1725,36 +1725,79 @@ public struct ReaderPane: View {
 public struct TypeSwitchPane: View {
     @State private var counts: [ContentType: Int] = [:]
     @State private var enabled: [ContentType: Bool] = [:]
+    @State private var bilibiliLoggedIn = false
+    @State private var bilibiliUname: String? = nil
+    @State private var showBilibiliQR = false
+    @State private var showBilibiliImport = false
 
     public var body: some View {
         Form {
             Section {
                 ForEach(ContentType.allCases.filter { $0 != .wechat }) { t in
-                    HStack(spacing: 12) {
-                        Image(systemName: t.icon)
-                            .font(.system(size: 16))
-                            .frame(width: 24)
-                            .foregroundStyle(Color.rbAccent)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(t.displayName)
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Color.rbText)
-                            Text(t.subtitle)
-                                .font(.caption)
-                                .foregroundStyle(Color.rbText2)
-                            Text("当前 \(counts[t] ?? 0) 个源")
-                                .font(.caption2)
-                                .foregroundStyle(Color.rbText3)
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(spacing: 12) {
+                            Image(systemName: t.icon)
+                                .font(.system(size: 16))
+                                .frame(width: 24)
+                                .foregroundStyle(Color.rbAccent)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(t.displayName)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(Color.rbText)
+                                Text(t.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(Color.rbText2)
+                                Text("当前 \(counts[t] ?? 0) 个源")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.rbText3)
+                            }
+                            Spacer()
+                            Toggle("", isOn: Binding(
+                                get: { enabled[t] ?? true },
+                                set: { enabled[t] = $0; ContentType.setEnabled(t, $0) }
+                            ))
+                            .labelsHidden()
+                            .tint(Color.rbAccent)
                         }
-                        Spacer()
-                        Toggle("", isOn: Binding(
-                            get: { enabled[t] ?? true },
-                            set: { enabled[t] = $0; ContentType.setEnabled(t, $0) }
-                        ))
-                        .labelsHidden()
-                        .tint(Color.rbAccent)
+                        .padding(.vertical, 4)
+
+                        // B站专属：扫码登录按钮/状态
+                        if t == .bilibili && (enabled[t] ?? true) {
+                            HStack(spacing: 8) {
+                                if bilibiliLoggedIn, let uname = bilibiliUname {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.green)
+                                    Text("已登录：\(uname)")
+                                        .font(.caption)
+                                        .foregroundStyle(Color.rbText2)
+                                    Spacer()
+                                    Button("退出登录") {
+                                        BilibiliAuth.clearAuth()
+                                        bilibiliLoggedIn = false
+                                        bilibiliUname = nil
+                                    }
+                                    .font(.caption)
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(Color.rbAccent)
+                                } else {
+                                    Button {
+                                        showBilibiliQR = true
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: "qrcode")
+                                            Text("扫码登录 B站")
+                                        }
+                                        .font(.caption)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(Color.rbAccent)
+                                    .controlSize(.small)
+                                }
+                            }
+                            .padding(.leading, 36)
+                            .padding(.bottom, 8)
+                        }
                     }
-                    .padding(.vertical, 4)
                 }
             } header: {
                 Text("订阅平台开关")
@@ -1770,13 +1813,26 @@ public struct TypeSwitchPane: View {
                 enabled[t] = t.enabled
                 counts[t] = srcs.filter { $0.stype == t.sourceStype }.count
             }
+            bilibiliLoggedIn = BilibiliAuth.isLoggedIn
+            bilibiliUname = BilibiliAuth.uname
+        }
+        .sheet(isPresented: $showBilibiliQR) {
+            BilibiliQRLoginView(onLoginSuccess: { uname in
+                bilibiliLoggedIn = true
+                bilibiliUname = uname
+                // 登录成功后询问是否导入已关注 UP 主
+                showBilibiliImport = true
+            })
+        }
+        .sheet(isPresented: $showBilibiliImport) {
+            BilibiliImportFollowingsView(store: SourceStore.shared)
         }
     }
 }
 
 /// 内容类型：设置页类型总开关枚举（与 content_source.stype 映射）。
 public enum ContentType: String, CaseIterable, Identifiable {
-    case article, podcast, youtube, wechat
+    case article, podcast, youtube, bilibili, wechat
     public var id: String { rawValue }
 
     var displayName: String {
@@ -1784,6 +1840,7 @@ public enum ContentType: String, CaseIterable, Identifiable {
         case .article: return "文章 / RSS"
         case .podcast: return "播客"
         case .youtube: return "视频 / YouTube"
+        case .bilibili: return "视频 / B站"
         case .wechat:  return "微信公众号"
         }
     }
@@ -1793,6 +1850,7 @@ public enum ContentType: String, CaseIterable, Identifiable {
         case .article: return "常规 RSS 文章订阅"
         case .podcast: return "音频节目（可转录）"
         case .youtube: return "视频 / 视频播客（可转录）"
+        case .bilibili: return "B站 UP 主视频（可转录）"
         case .wechat:  return "公众号转 RSS"
         }
     }
@@ -1802,6 +1860,7 @@ public enum ContentType: String, CaseIterable, Identifiable {
         case .article: return "doc.text"
         case .podcast: return "waveform"
         case .youtube: return "play.rectangle"
+        case .bilibili: return "play.tv"
         case .wechat:  return "message.fill"
         }
     }
@@ -1812,6 +1871,7 @@ public enum ContentType: String, CaseIterable, Identifiable {
         case .article: return "rss"
         case .podcast: return "podcast"
         case .youtube: return "youtube"
+        case .bilibili: return "bilibili"
         case .wechat:  return "wechat"
         }
     }

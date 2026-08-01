@@ -44,7 +44,9 @@ public struct FeedSource: Identifiable, Hashable, Sendable {
         guard let data = config.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let raw = obj["fetch_mode"] as? String,
-              let m = FetchMode(rawValue: raw) else { return .summary }
+              let m = FetchMode(rawValue: raw) else {
+            return FetchMode.platformDefault(for: stype) ?? .summary
+        }
         return m
     }
 
@@ -79,7 +81,7 @@ public struct FeedSource: Identifiable, Hashable, Sendable {
     }
 
     /// 该源是否可转录（播客/视频才有音频流）
-    var transcribable: Bool { stype == "podcast" || stype == "youtube" }
+    var transcribable: Bool { stype == "podcast" || stype == "youtube" || stype == "bilibili" }
 
     /// 最多保留条数（config.max_keep，0 = 不限制，默认 0）
     /// 超出后最旧的自动软删除。播客源几百上千条时用于限制列表保留量。
@@ -241,6 +243,7 @@ public final class SourceStore: ObservableObject {
                        params: sids)
         }
         reload()
+        NotificationCenter.default.post(name: .contentUpdated, object: nil)
     }
 
     /// 查某源的文件夹开关(供生效判定)。已废弃——管线改为纯按源处理，folder 不再存管线值。
@@ -291,7 +294,7 @@ public final class SourceStore: ObservableObject {
             // OPML 汇总页用 article 表示普通文章源；数据库统一使用 rss。
             let storedStype = item.stype == "article" ? "rss" : item.stype
             let configObj: [String: Any] = [
-                "fetch_mode": item.fetchModeRaw,
+                "fetch_mode": (FetchMode.platformDefault(for: storedStype)?.rawValue ?? item.fetchModeRaw),
                 "fetch_mode_auto": true,
                 "auto_score": p.autoScore,
                 "auto_translate": p.autoTranslate,
@@ -312,13 +315,25 @@ public final class SourceStore: ObservableObject {
         return insertedIds
     }
 
-    /// 添加订阅源（RSS/播客直接用 url；YouTube 传频道 url 或 UC id）
-    /// 添加时自动探测全文模式（仅 RSS 文章类需要; 播客/YouTube 不抓正文, 跳过探测）
+    /// 添加订阅源（RSS/播客直接用 url；YouTube 传频道 url 或 UC id；B站传 UID 或 space URL）
+    /// 添加时自动探测全文模式；YouTube/Bilibili 固定走各自的字幕提取路径。
     @discardableResult
     func addSource(stype: String, name: String, identifier: String, folderId: Int64? = nil,
-                   pipeline: PipelinePolicy = PipelinePolicy(), fetchMode: FetchMode? = nil) async -> Int64? {
+                   pipeline: PipelinePolicy = PipelinePolicy(), fetchMode: FetchMode? = nil,
+                   historyScope: HistoryScope? = nil) async -> Int64? {
         var config = "{}"
-        if stype == "rss" || stype == "youtube" {
+        var finalIdentifier = identifier
+        if stype == "bilibili" {
+            // B站：identifier 存纯 UID，从 space URL 提取
+            guard let uid = BilibiliFetcher.extractUID(from: identifier) else {
+                return nil
+            }
+            finalIdentifier = uid
+            let scope = historyScope ?? .recent30d
+            config = "{\"fetch_mode\":\"\(FetchMode.bilibiliSubtitle.rawValue)\",\"history_scope\":\"\(scope.rawValue)\"}"
+        } else if stype == "youtube" {
+            config = "{\"fetch_mode\":\"\(FetchMode.youtubeSubtitle.rawValue)\"}"
+        } else if stype == "rss" || stype == "podcast" {
             let mode: FetchMode
             if let m = fetchMode {
                 mode = m
@@ -346,24 +361,32 @@ public final class SourceStore: ObservableObject {
         }
         let ok = db.execute(
             "INSERT OR IGNORE INTO content_source (stype, name, identifier, enabled, config, folder_id) VALUES (?,?,?,1,?,?)",
-            params: [stype, name, identifier, config, folderId.map { Int($0) } as Any?]
+            params: [stype, name, finalIdentifier, config, folderId.map { Int($0) } as Any?]
         )
         guard ok else { return nil }
         reload()
         // 取回刚插入（或已存在）的源 id，供立即抓取首批使用
-        guard let row = db.scalarInt("SELECT id FROM content_source WHERE identifier = ?", params: [identifier]) else { return nil }
+        guard let row = db.scalarInt("SELECT id FROM content_source WHERE identifier = ?", params: [finalIdentifier]) else { return nil }
         return Int64(row)
     }
 
     /// 设置某源的全文提取模式——auto=自动检测（四级优先级），off=关闭全文
     /// 自动检测确定后记录 fetch_mode（后续固定用该模式）
     func setFetchMode(id: Int64, mode: String) async {
+        guard let sourceRow = db.queryRows(
+            "SELECT stype, identifier FROM content_source WHERE id = ?", params: [id]).first else { return }
+        let sourceType = sourceRow["stype"] ?? ""
+        let identifier = sourceRow["identifier"] ?? ""
+        let platformDefault = FetchMode.platformDefault(for: sourceType)
         let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
         var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
         if mode == "auto" {
-            // 自动检测——跑 probeMode 确定最高优先级模式
-            guard let identifier = db.scalarString("SELECT identifier FROM content_source WHERE id = ?", params: [id]) else { return }
-            let detected = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
+            let detected: FetchMode
+            if let platformMode = platformDefault {
+                detected = platformMode
+            } else {
+                detected = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
+            }
             obj["fetch_mode"] = detected.rawValue
             obj["fetch_mode_auto"] = true   // 标记是自动检测的
         } else if mode == "off" {
@@ -371,9 +394,16 @@ public final class SourceStore: ObservableObject {
             // 统一用 summary 表达「关闭」——播客的显示摘要和文章的抓不到兜底本质相同
             obj["fetch_mode"] = "summary"
             obj["fetch_mode_auto"] = false
-        } else if FetchMode(rawValue: mode) != nil {
-            // 手动指定具体模式（defuddle / feed_full / summary）
-            obj["fetch_mode"] = mode
+        } else if let requested = FetchMode(rawValue: mode) {
+            // 平台字幕模式不能交叉误配；平台源只允许专属模式或显式关闭为 summary。
+            if requested.isPlatformSubtitle {
+                guard requested == platformDefault else { return }
+                obj["fetch_mode"] = requested.rawValue
+            } else if let platformDefault, requested != .summary {
+                obj["fetch_mode"] = platformDefault.rawValue
+            } else {
+                obj["fetch_mode"] = requested.rawValue
+            }
             obj["fetch_mode_auto"] = false
         }
         if let data = try? JSONSerialization.data(withJSONObject: obj),
@@ -385,8 +415,13 @@ public final class SourceStore: ObservableObject {
 
     /// 重新检测某源的全文模式（强制重跑 probeMode）
     func redetectFetchMode(id: Int64) async {
-        guard let identifier = db.scalarString("SELECT identifier FROM content_source WHERE id = ?", params: [id]) else { return }
-        let detected = await FullTextFetcher.shared.probeMode(feedUrl: identifier)
+        guard let row = db.queryRows("SELECT stype, identifier FROM content_source WHERE id = ?", params: [id]).first else { return }
+        let detected: FetchMode
+        if let platformMode = FetchMode.platformDefault(for: row["stype"] ?? "") {
+            detected = platformMode
+        } else {
+            detected = await FullTextFetcher.shared.probeMode(feedUrl: row["identifier"] ?? "")
+        }
         let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
         var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
         obj["fetch_mode"] = detected.rawValue
@@ -399,12 +434,11 @@ public final class SourceStore: ObservableObject {
     }
 
     /// 批量重新检测多个源的全文模式（OPML 导入后后台调用）。
-    /// 跳过 podcast（音频无可读全文，走 summary）；rss 与 youtube 都参与探测——
-    /// youtube 现在会探测成 defuddle（靠视频页抓字幕 + 转录管线出稿，而非"仅摘要"退化）。
+    /// RSS/播客参与内容探测；YouTube/Bilibili 根据 stype 固定选择平台字幕路径。
     func probeFetchModes(ids: [Int64]) async {
         for id in ids {
             guard let stype = db.scalarString("SELECT stype FROM content_source WHERE id = ?", params: [id]),
-                  stype == "rss" || stype == "youtube" else { continue }
+                  stype == "rss" || stype == "podcast" || stype == "youtube" || stype == "bilibili" else { continue }
             await redetectFetchMode(id: id)
         }
     }
@@ -428,6 +462,15 @@ public final class SourceStore: ObservableObject {
                 guard let current = db.scalarString("SELECT stype FROM content_source WHERE id = ?", params: [id]),
                       current == "rss", detected != "rss" else { continue }
                 db.execute("UPDATE content_source SET stype = ? WHERE id = ?", params: [detected, id])
+                if let platformMode = FetchMode.platformDefault(for: detected) {
+                    let config = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
+                    var obj = (try? JSONSerialization.jsonObject(with: Data(config.utf8)) as? [String: Any]) ?? [:]
+                    obj["fetch_mode"] = platformMode.rawValue
+                    if let data = try? JSONSerialization.data(withJSONObject: obj),
+                       let json = String(data: data, encoding: .utf8) {
+                        db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [json, id])
+                    }
+                }
             } catch {
                 // 抓不到就保留原 guessType 结果，不阻断
             }
@@ -437,12 +480,13 @@ public final class SourceStore: ObservableObject {
 
     /// 文件夹级批量设全文提取模式（对文件夹内所有源统一设置）
     func setFolderFetchMode(folderId: Int64, mode: FetchMode) {
-        let ids = db.queryRows("SELECT id FROM content_source WHERE folder_id = ?",
-                               params: [folderId]).compactMap { Int64($0["id"] ?? "") }
-        for sid in ids {
+        let rows = db.queryRows("SELECT id, stype FROM content_source WHERE folder_id = ?",
+                                params: [folderId])
+        for row in rows {
+            guard let sid = Int64(row["id"] ?? "") else { continue }
             let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [sid]) ?? "{}"
             var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
-            obj["fetch_mode"] = mode.rawValue
+            obj["fetch_mode"] = (FetchMode.platformDefault(for: row["stype"] ?? "") ?? mode).rawValue
             if let data = try? JSONSerialization.data(withJSONObject: obj),
                let str = String(data: data, encoding: .utf8) {
                 db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, sid])
@@ -623,21 +667,25 @@ public final class SourceStore: ObservableObject {
     @discardableResult
     func setHistoricalItemsEnabled(sourceId: Int64, key: String) -> Bool {
         guard let column = pipelineColumn(for: key) else { return false }
-        return db.execute("""
+        let updated = db.execute("""
             UPDATE content SET \(column) = 1
             WHERE source_id = ? AND deleted_at IS NULL AND is_duplicate = 0;
             """, params: [sourceId])
+        if updated { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
+        return updated
     }
 
     /// 文件夹入口与单源入口使用完全相同的历史回填语义。
     @discardableResult
     func setHistoricalItemsEnabled(folderId: Int64, key: String) -> Bool {
         guard let column = pipelineColumn(for: key) else { return false }
-        return db.execute("""
+        let updated = db.execute("""
             UPDATE content SET \(column) = 1
             WHERE source_id IN (SELECT id FROM content_source WHERE folder_id = ?)
               AND deleted_at IS NULL AND is_duplicate = 0;
             """, params: [folderId])
+        if updated { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
+        return updated
     }
 
     /// 切换某条管线开关，合并写回 config JSON
@@ -648,7 +696,7 @@ public final class SourceStore: ObservableObject {
         obj[key] = value
         if let data = try? JSONSerialization.data(withJSONObject: obj),
                let str = String(data: data, encoding: .utf8) {
-            _ = db.transaction {
+            let updated = db.transaction {
                 guard db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id]) else {
                     return false
                 }
@@ -659,6 +707,7 @@ public final class SourceStore: ObservableObject {
                 return db.execute("UPDATE content SET \(column)=0 WHERE source_id=? AND \(column) IS NOT 0",
                                   params: [id])
             }
+            if updated { NotificationCenter.default.post(name: .contentUpdated, object: nil) }
         }
         reload()
     }
@@ -735,7 +784,14 @@ public final class SourceStore: ObservableObject {
 
     /// 已持有 isSyncing 锁时执行实际抓取；只允许 syncAll/syncOne 调用。
     private func syncOneUnlocked(_ src: FeedSource) async throws -> Int {
-        let feed = try await FeedFetcher.fetch(urlString: src.identifier)
+        // B站源走独立适配器（JSON API，非 RSS）
+        let feed: ParsedFeed
+        if src.stype == "bilibili" {
+            let scope = HistoryScope(rawValue: extractHistoryScope(from: src.config)) ?? .recent30d
+            feed = try await BilibiliFetcher.fetch(uid: src.identifier, historyScope: scope)
+        } else {
+            feed = try await FeedFetcher.fetch(urlString: src.identifier)
+        }
         // 频道级语言可安全回填该源的历史空值；单条 entry 的语言在 upsertContent 中优先处理。
         if let feedLanguage = ContentLanguage.normalize(feed.language) {
             let sourceId = src.id
@@ -757,14 +813,15 @@ public final class SourceStore: ObservableObject {
             }.value
             if let newId {
                 added += 1
-                // 新文章: 按源的 fetch_mode 立即抓全文（播客跳过——无正文，YouTube 需要 defuddle 抓原文）
-                if entry.meta["audio_url"] == nil && entry.meta["video_url"] == nil {
-                    await FullTextFetcher.shared.fetchAndStore(
-                        contentId: newId, url: entry.url,
-                        feedHtml: entry.html.isEmpty ? nil : entry.html,
-                        mode: src.fetchMode
-                    )
-                }
+                // 新内容入库即按源的 fetch_mode 抓全文。
+                // YouTube/Bilibili 由 stype 固定走字幕提取；普通 RSS/播客仍按各自配置。
+                // 各模式现在都会把 feed 自带正文落到 content_md（summary 模式经 writeBackFeedHtmlAsMd），
+                // 不再按 audio_url/video_url 类型跳过；落在 .summary 不再等于"不抓正文"。
+                await FullTextFetcher.shared.fetchAndStore(
+                    contentId: newId, url: entry.url,
+                    feedHtml: entry.html.isEmpty ? nil : entry.html,
+                    mode: src.fetchMode
+                )
                 // 入库事件只负责唤醒规则；是否已具备所需文稿由导出规则的完成条件判断。
                 await ExportService.shared.runPending(trigger: "ingest", contentId: newId)
                 // “加工完成”规则的就绪条件与触发分离：不要求 AI 产物的规则在全文入库后即可交付；
@@ -879,10 +936,12 @@ public final class SourceStore: ObservableObject {
                 isDup = 1
                 dupOf = Int64(existingId)
             }
-            // 播客/视频：简介(entry.html)剥标签写进 excerpt——播客的「摘要」存摘要字段，
-            // content_html 之后可随统一规则删除（文章 content_html 是全文原料另行处理）
-            let excerptForInsert: String? = (ctype == "podcast" || ctype == "video")
-                ? stripHtml(entry.html) : nil
+            // excerpt 不再按类型特殊填充：播客/视频/YouTube 的正文（show notes / 字幕稿）
+            // 已在提取阶段由 fetch_mode 对应路径收编进 content_md（播客走 summary 模式的 writeBackFeedHtmlAsMd、
+            // 文章/视频走 feedFull/defuddle）；
+            // excerpt 退化为"content_md 缺失时的展示兜底"，由既有逻辑/回填统一处理，
+            // 避免同一段文字双份存储、绕路写入。
+            let excerptForInsert: String? = nil
             let ok = db.execute(
                 """
                 INSERT INTO content (ctype, guid, source, source_id, title, author, url, language, published_at, content_html, first_image_url, excerpt, fetch_status, meta, content_hash, is_duplicate, duplicate_of, auto_score, auto_translate, auto_summarize, auto_transcribe)
@@ -910,10 +969,20 @@ public final class SourceStore: ObservableObject {
     /// 主分类表达用户订阅的内容来源；播客 enclosure 使用 MP4 只改变媒体载体，不改变分类。
     nonisolated static func contentType(source: String, meta: [String: String]) -> String {
         if source == "podcast" { return "podcast" }
-        if source == "youtube" || source == "video" { return "video" }
+        if source == "youtube" || source == "video" || source == "bilibili" { return "video" }
         if meta["video_id"] != nil || meta["video_url"] != nil { return "video" }
         if meta["audio_url"] != nil { return "podcast" }
         return "article"
+    }
+
+    /// 从 content_source.config JSON 提取 B站历史回溯范围
+    private func extractHistoryScope(from configJson: String) -> String {
+        guard let data = configJson.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let scope = obj["history_scope"] as? String else {
+            return HistoryScope.recent30d.rawValue
+        }
+        return scope
     }
 
 #if DEBUG

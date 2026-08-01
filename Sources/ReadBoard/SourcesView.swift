@@ -436,7 +436,7 @@ public struct SourceRow: View {
                 }
             }
             Divider()
-            ForEach(FetchMode.allCases, id: \.rawValue) { fm in
+            ForEach(FetchMode.allCases.filter { !$0.isPlatformSubtitle }, id: \.rawValue) { fm in
                 Button {
                     Task { await store.setFetchMode(id: src.id, mode: fm.rawValue) }
                 } label: {
@@ -596,6 +596,7 @@ public struct SourceRow: View {
         switch src.stype {
         case "podcast": return "mic"
         case "youtube": return "play.rectangle"
+        case "bilibili": return "play.tv"
         case "wechat": return "bubble.left.and.bubble.right"
         default: return "newspaper"
         }
@@ -605,6 +606,7 @@ public struct SourceRow: View {
         switch src.fetchMode {
         case .feedFull: return .rbScoreHigh
         case .defuddle: return .rbAccent
+        case .youtubeSubtitle, .bilibiliSubtitle: return .rbAccent
         case .summary: return .rbScoreNone
         }
     }
@@ -625,6 +627,7 @@ public struct AddSourceSheet: View {
         ("article", "RSS 文章"),
         ("podcast", "播客"),
         ("youtube", "YouTube"),
+        ("bilibili", "B站"),
     ]
 
     @State private var name = ""
@@ -641,6 +644,7 @@ public struct AddSourceSheet: View {
     @State private var resolvedFeedURL: String? = nil   // 检测成功后定稿的 feed URL（自动发现可能改写）
     @State private var testedOK = false                  // 检测通过才能添加
     @State private var detectedMode: FetchMode = .summary   // 检测阶段拿到的全文模式，添加时直接复用，不重复 probe
+    @State private var historyScope: HistoryScope = .recent30d   // B站专属：历史回溯范围
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -722,6 +726,23 @@ public struct AddSourceSheet: View {
                     Toggle("AI 摘要", isOn: $autoSummarize)
                     Toggle("AI 转录", isOn: $autoTranscribe)
                 }
+
+                // B站专属：历史回溯范围选择
+                if stype == "bilibili" {
+                    Text("历史回溯范围")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.rbText3)
+                        .tracking(RB.Track.section)
+                        .padding(.top, 4)
+                    Picker("", selection: $historyScope) {
+                        ForEach(HistoryScope.allCases, id: \.self) { scope in
+                            Text(scope.displayName).tag(scope)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .tint(Color.rbAccent)
+                    .labelsHidden()
+                }
             }
 
             if !testResult.isEmpty {
@@ -780,7 +801,10 @@ public struct AddSourceSheet: View {
         }
     }
 
-    /// 解析用户输入为最终 identifier（先按 YouTube 特征识别，再下落 discover）
+    /// B站源在检测阶段的 stype 固定为 bilibili（resolveIdentifier 已分流）
+    private func stypeForBilibili() -> String { "bilibili" }
+
+    /// 解析用户输入为最终 identifier（先按 YouTube/B站特征识别，再下落 discover）
     private func resolveIdentifier(_ input: String) async throws -> (feedURL: String, feed: ParsedFeed) {
         let id = input.trimmingCharacters(in: .whitespaces)
         // YouTube 频道地址 → 解析为 videos.xml（需 async 解析 channel_id）
@@ -788,6 +812,15 @@ public struct AddSourceSheet: View {
             let feedURL = try await YouTubeResolver.resolveFeedURL(id)
             let feed = try await FeedFetcher.fetch(urlString: feedURL)
             return (feedURL, feed)
+        }
+        // B站 UP 主空间地址 → 提取 UID，走 BilibiliFetcher（JSON API，非 RSS）
+        if id.lowercased().contains("space.bilibili.com") || id.lowercased().contains("bilibili.com") {
+            guard let uid = BilibiliFetcher.extractUID(from: id) else {
+                throw NSError(domain: "AddSource", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法从该地址提取 B站 UID"])
+            }
+            // B站不走 RSS，直接构造 ParsedFeed（stype 由 addSource 的 bilibili 分支处理）
+            let feed = try await BilibiliFetcher.fetch(uid: uid, historyScope: .recent30d)
+            return (uid, feed)
         }
         // 其余：自动发现（feed URL 或网站主页），feed 内容探测类型
         return try await FeedFetcher.discoverAndFetch(urlString: id)
@@ -802,8 +835,16 @@ public struct AddSourceSheet: View {
             do {
                 let input = identifier.trimmingCharacters(in: .whitespaces)
                 let (feedURL, feed) = try await resolveIdentifier(input)
-                let detected = stypeFromKind(feed.kind)
-                let mode = await FullTextFetcher.shared.probeMode(feedUrl: feedURL)
+                // 平台字幕路径严格由 stype 决定，不能用笼统的 feed.kind.video 代替。
+                let isBilibili = input.lowercased().contains("bilibili.com")
+                let detected = isBilibili ? "bilibili" : stypeFromKind(feed.kind)
+                let storedType = detected == "article" ? "rss" : detected
+                let mode: FetchMode
+                if let platformMode = FetchMode.platformDefault(for: storedType) {
+                    mode = platformMode
+                } else {
+                    mode = await FullTextFetcher.shared.probeMode(feedUrl: feedURL)
+                }
                 let kindLabel = Self.stypeOptions.first(where: { $0.value == detected })?.label ?? detected
                 var msg = "✓ \(feed.title)：\(feed.entries.count) 条，识别为 \(kindLabel)，全文 \(mode.displayName)"
                 if feedURL != input { msg += "\n（主页自动发现 feed: \(feedURL)）" }
@@ -847,7 +888,8 @@ public struct AddSourceSheet: View {
         Task {
             guard let newId = await store.addSource(stype: storeStype, name: finalName, identifier: url,
                                                      folderId: selectedFolderId, pipeline: pipeline,
-                                                     fetchMode: detectedMode) else {
+                                                     fetchMode: detectedMode,
+                                                     historyScope: stype == "bilibili" ? historyScope : nil) else {
                 await MainActor.run {
                     testing = false
                     testResult = "✗ 添加失败（可能已存在相同源）"

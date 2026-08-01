@@ -24,6 +24,10 @@ public struct TranslateFullResult {
 // MARK: - LLM 管线（评分 + 翻译）
 
 public final class LLMPipeline: @unchecked Sendable {
+    /// 单次长译文容易让推理模型把输出预算耗在 reasoning，最终 content 为空。
+    /// 超过此长度即按段落切块，优先保证可靠产出而不是坚持单次请求。
+    static let maxSingleTranslationChars = 6_000
+
     private let client = LLMClient()
     private let db = Database.shared
 
@@ -142,7 +146,7 @@ public final class LLMPipeline: @unchecked Sendable {
                 return "LLM HTTP \(code)：\(body.prefix(80))"
             case .emptyResponse: return "LLM 返回空响应"
             case .invalidJSON: return "LLM 返回非 JSON"
-            default: return "LLM 错误：\(error.localizedDescription)"
+            case .providersFailed(let detail): return "所有模型均失败：\(detail)"
             }
         }
         return "网络/未知错误：\(error.localizedDescription)"
@@ -247,17 +251,16 @@ public final class LLMPipeline: @unchecked Sendable {
     }
 
     /// 把任意文本翻译成目标语言，返回译文（不写库）。供转录管线复用。
-    /// 短文本单次翻；长文本（>15000 字，如长转录稿）按段分块翻译再拼接，不静默截断丢内容。
+    /// 短文本单次翻；长文本按段分块翻译再拼接，不静默截断丢内容。
     func translateRaw(_ text: String, targetLang: String = "中文") async -> String? {
         guard isAvailable else { return nil }
-        // 长文本走分块，保住全文（转录稿 1-2 小时节目轻松破 15000 字）
-        if text.count > 15000 {
+        if text.count > Self.maxSingleTranslationChars {
             return await translateChunked(text, targetLang: targetLang)
         }
         return await translateSingle(text, targetLang: targetLang)
     }
 
-    /// 单次翻译（<=15000 字）
+    /// 单次翻译（不超过 maxSingleTranslationChars）
     private func translateSingle(_ text: String, targetLang: String) async -> String? {
         let outputLanguage = AIPromptSettings.effectiveTranslationLanguage(fallback: targetLang)
         let prompt = """
@@ -275,10 +278,13 @@ public final class LLMPipeline: @unchecked Sendable {
                 let (out, _) = try await client.chat(
                     messages: [ChatMessage(role: "user", content: prompt)],
                     maxTokens: 16384)
-                guard !Task.isCancelled else { return nil }
+                guard !Task.isCancelled else { setError("任务已取消"); return nil }
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { setError("翻译结果为空"); return nil }
+            setError(nil)
             return trimmed.isEmpty ? nil : trimmed
         } catch {
+            setError(Self.describeError(error))
             return nil
         }
     }
@@ -392,24 +398,35 @@ public final class LLMPipeline: @unchecked Sendable {
     }
 
 
-    /// 分块翻译：按段落边界切 ~12000 字一块，逐块翻译后拼接。单块失败则该块保留原文，
+    /// 分块翻译：按段落边界切至安全长度，逐块翻译后拼接。单块失败则该块保留原文，
     /// 不至于整篇丢。块间无上下文，靠段落边界保证语义相对完整。
     private func translateChunked(_ text: String, targetLang: String) async -> String? {
-        let chunks = Self.splitByParagraph(text, maxChars: 12000)
+        let chunks = Self.translationChunks(text)
         guard !chunks.isEmpty else { return nil }
         var parts: [String] = []
         var anyOK = false
+        var failures: [String] = []
         for (i, chunk) in chunks.enumerated() {
             guard !Task.isCancelled else { return nil }
             if let t = await translateSingle(chunk, targetLang: targetLang) {
                 parts.append(t)
                 anyOK = true
             } else {
+                failures.append("第 \(i + 1) 块：\(lastError ?? "未知错误")")
                 // 单块失败：保留原文块 + 标注，不静默丢
                 parts.append("[第 \(i + 1) 段翻译失败，保留原文]\n" + chunk)
             }
         }
-        return anyOK ? parts.joined(separator: "\n\n") : nil
+        guard anyOK else {
+            setError("分块翻译全部失败：" + failures.joined(separator: "；"))
+            return nil
+        }
+        setError(nil)
+        return parts.joined(separator: "\n\n")
+    }
+
+    static func translationChunks(_ text: String) -> [String] {
+        splitByParagraph(text, maxChars: maxSingleTranslationChars)
     }
 
     /// 按段落（空行）切分，每块不超过 maxChars；单段超限时连续切块，保证全文不丢。
@@ -482,7 +499,9 @@ public final class LLMPipeline: @unchecked Sendable {
     /// 整合翻译+评分+摘要，一次 LLM 调用。根据 policy 决定回写哪些字段。
     @discardableResult
     func translateFull(contentId: Int64, title: String, body: String, policy: PipelinePolicy) async -> Bool {
-        guard isAvailable, body.count <= 15000 else {
+        // Worker 的评分+摘要+翻译整合调用仍保留原有 15,000 字上限，避免普通文章
+        // 因可靠性修复退化成三次独立请求；手动纯翻译则使用更保守的 6,000 字分块。
+        guard isAvailable, body.count <= 15_000 else {
             // 长文走旧路径：分块翻译 + 可选独立评分/摘要（整合 prompt 太长会炸）
             return await translateLongWithPolicy(contentId: contentId, title: title, body: body, policy: policy)
         }
@@ -522,6 +541,7 @@ public final class LLMPipeline: @unchecked Sendable {
     /// 长文降级：分块翻译（不走整合 prompt），再按开关分开跑评分/摘要
     private func translateLongWithPolicy(contentId: Int64, title: String, body: String, policy: PipelinePolicy) async -> Bool {
         let translated = await translate(contentId: contentId, title: title, body: body)
+        let translationError = lastError
         guard !Task.isCancelled else { setError("任务已取消"); return false }
         if policy.autoScore {
             let _ = await score(contentId: contentId, title: title, body: body)
@@ -530,6 +550,7 @@ public final class LLMPipeline: @unchecked Sendable {
         if policy.autoSummarize {
             let _ = await summarize(contentId: contentId, title: title, body: body)
         }
+        if !translated { setError(translationError ?? "翻译失败") }
         return translated
     }
 
@@ -600,7 +621,7 @@ public final class LLMPipeline: @unchecked Sendable {
     }
 
     /// 把内容全文翻译成配置的目标语言，写入 llm_translated_md
-    /// 长文（>15000 字）走分块翻译，不再静默截断丢尾部（此前 truncateKeepEnds(15000) 会丢超长文的后半）
+    /// 较长正文走分块翻译，避免推理模型耗尽输出预算且不静默截断正文。
     @discardableResult
     func translate(contentId: Int64, title: String, body: String, targetLang: String = "中文") async -> Bool {
         guard isAvailable else { return false }
@@ -608,7 +629,7 @@ public final class LLMPipeline: @unchecked Sendable {
         var translated: String?
         var usedModel = ""
         var partial = false   // 分块翻译有块失败保留原文 → 译文不完整，标记到 meta 供 UI/导出判断
-        if body.count > 15000 {
+        if body.count > Self.maxSingleTranslationChars {
             // 分块：先翻标题（短），正文按段落切块逐块翻
             let titleT = await translateSingle(title, targetLang: outputLanguage) ?? title
             guard let bodyT = await translateChunked(body, targetLang: outputLanguage) else { return false }

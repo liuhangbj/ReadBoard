@@ -19,6 +19,7 @@ public enum LLMError: Error, LocalizedError {
     case httpError(Int, String)
     case emptyResponse
     case invalidJSON
+    case providersFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -26,6 +27,7 @@ public enum LLMError: Error, LocalizedError {
         case .httpError(let c, let b): return "LLM HTTP \(c): \(b.prefix(200))"
         case .emptyResponse: return "LLM 返回空"
         case .invalidJSON: return "LLM 返回非 JSON"
+        case .providersFailed(let detail): return "所有模型均失败：\(detail)"
         }
     }
 }
@@ -68,6 +70,7 @@ public final class LLMClient {
         let providers = activeProviders()
         guard !providers.isEmpty else { throw LLMError.noProvider }
         var lastError: Error = LLMError.emptyResponse
+        var failures: [String] = []
         for p in providers {
             try Task.checkCancellation()
             do {
@@ -75,15 +78,40 @@ public final class LLMClient {
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     return (text, p.model)
                 }
+                lastError = LLMError.emptyResponse
+                failures.append("\(p.model)：最终内容为空")
             } catch {
                 if Self.isCancellation(error) || Task.isCancelled {
                     throw CancellationError()
                 }
                 lastError = error
+                failures.append("\(p.model)：\(Self.failureDescription(error))")
                 continue  // fallback 下一个
             }
         }
+        if !failures.isEmpty {
+            throw LLMError.providersFailed(failures.joined(separator: "；"))
+        }
         throw lastError
+    }
+
+    /// fallback 诊断只记录模型名和错误类型，不记录 prompt、响应正文或 API Key。
+    private static func failureDescription(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            if urlError.code == .timedOut { return "请求超时" }
+            return urlError.localizedDescription
+        }
+        if let llmError = error as? LLMError {
+            switch llmError {
+            case .noProvider: return "配置不可用"
+            case .httpError(let code, let body):
+                return "HTTP \(code)：\(body.prefix(100))"
+            case .emptyResponse: return "最终内容为空"
+            case .invalidJSON: return "响应格式无法识别或最终内容缺失"
+            case .providersFailed(let detail): return detail
+            }
+        }
+        return error.localizedDescription
     }
 
     /// 429 限流时同 provider 退避重试（最多 2 次），其余错误直接抛出走 fallback

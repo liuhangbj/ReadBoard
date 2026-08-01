@@ -49,6 +49,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
     /// 有全文（content_md 非空）——全文 badge 用，列表轻列不扛 content_md 大字段
     var hasFulltext: Bool = false
     var hasExport: Bool = false   // 已导出（export_record 有记录）
+    var hasUnmetProcessing: Bool = false // 尚未达到条目 auto_* 所要求的处理标准
 
 /// 返回一个标记为已读的副本（本地状态同步用）
     func markingRead() -> ContentItem {
@@ -66,6 +67,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
         copy.titleTranslated = titleTranslated
         copy.hasFulltext = hasFulltext
         copy.hasExport = hasExport
+        copy.hasUnmetProcessing = hasUnmetProcessing
         return copy
     }
 
@@ -85,6 +87,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
         copy.titleTranslated = titleTranslated
         copy.hasFulltext = hasFulltext
         copy.hasExport = hasExport
+        copy.hasUnmetProcessing = hasUnmetProcessing
         return copy
     }
 
@@ -106,6 +109,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
         copy.hasFulltext = hasFulltext
         copy.contentHtml = contentHtml ?? self.contentHtml
         copy.hasExport = hasExport
+        copy.hasUnmetProcessing = hasUnmetProcessing
         return copy
     }
 }
@@ -133,6 +137,8 @@ public struct SidebarNode: Identifiable, Hashable, Sendable {
 struct LibraryCounts: Sendable {
     var total = 0
     var unread = 0
+    var pending = 0
+    var pendingUnread = 0
     var exported = 0
     var exportedUnread = 0
     var articles = 0
@@ -714,6 +720,7 @@ public final class Database: @unchecked Sendable {
                        tagId: Int64? = nil,
                        processedFilters: [String: Int] = [:],
                        contentCategory: String? = nil,
+                       unmetProcessingOnly: Bool = false,
                        restrictToContentIds: Set<Int64>? = nil,
                        sortOrder: String = "newest",
                        limit: Int = 200, offset: Int = 0) -> [ContentItem] {
@@ -735,7 +742,8 @@ public final class Database: @unchecked Sendable {
                    (c.content_md IS NOT NULL AND LENGTH(c.content_md) > 500) AS has_fulltext,
                    (c.llm_excerpt_translated IS NOT NULL AND c.llm_excerpt_translated != '') AS has_excerpt_trans,
                    (EXISTS (SELECT 1 FROM export_record er WHERE er.content_id = c.id AND er.status = 'delivered')) AS has_export,
-                   c.source_id, COALESCE(s.name, c.source) AS source_name
+                   c.source_id, COALESCE(s.name, c.source) AS source_name,
+                   (\(Self.unmetProcessingCondition(columnPrefix: "c."))) AS has_unmet_processing
             FROM content c
             JOIN content_fts f ON f.rowid = c.id
             LEFT JOIN content_source s ON s.id = c.source_id
@@ -753,7 +761,8 @@ public final class Database: @unchecked Sendable {
                    (c.content_md IS NOT NULL AND LENGTH(c.content_md) > 500) AS has_fulltext,
                    (c.llm_excerpt_translated IS NOT NULL AND c.llm_excerpt_translated != '') AS has_excerpt_trans,
                    (EXISTS (SELECT 1 FROM export_record er WHERE er.content_id = c.id AND er.status = 'delivered')) AS has_export,
-                   c.source_id, COALESCE(s.name, c.source) AS source_name
+                   c.source_id, COALESCE(s.name, c.source) AS source_name,
+                   (\(Self.unmetProcessingCondition(columnPrefix: "c."))) AS has_unmet_processing
             FROM content c
             LEFT JOIN content_source s ON s.id = c.source_id
             """
@@ -787,6 +796,9 @@ public final class Database: @unchecked Sendable {
             case "article": conds.append("\(col)ctype NOT IN ('podcast','video','youtube')")
             default: break
             }
+        }
+        if unmetProcessingOnly {
+            conds.append(Self.unmetProcessingCondition(columnPrefix: col))
         }
         if let ids = restrictToContentIds {
             if ids.isEmpty {
@@ -1028,6 +1040,7 @@ public final class Database: @unchecked Sendable {
                      tagId: Int64? = nil,
                      processedFilters: [String: Int] = [:],
                      contentCategory: String? = nil,
+                     unmetProcessingOnly: Bool = false,
                      restrictToContentIds: Set<Int64>? = nil) -> Int {
         var sql = "UPDATE content SET read_at = datetime('now') WHERE read_at IS NULL AND is_duplicate = 0 AND deleted_at IS NULL"
         var conds: [String] = []
@@ -1049,6 +1062,9 @@ public final class Database: @unchecked Sendable {
             case "article": conds.append("ctype NOT IN ('podcast','video','youtube')")
             default: break
             }
+        }
+        if unmetProcessingOnly {
+            conds.append(Self.unmetProcessingCondition(columnPrefix: ""))
         }
         if let ids = restrictToContentIds {
             if ids.isEmpty { conds.append("0") }
@@ -1153,9 +1169,12 @@ public final class Database: @unchecked Sendable {
 
     /// 左栏全局与内容类型计数一次完成，避免 total/unread/type 分别扫描大表。
     func libraryCounts() -> LibraryCounts {
+        let unmet = Self.unmetProcessingCondition(columnPrefix: "")
         guard let row = queryRows("""
             SELECT COUNT(*) AS total,
                    SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread,
+                   SUM(CASE WHEN \(unmet) THEN 1 ELSE 0 END) AS pending,
+                   SUM(CASE WHEN read_at IS NULL AND \(unmet) THEN 1 ELSE 0 END) AS pending_unread,
                    SUM(CASE WHEN ctype NOT IN ('podcast','video','youtube') THEN 1 ELSE 0 END) AS articles,
                    SUM(CASE WHEN ctype NOT IN ('podcast','video','youtube') AND read_at IS NULL THEN 1 ELSE 0 END) AS article_unread,
                    SUM(CASE WHEN ctype='podcast' THEN 1 ELSE 0 END) AS podcasts,
@@ -1174,11 +1193,25 @@ public final class Database: @unchecked Sendable {
             """).first else { return LibraryCounts() }
         func value(_ key: String) -> Int { Int(row[key] ?? "0") ?? 0 }
         return LibraryCounts(
-            total: value("total"), unread: value("unread"), exported: value("exported"),
+            total: value("total"), unread: value("unread"),
+            pending: value("pending"), pendingUnread: value("pending_unread"),
+            exported: value("exported"),
             exportedUnread: value("exported_unread"),
             articles: value("articles"), articleUnread: value("article_unread"),
             podcasts: value("podcasts"), podcastUnread: value("podcast_unread"),
             videos: value("videos"), videoUnread: value("video_unread"))
+    }
+
+    /// 条目设置要求的处理结果仍有任一缺失。这里刻意不判断 Worker 水位线、退避、
+    /// 死信、源开关或媒体资源：它描述的是内容是否达到设定标准，而不是当前能否执行。
+    private static func unmetProcessingCondition(columnPrefix: String) -> String {
+        let c = columnPrefix
+        return """
+        ((\(c)auto_score=1 AND \(c)llm_score IS NULL)
+         OR (\(c)auto_summarize=1 AND LENGTH(TRIM(COALESCE(\(c)llm_summary,'')))=0)
+         OR (\(c)auto_translate=1 AND LENGTH(TRIM(COALESCE(\(c)llm_translated_md,'')))=0)
+         OR (\(c)auto_transcribe=1 AND LENGTH(TRIM(COALESCE(\(c)llm_transcript_md,'')))=0))
+        """
     }
 
     // MARK: 辅助
@@ -1240,6 +1273,9 @@ public final class Database: @unchecked Sendable {
         }
         if sqlite3_column_count(stmt) > 24 {
             item.sourceName = text(24)
+        }
+        if sqlite3_column_count(stmt) > 25 {
+            item.hasUnmetProcessing = sqlite3_column_int(stmt, 25) == 1
         }
         return item
     }

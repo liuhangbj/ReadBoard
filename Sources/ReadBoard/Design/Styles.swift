@@ -381,19 +381,23 @@ enum AudioPlaybackSettings {
     }
 }
 
-/// AVPlayer 生命周期与观察器集中管理。播放器仍然惰性创建：不点播放不会请求远程媒体。
+/// AVPlayer 生命周期与观察器集中管理。播放器惰性创建：不点播放不会请求远程媒体。
 @MainActor
 final class AudioPlayerController: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var isBuffering = false
+    @Published private(set) var isLoadingMetadata = false
     @Published private(set) var currentTime: Double = 0
     @Published private(set) var duration: Double = 0
     @Published private(set) var errorMessage: String?
 
     private let audioURL: String
+    private var asset: AVURLAsset?
     private var player: AVPlayer?
     private var timeObserver: Any?
+    private var metadataTask: Task<Void, Never>?
     private var preferredRate: Float = 1.0
+    private var generation = 0
 
     init(audioURL: String) {
         self.audioURL = audioURL
@@ -420,6 +424,30 @@ final class AudioPlayerController: ObservableObject {
         }
     }
 
+    /// 只读取远程媒体元数据，用于提前显示总时长；不会创建 AVPlayer 或缓冲音频正文。
+    func preloadMetadata() {
+        guard duration <= 0, metadataTask == nil, let asset = resolveAsset() else { return }
+        let currentGeneration = generation
+        isLoadingMetadata = true
+        metadataTask = Task { [weak self] in
+            do {
+                let loadedDuration = try await asset.load(.duration)
+                guard !Task.isCancelled, let self,
+                      self.generation == currentGeneration,
+                      self.asset === asset else { return }
+                let seconds = loadedDuration.seconds
+                if seconds.isFinite && seconds > 0 { self.duration = seconds }
+            } catch is CancellationError {
+                // 切换文章时正常取消。
+            } catch {
+                // 元数据读取失败不代表音频不能播放；点击播放后仍由 AVPlayer 重试。
+            }
+            guard let self, self.generation == currentGeneration else { return }
+            self.metadataTask = nil
+            self.isLoadingMetadata = false
+        }
+    }
+
     func skip(by seconds: Double) {
         prepareIfNeeded()
         seek(to: currentTime + seconds)
@@ -437,24 +465,32 @@ final class AudioPlayerController: ObservableObject {
     }
 
     func cleanup() {
+        generation += 1
+        metadataTask?.cancel()
+        metadataTask = nil
+        player?.currentItem?.cancelPendingSeeks()
         if let timeObserver, let player { player.removeTimeObserver(timeObserver) }
         timeObserver = nil
         player?.pause()
         player = nil
+        asset = nil
         isPlaying = false
         isBuffering = false
+        isLoadingMetadata = false
+        currentTime = 0
+        duration = 0
     }
 
     private func prepareIfNeeded() {
         guard player == nil else { return }
-        guard let url = URL(string: audioURL), let scheme = url.scheme,
-              scheme == "http" || scheme == "https" else {
-            errorMessage = "媒体地址无效"
-            return
-        }
-        let player = AVPlayer(url: url)
+        guard let asset = resolveAsset() else { return }
+        let item = AVPlayerItem(asset: asset)
+        item.preferredForwardBufferDuration = 5
+        let player = AVPlayer(playerItem: item)
+        player.automaticallyWaitsToMinimizeStalling = true
         player.defaultRate = preferredRate
         self.player = player
+        preloadMetadata()
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
             queue: .main
@@ -464,6 +500,18 @@ final class AudioPlayerController: ObservableObject {
                 self.updateState(player: player, time: time)
             }
         }
+    }
+
+    private func resolveAsset() -> AVURLAsset? {
+        if let asset { return asset }
+        guard let url = URL(string: audioURL), let scheme = url.scheme,
+              scheme == "http" || scheme == "https" else {
+            errorMessage = "媒体地址无效"
+            return nil
+        }
+        let newAsset = AVURLAsset(url: url)
+        asset = newAsset
+        return newAsset
     }
 
     private func updateState(player: AVPlayer, time: CMTime) {
@@ -557,11 +605,11 @@ struct AudioPlayerView: View {
                 // 以 Slider 轨道而不是“轨道 + 时间”的整体中心与播放按钮对齐。
                 .alignmentGuide(VerticalAlignment.center) { _ in 12 }
 
-                if controller.isBuffering {
+                if controller.isBuffering || controller.isLoadingMetadata {
                     ProgressView()
                         .controlSize(.small)
                         .frame(width: 16)
-                        .help("正在缓冲")
+                        .help(controller.isLoadingMetadata ? "正在读取音频时长" : "正在缓冲")
                 }
 
                 Menu {
@@ -599,7 +647,10 @@ struct AudioPlayerView: View {
         .background(Color.rbSurface)
         .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
         .accessibilityLabel("\(title) 播放器")
-        .onAppear { controller.setPreferredRate(playbackRate) }
+        .onAppear {
+            controller.setPreferredRate(playbackRate)
+            controller.preloadMetadata()
+        }
         .onChange(of: playbackRate) { _, rate in controller.setPreferredRate(rate) }
         .onDisappear { controller.cleanup() }
     }
@@ -630,32 +681,37 @@ struct YouTubePlayerView: View {
     let title: String
 
     @State private var player: AVPlayer?
+    @State private var loadTask: Task<Void, Never>?
+    @State private var resolvedStreamURL: URL?
     @State private var isLoading = false
     @State private var loadError: String?
     @State private var isPlaying = false
+    @State private var hasStartedPlayback = false
+    @State private var playWhenReady = false
     @State private var currentTime: Double = 0
     @State private var duration: Double = 0
     private let playbackTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
-
-    private var ytdlpBin: String { DependencyPaths.resolve(.ytdlp) ?? "yt-dlp" }
 
     var body: some View {
         VStack(spacing: 8) {
             ZStack {
                 RoundedRectangle(cornerRadius: RB.Radius.lg)
                     .fill(Color.black)
-                if let player = player {
+                if hasStartedPlayback, let player {
                     AVPlayerViewRepresentable(player: player)
                         .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
-                } else if isLoading {
-                    VStack(spacing: 10) {
-                        ProgressView()
-                            .scaleEffect(1.2)
-                        Text("Resolving URL...")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.white.opacity(0.7))
+                } else {
+                    AsyncImage(url: URL(string: "https://i.ytimg.com/vi/\(videoId)/hqdefault.jpg")) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFill()
+                        } else {
+                            Color.black
+                        }
                     }
-                } else if let err = loadError {
+                    .clipped()
+                }
+
+                if let err = loadError, player == nil {
                     VStack(spacing: 10) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 32))
@@ -665,22 +721,33 @@ struct YouTubePlayerView: View {
                             .foregroundStyle(Color.white.opacity(0.6))
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 8)
-                        Button("Retry") { resolveAndPlay() }
+                        Button("重试") { requestPlay() }
                             .font(.system(size: 12))
                             .foregroundStyle(Color.rbAccent)
                     }
-                } else {
+                    .padding(16)
+                    .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: RB.Radius.md))
+                } else if !hasStartedPlayback {
                     Button {
-                        resolveAndPlay()
+                        requestPlay()
                     } label: {
                         VStack(spacing: 10) {
-                            Image(systemName: "play.circle.fill")
-                                .font(.system(size: 44))
-                                .foregroundStyle(Color.white.opacity(0.92))
-                            Text("Click to load video")
+                            if isLoading {
+                                ProgressView()
+                                    .controlSize(.large)
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: "play.circle.fill")
+                                    .font(.system(size: 48))
+                                    .foregroundStyle(Color.white.opacity(0.94))
+                            }
+                            Text(isLoading ? "正在预加载…" : (player == nil ? "准备播放" : "已就绪"))
                                 .font(.system(size: 12))
-                                .foregroundStyle(Color.white.opacity(0.7))
+                                .foregroundStyle(Color.white.opacity(0.82))
                         }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                        .background(.black.opacity(0.34), in: RoundedRectangle(cornerRadius: RB.Radius.md))
                     }
                     .buttonStyle(.plain)
                 }
@@ -746,54 +813,74 @@ struct YouTubePlayerView: View {
         .onReceive(playbackTimer) { _ in
             refreshPlaybackState()
         }
+        .onAppear { schedulePreload() }
         .onDisappear { cleanup() }
     }
 
-    private func resolveAndPlay() {
-        guard !isLoading else { return }
-        isLoading = true
-        loadError = nil
-        Task {
-            if let url = await resolveVideoURL() {
-                await MainActor.run {
-                    isLoading = false
-                    startPlayback(url: url)
-                }
-            } else {
-                await MainActor.run {
-                    isLoading = false
-                    loadError = "Could not resolve video URL.\nTry opening in browser."
-                }
+    private func schedulePreload() {
+        loadTask?.cancel()
+        loadTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: 300_000_000)
+                try Task.checkCancellation()
+                // 这里只预解析并缓存直链，不提前创建 AVPlayer。AVPlayer.preroll
+                // 在 status 尚未 readyToPlay 时会抛 Objective-C 异常。
+                let url = try await YouTubeStreamResolver.resolve(videoId: videoId)
+                try Task.checkCancellation()
+                resolvedStreamURL = url
+            } catch {
+                // 快速切换文章时正常取消。
             }
         }
     }
 
-    private func resolveVideoURL() async -> URL? {
-        let watchUrl = "https://www.youtube.com/watch?v=\(videoId)"
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: ytdlpBin)
-        proc.arguments = ["-g", "-f", "best[height<=720]/best", "--no-playlist", watchUrl]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            guard proc.terminationStatus == 0 else { return nil }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let urls = output.components(separatedBy: "\n").filter { !$0.isEmpty }
-            return urls.first.flatMap { URL(string: $0) }
-        } catch {
-            return nil
+    private func requestPlay() {
+        if let player {
+            hasStartedPlayback = true
+            player.play()
+            isPlaying = true
+            return
         }
+        playWhenReady = true
+        guard !isLoading else { return }
+        loadTask?.cancel()
+        loadTask = Task { await resolveStream(autoplay: true) }
     }
 
-    private func startPlayback(url: URL) {
-        let p = AVPlayer(url: url)
-        player = p
-        p.play()
-        isPlaying = true
+    @MainActor
+    private func resolveStream(autoplay: Bool) async {
+        guard player == nil, !isLoading else {
+            if autoplay { playWhenReady = true }
+            return
+        }
+        isLoading = true
+        loadError = nil
+        do {
+            let url: URL
+            if let resolvedStreamURL {
+                url = resolvedStreamURL
+            } else {
+                url = try await YouTubeStreamResolver.resolve(videoId: videoId)
+            }
+            try Task.checkCancellation()
+            let item = AVPlayerItem(url: url)
+            item.preferredForwardBufferDuration = 5
+            let preparedPlayer = AVPlayer(playerItem: item)
+            preparedPlayer.automaticallyWaitsToMinimizeStalling = true
+            player = preparedPlayer
+            isLoading = false
+            if autoplay || playWhenReady {
+                hasStartedPlayback = true
+                preparedPlayer.play()
+                isPlaying = true
+                playWhenReady = false
+            }
+        } catch is CancellationError {
+            isLoading = false
+        } catch {
+            isLoading = false
+            loadError = error.localizedDescription
+        }
     }
 
     private func refreshPlaybackState() {
@@ -807,6 +894,7 @@ struct YouTubePlayerView: View {
 
     private func togglePlay() {
         guard let p = player else { return }
+        hasStartedPlayback = true
         if isPlaying { p.pause() } else { p.play() }
         isPlaying = p.rate > 0
     }
@@ -818,8 +906,115 @@ struct YouTubePlayerView: View {
     }
 
     private func cleanup() {
+        loadTask?.cancel()
+        loadTask = nil
+        player?.currentItem?.cancelPendingSeeks()
         player?.pause()
         player = nil
+        resolvedStreamURL = nil
+        isLoading = false
+        isPlaying = false
+        hasStartedPlayback = false
+        playWhenReady = false
+    }
+}
+
+// MARK: - Bilibili 播放器
+
+enum VideoPlayerPlatform: Equatable {
+    case youtube
+    case bilibili
+
+    static func resolve(source: String) -> VideoPlayerPlatform {
+        source.lowercased() == "bilibili" ? .bilibili : .youtube
+    }
+}
+
+/// B站官方内嵌播放器。B站 DASH 音视频通常分轨且 CDN 要求 Referer/Cookie，
+/// 不适合直接复用 YouTube 的 yt-dlp + AVPlayer 链路；WKWebView 只包住播放器这一小块。
+struct BilibiliPlayerView: View {
+    let bvid: String
+    let title: String
+    let pageURL: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            BilibiliWebPlayer(bvid: bvid)
+                .aspectRatio(16 / 9, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
+
+            HStack {
+                Text(title)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.rbText3)
+                    .lineLimit(1)
+                Spacer()
+                Button {
+                    let target = pageURL.isEmpty
+                        ? "https://www.bilibili.com/video/\(bvid)"
+                        : pageURL
+                    if let url = URL(string: target) { NSWorkspace.shared.open(url) }
+                } label: {
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.system(size: 20))
+                        .foregroundStyle(Color.rbText3)
+                }
+                .buttonStyle(.plain)
+                .help("在浏览器中打开")
+            }
+        }
+        .padding(12)
+        .background(Color.rbSurface)
+        .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
+    }
+}
+
+/// SwiftUI 保留 BVID 作为唯一状态；WKWebView 仅负责官方播放器的创建、更新和销毁。
+private struct BilibiliWebPlayer: NSViewRepresentable {
+    let bvid: String
+
+    final class Coordinator {
+        var loadedBVID: String?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.allowsAirPlayForMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = [.audio, .video]
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.setValue(false, forKey: "drawsBackground")
+        load(bvid: bvid, in: webView, coordinator: context.coordinator)
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        guard context.coordinator.loadedBVID != bvid else { return }
+        load(bvid: bvid, in: webView, coordinator: context.coordinator)
+    }
+
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.stopLoading()
+        webView.loadHTMLString("", baseURL: nil)
+        coordinator.loadedBVID = nil
+    }
+
+    private func load(bvid: String, in webView: WKWebView, coordinator: Coordinator) {
+        guard var components = URLComponents(string: "https://player.bilibili.com/player.html") else { return }
+        components.queryItems = [
+            URLQueryItem(name: "bvid", value: bvid),
+            URLQueryItem(name: "page", value: "1"),
+            URLQueryItem(name: "high_quality", value: "1"),
+            URLQueryItem(name: "danmaku", value: "0"),
+            URLQueryItem(name: "autoplay", value: "0")
+        ]
+        guard let url = components.url else { return }
+        coordinator.loadedBVID = bvid
+        var request = URLRequest(url: url, timeoutInterval: 45)
+        request.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
+        webView.load(request)
     }
 }
 

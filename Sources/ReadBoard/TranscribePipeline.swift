@@ -116,11 +116,9 @@ public final class TranscribePipeline: @unchecked Sendable {
                     llm_processed_at = datetime('now')
                 WHERE id = ?
                 """, params: [text, resolvedLanguage, contentId])
-            // 6. 转录稿自动补一段摘要（媒体内容没有正文，评分/摘要以转录稿为准）
-            if ok, llm.isAvailable,
-               let sum = await llm.summarizeRaw(title: title, body: text) {
-                db.execute("UPDATE content SET llm_summary = ? WHERE id = ?", params: [sum, contentId])
-            }
+            // 注意：媒体摘要已由合并调用体系负责（以 content_md 字幕稿为源，
+            // 走 needsSummary + runLLMStages，带 content_job 退避/死信自愈）。
+            // 此处不再用转录稿生成 llm_summary，避免覆盖前者。
             await markJob(contentId: contentId, ok: ok, err: ok ? nil : "写库失败")
             return ok
         } catch {
