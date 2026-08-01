@@ -3,7 +3,17 @@ import AppKit
 
 // 入口在 Sources/ReadBoardMain/main.swift（独立 mini-target，库本身无 @main 以便测试链接）
 public struct ReadBoardApp: App {
+    private let configuration: ReadBoardConfiguration
+
     public init() {
+        self.init(configuration: .community)
+    }
+
+    public init(configuration: ReadBoardConfiguration) {
+        self.configuration = configuration
+        ReadBoardRuntime.configure(
+            applicationSupportDirectoryName: configuration.applicationSupportDirectoryName
+        )
         // SIGPIPE：URLSession 在受限网络环境（沙箱/VPN/proxy）下写已断开的 socket 会触发，
         // 默认信号处理直接杀进程。设为 SIG_IGN 让系统调用返回 EPIPE 错误码而非崩溃。
         signal(SIGPIPE, SIG_IGN)
@@ -20,6 +30,7 @@ public struct ReadBoardApp: App {
         RetentionService.shared.start()
         // 启动定时导出规则扫描；重复调用有内部防重保护。
         ExportService.shared.startScheduler()
+        configuration.modules.forEach { $0.start() }
         // feed 自动抓取调度：延迟到主 runloop 就绪后启动。
         // 直接在 init 调 startAutoSync()——Timer.scheduledTimer 此时注册的 runloop
         // 还没跑，Task 也可能被 SwiftUI 生命周期取消（实测重启后 CPU 0%、无网络、0 抓取）。
@@ -32,7 +43,8 @@ public struct ReadBoardApp: App {
 
     public var body: some Scene {
         WindowGroup {
-            RootView()
+            RootView(configuration: configuration)
+                .environment(\.readBoardConfiguration, configuration)
                 .frame(minWidth: 900, minHeight: 600)
         }
         .windowStyle(.automatic)
@@ -41,6 +53,7 @@ public struct ReadBoardApp: App {
         // 独立设置窗口（⌘, 打开）
         Settings {
             SettingsView()
+                .environment(\.readBoardConfiguration, configuration)
         }
     }
 
@@ -48,6 +61,11 @@ public struct ReadBoardApp: App {
 
 public struct RootView: View {
     @StateObject private var tab = AppTab()
+    private let configuration: ReadBoardConfiguration
+
+    public init(configuration: ReadBoardConfiguration = .community) {
+        self.configuration = configuration
+    }
 
     public var body: some View {
         // 无底部 Tab 栏——导航入口移到阅读页左栏底部（订阅源/管理），
@@ -65,6 +83,7 @@ public struct RootView: View {
         .environmentObject(tab)
         .frame(minWidth: 900, minHeight: 600)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            configuration.modules.forEach { $0.stop() }
             ExportService.shared.stopScheduler()
         }
     }

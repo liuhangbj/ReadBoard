@@ -11,7 +11,7 @@ import CryptoKit
 /// 文件替代，环境无关、不会假成功。
 ///
 /// 设计要点：
-/// 1. 文件位于 ~/Library/Application Support/ReadBoard/secrets.json，权限 0600。
+/// 1. 文件位于当前版本的 Application Support 数据目录，权限 0600。
 /// 2. 使用 AES-GCM 加密（CryptoKit），对称密钥由 CommonCrypto PBKDF2 从
 ///    「serviceID 密码 + (serviceID.机器标识) 盐」派生（不落盘）。
 ///    机器标识取自本机硬件 UUID；换机后旧密文无法解密（符合预期，且单机自用）。
@@ -91,11 +91,7 @@ public enum SecretStore {
     // MARK: - 文件路径
 
     private static var fileURL: URL? {
-        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        let dir = base.appendingPathComponent("ReadBoard", isDirectory: true)
-        return dir.appendingPathComponent(fileName)
+        AppResourceLocator.applicationSupportDirectory.appendingPathComponent(fileName)
     }
 
     // MARK: - 文件读写（带权限锁定）
