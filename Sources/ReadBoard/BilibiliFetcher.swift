@@ -1,5 +1,44 @@
 import Foundation
 
+enum BilibiliAccessState: String, Sendable {
+    case open
+    case paidPreview
+    case upowerExclusive
+    case loginRequired
+
+    var listLabel: String? {
+        switch self {
+        case .open: return nil
+        case .paidPreview: return "付费试看"
+        case .upowerExclusive: return "高档充电"
+        case .loginRequired: return "需登录"
+        }
+    }
+}
+
+struct BilibiliVideoAccess: Sendable, Equatable {
+    let state: BilibiliAccessState
+    let toast: String?
+    let privilegeType: Int?
+    let jumpURL: URL?
+
+    var isPartial: Bool { state != .open }
+
+    var transcriptNotice: String {
+        switch state {
+        case .paidPreview:
+            return "> ⚠️ 该视频为 B站付费内容，当前账号仅获得试看片段，以下转录稿不完整。"
+        case .upowerExclusive:
+            let detail = toast ?? "当前账号仅获得试看片段"
+            return "> ⚠️ 该视频为 B站 UP 主高档充电专属内容，\(detail)，以下转录稿不完整。"
+        case .loginRequired:
+            return "> ⚠️ 该视频需要更高登录权限，以下转录稿可能不完整。"
+        case .open:
+            return ""
+        }
+    }
+}
+
 /// B站 UP 主动态流拉取适配器
 /// 用 feed/space 接口(零 WBI 签名，只需 buvid3 + SESSDATA)拉取视频动态
 public enum BilibiliFetcher {
@@ -108,6 +147,23 @@ public enum BilibiliFetcher {
 
 #if DEBUG
         if diagnosticsEnabled {
+            let rights = player["rights"] as? [String: Any] ?? [:]
+            let vip = player["vip"] as? [String: Any] ?? [:]
+            let payment = player["payment"] as? [String: Any] ?? [:]
+            let probe: [String] = [
+                "aid", "bvid", "cid", "duration", "duration_text", "is_owner",
+                "need_vip", "need_login", "preview", "argue_msg", "status",
+                "is_ugc_pay_preview", "is_upower_exclusive",
+                "is_upower_exclusive_with_qa", "is_upower_play",
+                "need_login_subtitle", "permission", "preview_toast",
+                "operation_card", "jump_card", "view_points", "options",
+                "elec_high_level", "guide_attention", "max_limit",
+                "type", "desc", "part", "pay", "pay_type", "vip_type"
+            ].compactMap { key in
+                guard let value = player[key] else { return nil }
+                return "\(key)=\(value)"
+            }
+            print("BILIBILI_SUBTITLE_DIAGNOSTIC bvid=\(bvid) player_keys=\(player.keys.sorted()) probe=[\(probe.joined(separator: ", "))] rights=\(rights.keys.sorted()) vip=\(vip.keys.sorted()) payment=\(payment.keys.sorted())")
             let languages = tracks.compactMap { $0["lan"] as? String }
             print("BILIBILI_SUBTITLE_DIAGNOSTIC bvid=\(bvid) track_count=\(tracks.count) languages=\(languages)")
         }
@@ -139,6 +195,72 @@ public enum BilibiliFetcher {
             if markdown.count > (best?.count ?? 0) { best = markdown }
         }
         return best
+    }
+
+    /// 读取单条视频的访问权限。B站明确返回 ugc_pay_preview/upower_exclusive 字段；
+    /// 这比按转录长度猜测“会员/付费视频”可靠，也能区分开放视频。
+    static func fetchVideoAccess(videoURL: String) async throws -> BilibiliVideoAccess? {
+        guard let bvid = extractBVID(from: videoURL), let sessdata = BilibiliAuth.sessdata else {
+            return nil
+        }
+        let buvid3 = try await fetchBuvid3()
+        let cookie = "buvid3=\(buvid3); SESSDATA=\(sessdata)"
+        let pageData = try await httpGet(
+            "https://api.bilibili.com/x/player/pagelist?bvid=\(bvid)", cookie: cookie)
+        guard let pageRoot = try? JSONSerialization.jsonObject(with: pageData) as? [String: Any],
+              pageRoot["code"] as? Int == 0,
+              let pages = pageRoot["data"] as? [[String: Any]],
+              let cid = pages.first?["cid"] as? Int else { return nil }
+
+        let playerRequest = try await BilibiliAuth.signedWBIRequest(
+            path: "/x/player/wbi/v2",
+            params: ["bvid": bvid, "cid": String(cid)],
+            sessdata: sessdata
+        )
+        let playerData = try await httpGet(playerRequest.url, cookie: playerRequest.cookie)
+        guard let playerRoot = try? JSONSerialization.jsonObject(with: playerData) as? [String: Any],
+              let player = playerRoot["data"] as? [String: Any] else { return nil }
+
+        return videoAccess(from: player)
+    }
+
+    static func videoAccess(from player: [String: Any]) -> BilibiliVideoAccess {
+        func flag(_ key: String) -> Bool {
+            if let value = player[key] as? Int { return value != 0 }
+            if let value = player[key] as? Bool { return value }
+            if let value = player[key] as? String { return value == "1" || value.lowercased() == "true" }
+            return false
+        }
+        let highLevel = player["elec_high_level"] as? [String: Any]
+        let highLevelToast = highLevel?["sub_title"] as? String
+        let privilegeType = highLevel?["privilege_type"] as? Int
+        let jumpURL = (highLevel?["jump_url"] as? String).flatMap(URL.init(string:))
+        let toast = highLevelToast ?? player["preview_toast"] as? String
+        if flag("is_upower_exclusive") && !flag("is_upower_play") {
+            return BilibiliVideoAccess(
+                state: .upowerExclusive,
+                toast: toast,
+                privilegeType: privilegeType,
+                jumpURL: jumpURL
+            )
+        }
+        if flag("is_ugc_pay_preview") {
+            return BilibiliVideoAccess(
+                state: .paidPreview,
+                toast: toast,
+                privilegeType: nil,
+                jumpURL: nil
+            )
+        }
+        if flag("need_login_subtitle") {
+            return BilibiliVideoAccess(
+                state: .loginRequired,
+                toast: toast,
+                privilegeType: nil,
+                jumpURL: nil
+            )
+        }
+        return BilibiliVideoAccess(state: .open, toast: toast, privilegeType: nil, jumpURL: nil)
     }
 
     static func parseSubtitleMarkdown(_ data: Data) -> String? {

@@ -53,6 +53,8 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
     var hasFulltext: Bool = false
     var hasExport: Bool = false   // 已导出（export_record 有记录）
     var hasUnmetProcessing: Bool = false // 尚未达到条目 auto_* 所要求的处理标准
+    /// 平台访问限制（当前用于 B站付费/充电专属试看）。
+    var accessState: String? = nil
 
 /// 返回一个标记为已读的副本（本地状态同步用）
     func markingRead() -> ContentItem {
@@ -72,6 +74,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
         copy.hasFulltext = hasFulltext
         copy.hasExport = hasExport
         copy.hasUnmetProcessing = hasUnmetProcessing
+        copy.accessState = accessState
         return copy
     }
 
@@ -93,6 +96,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
         copy.hasFulltext = hasFulltext
         copy.hasExport = hasExport
         copy.hasUnmetProcessing = hasUnmetProcessing
+        copy.accessState = accessState
         return copy
     }
 
@@ -116,6 +120,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
         copy.contentHtml = contentHtml ?? self.contentHtml
         copy.hasExport = hasExport
         copy.hasUnmetProcessing = hasUnmetProcessing
+        copy.accessState = accessState
         return copy
     }
 }
@@ -749,6 +754,7 @@ public final class Database: @unchecked Sendable {
                    (c.llm_excerpt_translated IS NOT NULL AND c.llm_excerpt_translated != '') AS has_excerpt_trans,
                    (EXISTS (SELECT 1 FROM export_record er WHERE er.content_id = c.id AND er.status = 'delivered')) AS has_export,
                    c.source_id, COALESCE(s.name, c.source) AS source_name, s.stype AS source_stype,
+                   json_extract(c.meta, '$.bilibili_access_state') AS access_state,
                    (\(Self.unmetProcessingCondition(columnPrefix: "c."))) AS has_unmet_processing
             FROM content c
             JOIN content_fts f ON f.rowid = c.id
@@ -768,6 +774,7 @@ public final class Database: @unchecked Sendable {
                    (c.llm_excerpt_translated IS NOT NULL AND c.llm_excerpt_translated != '') AS has_excerpt_trans,
                    (EXISTS (SELECT 1 FROM export_record er WHERE er.content_id = c.id AND er.status = 'delivered')) AS has_export,
                    c.source_id, COALESCE(s.name, c.source) AS source_name, s.stype AS source_stype,
+                   json_extract(c.meta, '$.bilibili_access_state') AS access_state,
                    (\(Self.unmetProcessingCondition(columnPrefix: "c."))) AS has_unmet_processing
             FROM content c
             LEFT JOIN content_source s ON s.id = c.source_id
@@ -1284,7 +1291,10 @@ public final class Database: @unchecked Sendable {
             item.sourceStype = text(25)
         }
         if sqlite3_column_count(stmt) > 26 {
-            item.hasUnmetProcessing = sqlite3_column_int(stmt, 26) == 1
+            item.accessState = text(26)
+        }
+        if sqlite3_column_count(stmt) > 27 {
+            item.hasUnmetProcessing = sqlite3_column_int(stmt, 27) == 1
         }
         return item
     }

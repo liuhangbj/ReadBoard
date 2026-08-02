@@ -424,7 +424,7 @@ public final class PipelineWorker: ObservableObject {
         var result = BatchResult(processed: 1)
 
         if runScore {
-            let ok = await Self.withTimeout(seconds: 180) {
+            let ok = await Self.withTimeout(seconds: 360) {
                 await llm.score(contentId: task.id, title: task.title, body: task.body)
             } ?? false
             if ok {
@@ -436,7 +436,7 @@ public final class PipelineWorker: ObservableObject {
             guard !Task.isCancelled else { return result }
         }
         if runTranslate, !Task.isCancelled {
-            let ok = await Self.withTimeout(seconds: 180) {
+            let ok = await Self.withTimeout(seconds: 360) {
                 await llm.translateFull(
                     contentId: task.id, title: task.title, body: task.body, policy: policy)
             } ?? false
@@ -449,7 +449,7 @@ public final class PipelineWorker: ObservableObject {
             guard !Task.isCancelled else { return result }
         }
         if runSummary, !Task.isCancelled {
-            let ok = await Self.withTimeout(seconds: 180) {
+            let ok = await Self.withTimeout(seconds: 360) {
                 await llm.summarize(contentId: task.id, title: task.title, body: task.body)
             } ?? false
             if ok {

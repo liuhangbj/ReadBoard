@@ -114,9 +114,11 @@ public final class SourceStore: ObservableObject {
     @Published var sources: [FeedSource] = []
     @Published var folders: [Folder] = []
     @Published var isSyncing = false
+    @Published var isExternalSyncing = false
     @Published var lastSyncMessage = ""
 
     private let db = Database.shared
+    private var activeSyncSourceIDs = Set<Int64>()
 
     enum SyncError: LocalizedError {
         case alreadyRunning
@@ -183,6 +185,37 @@ public final class SourceStore: ObservableObject {
     func reload() {
         sources = fetchAllSources()
         folders = fetchAllFolders()
+    }
+
+    /// 外部连接器注册后，把该类型源历史遗留的 summary 配置修成平台全文模式。
+    /// 基础版只读取连接器声明，不知道微信等平台的鉴权或提取实现。
+    func repairExternalFetchModes() {
+        // 连接器注册通常发生在 SourceStore 首次读取源之后；修复前强制按数据库现态重建，
+        // 否则刚注册时会因为 sources 为空/过期而漏修旧微信源。
+        reload()
+        var changed = false
+        for src in sources {
+            guard let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype) else {
+                continue
+            }
+            let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [src.id]) ?? "{}"
+            var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
+            let raw = obj["fetch_mode"] as? String
+            guard raw != connector.fulltextMode.rawValue else { continue }
+            obj["fetch_mode"] = connector.fulltextMode.rawValue
+            obj["fetch_mode_auto"] = true
+            guard let data = try? JSONSerialization.data(withJSONObject: obj),
+                  let str = String(data: data, encoding: .utf8) else { continue }
+            db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, src.id])
+            changed = true
+        }
+        if changed { reload() }
+    }
+
+    /// YouTube/BiliBili 内置平台模式优先；外部连接器模式其次；普通 RSS 走 probe。
+    private func declaredFulltextMode(for sourceType: String) -> FetchMode? {
+        FetchMode.platformDefault(for: sourceType)
+            ?? ReadBoardSourceConnectorRegistry.shared.connector(for: sourceType)?.fulltextMode
     }
 
     // MARK: 文件夹 CRUD
@@ -377,7 +410,7 @@ public final class SourceStore: ObservableObject {
             "SELECT stype, identifier FROM content_source WHERE id = ?", params: [id]).first else { return }
         let sourceType = sourceRow["stype"] ?? ""
         let identifier = sourceRow["identifier"] ?? ""
-        let platformDefault = FetchMode.platformDefault(for: sourceType)
+        let platformDefault = declaredFulltextMode(for: sourceType)
         let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [id]) ?? "{}"
         var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
         if mode == "auto" {
@@ -417,7 +450,7 @@ public final class SourceStore: ObservableObject {
     func redetectFetchMode(id: Int64) async {
         guard let row = db.queryRows("SELECT stype, identifier FROM content_source WHERE id = ?", params: [id]).first else { return }
         let detected: FetchMode
-        if let platformMode = FetchMode.platformDefault(for: row["stype"] ?? "") {
+        if let platformMode = declaredFulltextMode(for: row["stype"] ?? "") {
             detected = platformMode
         } else {
             detected = await FullTextFetcher.shared.probeMode(feedUrl: row["identifier"] ?? "")
@@ -730,7 +763,13 @@ public final class SourceStore: ObservableObject {
         // B3: 媒体板块总开关——关掉后 podcast/youtube 等媒体源整组不抓（rss 文章不受影响）
         let mediaOn = FeatureBoard.media.enabled
         var mediaSkipped = 0
+        var externalQueued = 0
         for src in sources where src.enabled {
+            if isExternalSource(src) {
+                if manual || src.isDue { externalQueued += 1 }
+                else { skipped += 1 }
+                continue
+            }
             if !mediaOn && src.transcribable { mediaSkipped += 1; continue }
             // 自动调度时按源的抓取间隔筛选：距上次抓取不足间隔的跳过
             if !manual && !src.isDue { skipped += 1; continue }
@@ -746,7 +785,35 @@ public final class SourceStore: ObservableObject {
         var msg = failed > 0 ? "完成：新增 \(total) 条，\(failed) 个源失败" : "完成：新增 \(total) 条"
         if skipped > 0 { msg += "（跳过未到期 \(skipped)）" }
         if mediaSkipped > 0 { msg += "（媒体板块已关闭，跳过 \(mediaSkipped) 个媒体源）" }
+        if externalQueued > 0 { msg += "（\(externalQueued) 个外部平台源已后台排队）" }
         lastSyncMessage = msg
+        if externalQueued > 0 {
+            Task { await self.syncExternalSources(manual: manual) }
+        }
+    }
+
+    /// 外部平台源的独立慢速通道。微信等平台不能占用普通 RSS 的全局同步锁；
+    /// 同一 source_id 仍由 activeSyncSourceIDs 防止手动刷新/自动调度重叠。
+    private func syncExternalSources(manual: Bool) async {
+        guard !isExternalSyncing else { return }
+        isExternalSyncing = true
+        defer {
+            isExternalSyncing = false
+            reload()
+        }
+        for src in sources where src.enabled && isExternalSource(src) {
+            if !manual && !src.isDue { continue }
+            do {
+                _ = try await syncOneUnlocked(src)
+            } catch {
+                db.execute("UPDATE content_source SET error = ? WHERE id = ?",
+                           params: [error.localizedDescription, src.id])
+            }
+        }
+    }
+
+    private func isExternalSource(_ src: FeedSource) -> Bool {
+        ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype) != nil
     }
 
     /// 抓取单个源，返回新增条数
@@ -787,6 +854,11 @@ public final class SourceStore: ObservableObject {
 
     /// 已持有 isSyncing 锁时执行实际抓取；只允许 syncAll/syncOne 调用。
     private func syncOneUnlocked(_ src: FeedSource) async throws -> Int {
+        guard activeSyncSourceIDs.insert(src.id).inserted else {
+            throw SyncError.alreadyRunning
+        }
+        defer { activeSyncSourceIDs.remove(src.id) }
+
         // 外部模块优先接管其注册的平台类型。公开核心只消费统一 ParsedFeed，
         // 不包含微信等付费平台的登录态、协议签名或正文获取实现。
         let externalConnector = ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype)
@@ -950,7 +1022,7 @@ public final class SourceStore: ObservableObject {
                 params: [source, entry.guid]).first,
                let existingId = Int64(existing["id"] ?? "") {
                 var mergedMeta = (existing["meta"]?.data(using: .utf8))
-                    .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] } ?? [:]
+                    .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
                 for (key, value) in entry.meta { mergedMeta[key] = value }
                 let mergedMetaJson = (try? JSONSerialization.data(withJSONObject: mergedMeta))
                     .flatMap { String(data: $0, encoding: .utf8) } ?? metaJson

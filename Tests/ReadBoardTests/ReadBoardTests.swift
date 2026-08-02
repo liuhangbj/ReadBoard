@@ -69,6 +69,37 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
         XCTAssertEqual(VideoPlayerPlatform.resolve(source: "video"), .youtube)
     }
 
+    func testBilibiliUpowerExclusiveWinsWhenBothPayPreviewFlagsArePresent() {
+        let access = BilibiliFetcher.videoAccess(from: [
+            "is_ugc_pay_preview": 1,
+            "is_upower_exclusive": 1,
+            "is_upower_play": 0,
+            "preview_toast": "为创作付费，购买观看完整视频|购买观看",
+            "elec_high_level": [
+                "title": "该视频为「高档充电」专属视频",
+                "sub_title": "试看中・开通「30元档包月充电」即可观看",
+                "privilege_type": 20,
+                "jump_url": "https://member.bilibili.com/mall/upower-pay?mid=491233698"
+            ]
+        ])
+        XCTAssertEqual(access.state, .upowerExclusive)
+        XCTAssertEqual(access.state.listLabel, "高档充电")
+        XCTAssertEqual(access.toast, "试看中・开通「30元档包月充电」即可观看")
+        XCTAssertEqual(access.privilegeType, 20)
+        XCTAssertTrue(access.isPartial)
+        XCTAssertTrue(access.transcriptNotice.contains("30元档包月充电"))
+    }
+
+    func testBilibiliUpowerExclusiveAccessIsSeparateState() {
+        let access = BilibiliFetcher.videoAccess(from: [
+            "is_upower_exclusive": 1,
+            "is_upower_play": 0
+        ])
+        XCTAssertEqual(access.state, .upowerExclusive)
+        XCTAssertEqual(access.state.listLabel, "高档充电")
+        XCTAssertTrue(access.isPartial)
+    }
+
     func testPlatformModesComeFromSourceType() {
         XCTAssertEqual(FetchMode.platformDefault(for: "youtube"), .youtubeSubtitle)
         XCTAssertEqual(FetchMode.platformDefault(for: "bilibili"), .bilibiliSubtitle)

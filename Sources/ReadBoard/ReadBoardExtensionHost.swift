@@ -82,6 +82,7 @@ public final class ReadBoardSourceConnectorRegistry {
 public enum ReadBoardExtensionHost {
     public static func register(_ connector: any ReadBoardSourceConnector) {
         ReadBoardSourceConnectorRegistry.shared.register(connector)
+        SourceStore.shared.repairExternalFetchModes()
     }
 
     public static func unregister(sourceType: String) {
@@ -134,6 +135,36 @@ public enum ReadBoardExtensionHost {
             throw ReadBoardExtensionHostError.sourceNotFound
         }
         return try await SourceStore.shared.syncOne(source)
+    }
+
+    /// 对某个外部平台已入库的 Markdown 做一次安全修复。数据库仍由公开核心管理；
+    /// 模块只提供纯文本转换函数，不直接触碰 content 表。
+    /// - Returns: 实际修改的条目数。
+    @discardableResult
+    public static func cleanExternalContentMarkdown(
+        sourceType: String,
+        transform: @Sendable (String) -> String
+    ) -> Int {
+        let rows = Database.shared.queryRows("""
+            SELECT id, content_md FROM content
+            WHERE source = ? AND content_md IS NOT NULL AND TRIM(content_md) != '' AND deleted_at IS NULL
+            """, params: [sourceType])
+        var changed = 0
+        for row in rows {
+            guard let id = Int64(row["id"] ?? ""), let markdown = row["content_md"] else { continue }
+            let cleaned = transform(markdown)
+            guard cleaned != markdown else { continue }
+            if Database.shared.execute(
+                "UPDATE content SET content_md = ?, updated_at = datetime('now') WHERE id = ?",
+                params: [cleaned, id]
+            ) {
+                changed += 1
+            }
+        }
+        if changed > 0 {
+            NotificationCenter.default.post(name: .contentUpdated, object: nil)
+        }
+        return changed
     }
 }
 

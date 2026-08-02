@@ -873,14 +873,14 @@ public struct ContentView: View {
     /// 抓取设置菜单（fetch_mode + 频率）
     @ViewBuilder
     private func fetchSettingsMenu(src: FeedSource) -> some View {
-        Menu("提取全文：\(src.fetchModeAuto ? "自动（\(src.fetchMode.displayName)）" : src.fetchMode.displayName)") {
+        Menu("提取全文：\(src.fetchModeAuto ? "自动（\(fulltextDisplayName(for: src))）" : fulltextDisplayName(for: src))") {
             // ── 自动检测 ──
             Button {
                 Task { await sourceStore.setFetchMode(id: src.id, mode: "auto") }
             } label: {
                 HStack {
                     Image(systemName: src.fetchModeAuto ? "checkmark" : "arrow.triangle.2.circlepath")
-                    Text("自动（\(src.fetchMode.displayName)）")
+                    Text("自动（\(fulltextDisplayName(for: src))）")
                 }
             }
             Button("重新检测") { Task { await sourceStore.redetectFetchMode(id: src.id) } }
@@ -893,7 +893,7 @@ public struct ContentView: View {
                     HStack {
                         Image(systemName: (!src.fetchModeAuto && src.fetchMode == fm) ? "checkmark" : "")
                             .frame(width: 12)
-                        Text(fm.displayName)
+                        Text(fulltextDisplayName(for: src, mode: fm))
                     }
                 }
             }
@@ -908,9 +908,20 @@ public struct ContentView: View {
         }
     }
 
+    private func fulltextDisplayName(for src: FeedSource, mode: FetchMode? = nil) -> String {
+        let actual = mode ?? src.fetchMode
+        guard actual == .externalFulltext,
+              let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype) else {
+            return actual.displayName
+        }
+        return connector.fulltextDisplayName
+    }
+
     /// 平台源只显示自己的字幕路径与「仅摘要」；普通源不暴露平台专属模式。
     private func fetchModes(for sourceType: String) -> [FetchMode] {
-        if let platformMode = FetchMode.platformDefault(for: sourceType) {
+        let connectorMode = ReadBoardSourceConnectorRegistry.shared
+            .connector(for: sourceType)?.fulltextMode
+        if let platformMode = FetchMode.platformDefault(for: sourceType) ?? connectorMode {
             return [platformMode, .summary]
         }
         return FetchMode.allCases.filter(\.isUserSelectable)
@@ -1541,6 +1552,9 @@ public struct ArticleRow: View {
 
                 // 第三行：加工状态；已导出与前五项分开并固定靠右。
                 HStack(spacing: 6) {
+                    if let accessBadge {
+                        RBadge(text: accessBadge, color: .rbScoreMid, scale: scale)
+                    }
                     if item.ctype != "podcast", item.hasFulltext {
                         RBadge(text: "全文", color: .rbScoreHigh, scale: scale)
                     }
@@ -1585,6 +1599,15 @@ public struct ArticleRow: View {
             return Self.relativeDate(from: publishedAt)
         }
         return String(publishedAt.prefix(10))
+    }
+
+    private var accessBadge: String? {
+        switch item.accessState {
+        case "paidPreview": return "付费试看"
+        case "upowerExclusive": return "高档充电"
+        case "loginRequired": return "需登录"
+        default: return nil
+        }
     }
 
     /// 相对时间（ISO8601 → x 分钟/小时/天前）

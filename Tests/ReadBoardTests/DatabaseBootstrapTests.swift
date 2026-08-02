@@ -101,14 +101,80 @@ final class DatabaseBootstrapTests: XCTestCase {
             """, params: [sid, "https://test.invalid/legacy-podcast-\(sid)"]))
         XCTAssertTrue(db.execute("""
             INSERT INTO content
-                (id,source_id,ctype,guid,source,title,url)
-            VALUES (?,?,'article',?,'rss','历史播客条目',?);
+                (id,source_id,ctype,guid,source,title,url,meta)
+            VALUES (?,?,'article',?,'rss','历史播客条目',?,?);
             """, params: [itemId, sid, "legacy-guid-\(itemId)",
-                             "https://test.invalid/item/\(itemId)"]))
+                             "https://test.invalid/item/\(itemId)",
+                             #"{"bilibili_access_state":"paidPreview"}"#]))
 
         let item = try XCTUnwrap(db.fetchContents(sourceId: sid).first)
         XCTAssertEqual(item.source, "rss")
         XCTAssertEqual(item.sourceStype, "podcast")
+        XCTAssertEqual(item.accessState, "paidPreview")
+    }
+
+    @MainActor
+    func testExternalConnectorRegistrationRepairsLegacySummaryFetchMode() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_210_041
+        cleanup(ids: [], sourceIds: [sid])
+        defer { cleanup(ids: [], sourceIds: [sid]) }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config, enabled)
+            VALUES (?, 'wechat', '微信公众号', ?, '{"fetch_mode":"summary"}', 1);
+            """, params: [sid, "3555042627"]))
+        SourceStore.shared.reload()
+
+        let connector = DummyExternalFulltextConnector()
+        ReadBoardSourceConnectorRegistry.shared.register(connector)
+        defer { ReadBoardSourceConnectorRegistry.shared.unregister(sourceType: connector.sourceType) }
+
+        SourceStore.shared.repairExternalFetchModes()
+        let config = try XCTUnwrap(db.scalarString(
+            "SELECT config FROM content_source WHERE id = ?", params: [sid]))
+        XCTAssertTrue(config.contains(FetchMode.externalFulltext.rawValue))
+        let source = try XCTUnwrap(SourceStore.shared.sources.first(where: { $0.id == sid }))
+        XCTAssertEqual(source.fetchMode, .externalFulltext)
+    }
+
+    @MainActor
+    func testExternalSourcesUseBackgroundLaneWithoutBlockingOrdinarySync() async throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_210_051
+        cleanup(ids: [], sourceIds: [sid])
+        defer { cleanup(ids: [], sourceIds: [sid]) }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config, enabled)
+            VALUES (?, 'wechat', '异步微信源', ?, '{"fetch_interval_min":720}', 1);
+            """, params: [sid, "3555042627"]))
+
+        let connector = DummyExternalFulltextConnector()
+        ReadBoardSourceConnectorRegistry.shared.register(connector)
+        defer { ReadBoardSourceConnectorRegistry.shared.unregister(sourceType: connector.sourceType) }
+        SourceStore.shared.reload()
+
+        await SourceStore.shared.syncAll(manual: false)
+        XCTAssertTrue(SourceStore.shared.lastSyncMessage.contains("后台排队"))
+
+        var completed = false
+        for _ in 0..<40 {
+            if db.scalarString("SELECT last_fetched_at FROM content_source WHERE id = ?",
+                               params: [sid]) != nil {
+                completed = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(completed)
+        XCTAssertNil(db.scalarString("SELECT error FROM content_source WHERE id = ?",
+                                     params: [sid]))
+        XCTAssertFalse(SourceStore.shared.isExternalSyncing)
     }
 
     func testUnmetProcessingViewUsesItemStandardsInsteadOfWorkerSnapshot() throws {
@@ -523,6 +589,61 @@ final class DatabaseBootstrapTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testExistingContentRefreshPreservesNonStringInternalMetaKeys() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_270_021
+        cleanup(ids: [], sourceIds: [sid])
+        defer {
+            db.execute("DELETE FROM content WHERE source_id = ?", params: [sid])
+            cleanup(ids: [], sourceIds: [sid])
+        }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config)
+            VALUES (?, 'bilibili', 'meta-merge-test', ?, '{}');
+            """, params: [sid, "9270021"]))
+        let guid = "BV1MetaMerge"
+        let first = ParsedEntry(
+            guid: guid,
+            title: "首次入库",
+            url: "https://www.bilibili.com/video/\(guid)",
+            published: nil,
+            html: "简介",
+            author: "测试 UP 主",
+            meta: ["video_id": guid]
+        )
+        let contentId = try XCTUnwrap(SourceStore.shared.upsertContentForTesting(
+            source: "bilibili", sourceId: sid, entry: first))
+        XCTAssertTrue(db.execute("""
+            UPDATE content SET meta = ?
+            WHERE id = ?;
+            """, params: [
+                #"{"video_id":"BV1MetaMerge","bilibili_access_state":"paidPreview","bilibili_partial_transcript":1}"#,
+                contentId
+            ]))
+
+        let refreshed = ParsedEntry(
+            guid: guid,
+            title: "源刷新",
+            url: "https://www.bilibili.com/video/\(guid)",
+            published: Date(timeIntervalSince1970: 1_722_470_400),
+            html: "简介",
+            author: "测试 UP 主",
+            meta: ["video_id": guid, "duration": "30:50"]
+        )
+        XCTAssertNil(SourceStore.shared.upsertContentForTesting(
+            source: "bilibili", sourceId: sid, entry: refreshed))
+
+        let meta = try XCTUnwrap(db.scalarString(
+            "SELECT meta FROM content WHERE id = ?", params: [contentId]))
+        XCTAssertTrue(meta.contains("paidPreview"))
+        XCTAssertTrue(meta.contains("bilibili_partial_transcript"))
+        XCTAssertTrue(meta.contains("30:50"))
+    }
+
     func testTranscriptFieldDrivesExportRenderingAndFilter() throws {
         try requireIsolatedDatabase()
         let db = Database.shared
@@ -860,5 +981,15 @@ final class DatabaseBootstrapTests: XCTestCase {
         for id in sourceIds {
             db.execute("DELETE FROM content_source WHERE id = ?", params: [id])
         }
+    }
+}
+
+private struct DummyExternalFulltextConnector: ReadBoardSourceConnector {
+    let sourceType = "wechat"
+    let fulltextMode = FetchMode.externalFulltext
+    let fulltextDisplayName = "微信公众号全文提取"
+
+    func fetch(identifier: String, configuration: String) async throws -> ParsedFeed {
+        ParsedFeed(title: "微信公众号", siteURL: nil, entries: [], language: "zh")
     }
 }

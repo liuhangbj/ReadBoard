@@ -346,7 +346,12 @@ public struct SourceRow: View {
             // ── 中：每个选项固定列宽（条件项用占位保持对齐）──
             // 全文模式（固定列；非 rss 占位保持对齐）——加宽到 88 容纳 defuddle
             Group {
-                if src.stype == "rss" { fetchModeMenu } else { Color.clear.frame(height: 1) }
+                if src.stype == "rss"
+                    || ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype) != nil {
+                    fetchModeMenu
+                } else {
+                    Color.clear.frame(height: 1)
+                }
             }
             .frame(width: 88, alignment: .leading)
 
@@ -432,25 +437,25 @@ public struct SourceRow: View {
                 if src.fetchModeAuto {
                     HStack { Image(systemName: "checkmark"); Text("自动检测") }
                 } else {
-                    HStack { Image(systemName: "arrow.triangle.2.circlepath"); Text("自动检测（当前: \(src.fetchMode.displayName)）") }
+                    HStack { Image(systemName: "arrow.triangle.2.circlepath"); Text("自动检测（当前: \(fulltextDisplayName())）") }
                 }
             }
             Divider()
-            ForEach(FetchMode.allCases.filter(\.isUserSelectable), id: \.rawValue) { fm in
+            ForEach(fetchModesForSource, id: \.rawValue) { fm in
                 Button {
                     Task { await store.setFetchMode(id: src.id, mode: fm.rawValue) }
                 } label: {
                     if !src.fetchModeAuto && src.fetchMode == fm {
-                        HStack { Image(systemName: "checkmark"); Text(fm.displayName) }
+                        HStack { Image(systemName: "checkmark"); Text(fulltextDisplayName(mode: fm)) }
                     } else {
-                        Text(fm.displayName)
+                        Text(fulltextDisplayName(mode: fm))
                     }
                 }
             }
             Divider()
             Button("重新检测") { Task { await store.redetectFetchMode(id: src.id) } }
         } label: {
-            Text(src.fetchModeAuto ? "自动（\(src.fetchMode.displayName)）" : src.fetchMode.displayName)
+            Text(src.fetchModeAuto ? "自动（\(fulltextDisplayName())）" : fulltextDisplayName())
                 .font(.caption)
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(fetchModeColor.opacity(0.10))
@@ -589,6 +594,22 @@ public struct SourceRow: View {
         } message: {
             Text("「\(src.name)」的\(label)已开启。\n\n• 处理历史：存量内容补做相应处理（耗时较长，按量计费）\n• 只处理新增：历史不动，新抓的自动进入内容处理引擎")
         }
+    }
+
+    private var fetchModesForSource: [FetchMode] {
+        if let connectorMode = ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype)?.fulltextMode {
+            return [connectorMode, .summary]
+        }
+        return FetchMode.allCases.filter(\.isUserSelectable)
+    }
+
+    private func fulltextDisplayName(mode: FetchMode? = nil) -> String {
+        let actual = mode ?? src.fetchMode
+        guard actual == .externalFulltext,
+              let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype) else {
+            return actual.displayName
+        }
+        return connector.fulltextDisplayName
     }
 
     /// 源类型图标（SF Symbol，替代 emoji——纸墨系不用彩色符号）

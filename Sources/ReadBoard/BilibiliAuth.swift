@@ -5,6 +5,19 @@ import CryptoKit
 /// 登录态存 SecretStore(加密)，UserDefaults 只存"已登录"标记
 public enum BilibiliAuth {
 
+    private actor WBIIdentityStore {
+        var cached: (cookie: String, mixinKey: String, createdAt: Date)?
+
+        func current(maxAge: TimeInterval) -> (cookie: String, mixinKey: String)? {
+            guard let cached, Date().timeIntervalSince(cached.createdAt) < maxAge else { return nil }
+            return (cookie: cached.cookie, mixinKey: cached.mixinKey)
+        }
+
+        func store(cookie: String, mixinKey: String) {
+            cached = (cookie: cookie, mixinKey: mixinKey, createdAt: Date())
+        }
+    }
+
     // MARK: - 常量
 
     private static let sessdataKey = "bilibili.auth.sessdata"
@@ -190,6 +203,8 @@ public enum BilibiliAuth {
 
     // MARK: - WBI 签名
 
+    private static let wbiIdentityStore = WBIIdentityStore()
+
     /// 为必须绑定当前登录设备的 WBI 接口生成签名 URL 与配套 Cookie。
     /// URL 和 Cookie 必须成对使用，避免把 SESSDATA 与另一个临时设备指纹混用。
     static func signedWBIRequest(
@@ -197,6 +212,19 @@ public enum BilibiliAuth {
         params: [String: String],
         sessdata: String
     ) async throws -> (url: String, cookie: String) {
+        let identity = try await wbiIdentity(sessdata: sessdata)
+        let query = wbiSign(params: params, mixinKey: identity.mixinKey)
+        let normalizedPath = path.hasPrefix("/") ? path : "/" + path
+        return ("https://api.bilibili.com\(normalizedPath)?\(query)", identity.cookie)
+    }
+
+    /// WBI 设备指纹与签名密钥缓存。批量回填时不能逐条重新取 buvid3/nav，
+    /// 否则 4,000 条历史视频会制造数倍无意义请求。
+    private static func wbiIdentity(sessdata: String) async throws -> (cookie: String, mixinKey: String) {
+        if let cached = await wbiIdentityStore.current(maxAge: 3_600) {
+            return cached
+        }
+
         let buvid3 = try await fetchBuvid3()
         let cookie = "buvid3=\(buvid3); SESSDATA=\(sessdata)"
         let (navData, _) = try await httpGet(
@@ -213,9 +241,9 @@ public enum BilibiliAuth {
         let imgKey = String(imgURL.split(separator: "/").last?.split(separator: ".").first ?? "")
         let subKey = String(subURL.split(separator: "/").last?.split(separator: ".").first ?? "")
         let mixinKey = generateMixinKey(imgKey: imgKey, subKey: subKey)
-        let query = wbiSign(params: params, mixinKey: mixinKey)
-        let normalizedPath = path.hasPrefix("/") ? path : "/" + path
-        return ("https://api.bilibili.com\(normalizedPath)?\(query)", cookie)
+
+        await wbiIdentityStore.store(cookie: cookie, mixinKey: mixinKey)
+        return (cookie: cookie, mixinKey: mixinKey)
     }
 
     private static func generateMixinKey(imgKey: String, subKey: String) -> String {

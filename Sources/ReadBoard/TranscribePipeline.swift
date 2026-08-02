@@ -60,6 +60,11 @@ public final class TranscribePipeline: @unchecked Sendable {
         defer { try? FileManager.default.removeItem(atPath: workDir) }
 
         do {
+            // B站付费/充电视频：接口会明确标记试看权限。转录仍保留，但必须在
+            // 稿首说明不完整，并把访问状态写入 meta 供列表显示。
+            let bilibiliAccess = try? await BilibiliFetcher.fetchVideoAccess(
+                videoURL: pageUrl.isEmpty ? target : pageUrl)
+
             // 1. 取音频：直链音频直接下载；否则走 yt-dlp 抽音频。
             //    直链若 ffmpeg 认不出格式（伪装扩展名/异常封装），回退 yt-dlp 重抽。
             var audioPath = try await fetchAudio(target: target, workDir: workDir, direct: audioUrl != nil)
@@ -108,6 +113,11 @@ public final class TranscribePipeline: @unchecked Sendable {
             }
             guard !Task.isCancelled else { throw CancellationError() }
 
+            if let bilibiliAccess, bilibiliAccess.isPartial,
+               !text.hasPrefix(bilibiliAccess.transcriptNotice) {
+                text = bilibiliAccess.transcriptNotice + "\n\n" + text
+            }
+
             // 5. 写库：中英文对照稿进 llm_transcript_md（独立转录字段）
             let ok = db.execute("""
                 UPDATE content
@@ -116,6 +126,9 @@ public final class TranscribePipeline: @unchecked Sendable {
                     llm_processed_at = datetime('now')
                 WHERE id = ?
                 """, params: [text, resolvedLanguage, contentId])
+            if ok, let bilibiliAccess {
+                updateBilibiliAccessMeta(contentId: contentId, access: bilibiliAccess)
+            }
             // 注意：媒体摘要已由合并调用体系负责（以 content_md 字幕稿为源，
             // 走 needsSummary + runLLMStages，带 content_job 退避/死信自愈）。
             // 此处不再用转录稿生成 llm_summary，避免覆盖前者。
@@ -127,6 +140,10 @@ public final class TranscribePipeline: @unchecked Sendable {
     }
 
     // MARK: - 私有
+
+    private func updateBilibiliAccessMeta(contentId: Int64, access: BilibiliVideoAccess) {
+        BilibiliAccessMetaStore.apply(contentId: contentId, access: access)
+    }
 
     static func llmPostProcessMode(
         declaredLanguage: String?, transcript: String, translateEnabled: Bool = true
