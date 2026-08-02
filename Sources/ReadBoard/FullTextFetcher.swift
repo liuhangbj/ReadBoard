@@ -16,6 +16,7 @@ public enum FetchMode: String, CaseIterable, Sendable {
     case defuddle = "defuddle"
     case youtubeSubtitle = "youtube_subtitle"
     case bilibiliSubtitle = "bilibili_subtitle"
+    case externalFulltext = "external_fulltext"
     case summary = "summary"
 
     var displayName: String {
@@ -23,13 +24,20 @@ public enum FetchMode: String, CaseIterable, Sendable {
         case .feedFull: return "feed 自带全文"
         case .defuddle: return "defuddle 本地"
         case .youtubeSubtitle: return "YouTube字幕提取"
-        case .bilibiliSubtitle: return "Bilibili字幕提取"
+        case .bilibiliSubtitle: return "BiliBili 字幕提取"
+        case .externalFulltext: return "平台内置全文提取"
         case .summary: return "仅摘要"
         }
     }
 
     var isPlatformSubtitle: Bool {
         self == .youtubeSubtitle || self == .bilibiliSubtitle
+    }
+
+    /// 用户可手动选择的通用全文方式；平台专有连接器模式由 stype/连接器自动决定，
+    /// 不出现在 RSS 通用的手动菜单里。
+    var isUserSelectable: Bool {
+        self != .externalFulltext && !isPlatformSubtitle
     }
 
     /// 平台专属提取路径只能由 source.stype 决定，不能从笼统的 FeedKind.video 推断。
@@ -209,6 +217,12 @@ public final class FullTextFetcher: @unchecked Sendable {
             }
             return true
 
+        case .externalFulltext:
+            // 外部连接器应在条目入库前已经提供正文；这个模式只表示
+            // “平台自带全文链路”，不要再按普通 RSS 走 defuddle/summary。
+            markFetched(contentId: contentId, ok: true, engine: mode.rawValue)
+            return false
+
         case .summary:
             markFetched(contentId: contentId, ok: true, engine: mode.rawValue)
             // summary 模式不再「只留摘要」。按统一落盘目标：把 feed 自带的
@@ -231,12 +245,26 @@ public final class FullTextFetcher: @unchecked Sendable {
         switch mode {
         case .feedFull: return .defuddle
         case .defuddle: return .summary
+        case .externalFulltext: return nil
         case .youtubeSubtitle, .bilibiliSubtitle: return .summary
         case .summary: return nil
         }
     }
 
     // MARK: - 私有
+
+    /// 外部平台适配器已经提取完成的 Markdown 统一落盘入口。
+    /// 仅接受最终文稿，不暴露数据库，也不让公开核心感知平台鉴权细节。
+    func storeExternalMarkdown(contentId: Int64, markdown: String, engine: String) {
+        let value = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        storeMd(contentId: contentId, md: value, engine: engine)
+    }
+
+    fileprivate func extractExternalHTML(_ html: String) -> String? {
+        runCLI(stdinHTML: html)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     private func storeMd(contentId: Int64, md: String, engine: String) {
         db.execute(
@@ -414,6 +442,17 @@ public final class FullTextFetcher: @unchecked Sendable {
     }
 
 
+}
+
+/// 模块可复用的通用 HTML → Markdown 能力。网络请求和平台认证仍由模块负责；
+/// 公开核心只复用已经随 App 打包的 Defuddle 引擎。
+public enum ReadBoardContentExtractor {
+    public static func markdown(fromHTML html: String) async -> String? {
+        guard !html.isEmpty else { return nil }
+        return await Task.detached(priority: .utility) {
+            FullTextFetcher.shared.extractExternalHTML(html)
+        }.value
+    }
 }
 
 // MARK: - 批量重提全文（右键菜单调用）

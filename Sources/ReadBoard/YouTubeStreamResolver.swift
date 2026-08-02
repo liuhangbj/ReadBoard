@@ -1,5 +1,18 @@
 import Foundation
 
+enum YouTubeStreamMetadata {
+    nonisolated static func normalizedDuration(_ seconds: Double) -> Double {
+        seconds.isFinite && seconds > 0 ? seconds : 0
+    }
+
+    nonisolated static func durationHint(from url: URL) -> Double {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let rawValue = components.queryItems?.first(where: { $0.name == "dur" })?.value,
+              let seconds = Double(rawValue) else { return 0 }
+        return normalizedDuration(seconds)
+    }
+}
+
 /// 已完成的 YouTube 直链只做短期内存缓存；签名 URL 会过期，不落盘。
 actor YouTubeStreamURLCache {
     struct Entry: Sendable {

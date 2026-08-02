@@ -59,7 +59,10 @@ enum RB {
         // —— 内容类型图标（仅用于小面积识别，不参与全局强调层级）——
         static let rss       = RB.dynamic("#E66A22", "#F08A4B")  // RSS 橙
         static let podcast   = RB.dynamic("#8B4CB8", "#B07AD3")  // Podcast 紫
-        static let video     = RB.dynamic("#E53935", "#FF6B66")  // 视频红
+        static let video     = RB.dynamic("#D95A56", "#E98480")  // 视频红（降对比）
+        static let youtube   = RB.dynamic("#D95A56", "#E98480")  // YouTube 红（降对比）
+        static let bilibili  = RB.dynamic("#4FA9C4", "#79C5D8")  // BiliBili 青（降对比）
+        static let wechat    = RB.dynamic("#5FA66A", "#82BF8A")  // 微信绿（降对比）
     }
 
     // MARK: 间距（4 基数梯度）

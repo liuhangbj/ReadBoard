@@ -755,7 +755,10 @@ public final class SourceStore: ObservableObject {
         // 单源刷新、添加源后的首次刷新与 syncAll 共用同一入口锁，避免网络请求重叠。
         guard !isSyncing else { throw SyncError.alreadyRunning }
         isSyncing = true
-        defer { isSyncing = false }
+        defer {
+            isSyncing = false
+            reload()
+        }
         return try await syncOneUnlocked(src)
     }
 
@@ -784,11 +787,25 @@ public final class SourceStore: ObservableObject {
 
     /// 已持有 isSyncing 锁时执行实际抓取；只允许 syncAll/syncOne 调用。
     private func syncOneUnlocked(_ src: FeedSource) async throws -> Int {
-        // B站源走独立适配器（JSON API，非 RSS）
+        // 外部模块优先接管其注册的平台类型。公开核心只消费统一 ParsedFeed，
+        // 不包含微信等付费平台的登录态、协议签名或正文获取实现。
+        let externalConnector = ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype)
         let feed: ParsedFeed
-        if src.stype == "bilibili" {
+        if let connector = externalConnector {
+            feed = try await connector.fetch(
+                identifier: src.identifier,
+                configuration: src.config
+            )
+        } else if src.stype == "bilibili" {
             let scope = HistoryScope(rawValue: extractHistoryScope(from: src.config)) ?? .recent30d
             feed = try await BilibiliFetcher.fetch(uid: src.identifier, historyScope: scope)
+            let placeholder = "BiliBili UP 主 \(src.identifier)"
+            let legacyPlaceholder = "B站 UP 主 \(src.identifier)"
+            if (src.name == placeholder || src.name == legacyPlaceholder),
+               feed.title != placeholder {
+                db.execute("UPDATE content_source SET name = ? WHERE id = ?",
+                           params: [feed.title, src.id])
+            }
         } else {
             feed = try await FeedFetcher.fetch(urlString: src.identifier)
         }
@@ -807,9 +824,20 @@ public final class SourceStore: ObservableObject {
             let source = src.stype
             let sourceId = src.id
             let pipeline = src.policy
+            let importEntry: ParsedEntry
+            if let connector = externalConnector {
+                let alreadyExists = db.scalarInt(
+                    "SELECT 1 FROM content WHERE source = ? AND guid = ? LIMIT 1",
+                    params: [source, entry.guid]
+                ) != nil
+                if alreadyExists { continue }
+                importEntry = try await connector.prepareForImport(entry)
+            } else {
+                importEntry = entry
+            }
             let newId = await Task.detached(priority: .utility) {
                 Self.upsertContent(source: source, sourceId: sourceId,
-                                   entry: entry, pipeline: pipeline)
+                                   entry: importEntry, pipeline: pipeline)
             }.value
             if let newId {
                 added += 1
@@ -817,11 +845,22 @@ public final class SourceStore: ObservableObject {
                 // YouTube/Bilibili 由 stype 固定走字幕提取；普通 RSS/播客仍按各自配置。
                 // 各模式现在都会把 feed 自带正文落到 content_md（summary 模式经 writeBackFeedHtmlAsMd），
                 // 不再按 audio_url/video_url 类型跳过；落在 .summary 不再等于"不抓正文"。
-                await FullTextFetcher.shared.fetchAndStore(
-                    contentId: newId, url: entry.url,
-                    feedHtml: entry.html.isEmpty ? nil : entry.html,
-                    mode: src.fetchMode
-                )
+                let connectorMarkdown = try await externalConnector?.contentMarkdown(for: importEntry)
+                if let markdown = (connectorMarkdown ?? importEntry.contentMarkdown)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                   !markdown.isEmpty {
+                    FullTextFetcher.shared.storeExternalMarkdown(
+                        contentId: newId,
+                        markdown: markdown,
+                        engine: "\(src.stype)_connector"
+                    )
+                } else {
+                    await FullTextFetcher.shared.fetchAndStore(
+                        contentId: newId, url: importEntry.url,
+                        feedHtml: importEntry.html.isEmpty ? nil : importEntry.html,
+                        mode: src.fetchMode
+                    )
+                }
                 // 入库事件只负责唤醒规则；是否已具备所需文稿由导出规则的完成条件判断。
                 await ExportService.shared.runPending(trigger: "ingest", contentId: newId)
                 // “加工完成”规则的就绪条件与触发分离：不要求 AI 产物的规则在全文入库后即可交付；
@@ -918,13 +957,14 @@ public final class SourceStore: ObservableObject {
                 guard db.execute("""
                     UPDATE content
                     SET source_id = ?, ctype = ?, meta = ?,
+                        published_at = COALESCE(NULLIF(TRIM(published_at), ''), ?),
                         language = CASE
                             WHEN language IS NULL OR TRIM(language) = '' THEN ?
                             ELSE language
                         END,
                         updated_at = datetime('now')
                     WHERE id = ?;
-                    """, params: [sourceId, ctype, mergedMetaJson, language, existingId]) else {
+                    """, params: [sourceId, ctype, mergedMetaJson, published, language, existingId]) else {
                     return false
                 }
                 return true   // 已存在，提交空事务返回 nil

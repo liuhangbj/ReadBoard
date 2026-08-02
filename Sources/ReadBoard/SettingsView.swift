@@ -41,16 +41,27 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
 }
 
 public struct SettingsView: View {
-    @State private var selection: SettingsPage? = .general
+    @Environment(\.readBoardConfiguration) private var configuration
+    @State private var selection: SettingsDestination? = .page(.general)
 
     public var body: some View {
         // 手动 HStack 布局替代 NavigationSplitView——后者在 Settings 场景下
         // 会硬塞一个「收起左栏」切换按钮，且 .toolbar(removing:.sidebarToggle) 对它无效。
         // 改手写侧栏+详情，按钮从源头不存在。
         HStack(spacing: 0) {
-            List(SettingsPage.allCases, selection: $selection) { page in
-                Label(page.title, systemImage: page.icon)
-                    .tag(page)
+            List(selection: $selection) {
+                ForEach(SettingsPage.allCases) { page in
+                    Label(page.title, systemImage: page.icon)
+                        .tag(SettingsDestination.page(page))
+                }
+                if !configuration.modules.isEmpty {
+                    Section("Pro 功能") {
+                        ForEach(configuration.modules, id: \.info.identifier) { module in
+                            Label(module.info.displayName, systemImage: "bubble.left.and.bubble.right.fill")
+                                .tag(SettingsDestination.module(module.info.identifier))
+                        }
+                    }
+                }
             }
             .listStyle(.sidebar)
             .tint(Color.rbAccent)   // 选中项墨蓝 tint（统一纸墨留白）
@@ -59,18 +70,28 @@ public struct SettingsView: View {
             Divider()
 
             Group {
-                switch selection ?? .general {
-                case .general:  GeneralPane()
-                case .reader:   ReaderPane()
-                case .llm:      LLMPane()
-                case .deps:     DepsPane()
-                case .boards:   BoardsPane()
-                case .sources:  TypeSwitchPane()
-                case .fetch:    FetchPane()
-                case .content:  ContentPane()
-                case .export:   ExportPlatformPane()
-                case .pipeline: ExportRulePane()
-                case .cleanup:  CleanupPane()
+                switch selection ?? .page(.general) {
+                case .page(let page):
+                    switch page {
+                    case .general:  GeneralPane()
+                    case .reader:   ReaderPane()
+                    case .llm:      LLMPane()
+                    case .deps:     DepsPane()
+                    case .boards:   BoardsPane()
+                    case .sources:  TypeSwitchPane()
+                    case .fetch:    FetchPane()
+                    case .content:  ContentPane()
+                    case .export:   ExportPlatformPane()
+                    case .pipeline: ExportRulePane()
+                    case .cleanup:  CleanupPane()
+                    }
+                case .module(let identifier):
+                    if let module = configuration.modules.first(where: { $0.info.identifier == identifier }),
+                       let view = module.makeSettingsView() {
+                        view
+                    } else {
+                        ContentUnavailableView("模块不可用", systemImage: "exclamationmark.triangle")
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -82,6 +103,11 @@ public struct SettingsView: View {
         // .toolbar(placement: .principal) 标题会显示在透明栏里，不再空一大截。
         .overlay(SettingsWindowAccessor().frame(width: 0, height: 0))
     }
+}
+
+private enum SettingsDestination: Hashable {
+    case page(SettingsPage)
+    case module(String)
 }
 
 /// 零尺寸 overlay，仅用于在视图加入窗口后拿到 Settings 窗口句柄，
@@ -1785,7 +1811,7 @@ public struct TypeSwitchPane: View {
                                     } label: {
                                         HStack(spacing: 6) {
                                             Image(systemName: "qrcode")
-                                            Text("扫码登录 B站")
+                                            Text("扫码登录 BiliBili")
                                         }
                                         .font(.caption)
                                     }
@@ -1840,7 +1866,7 @@ public enum ContentType: String, CaseIterable, Identifiable {
         case .article: return "文章 / RSS"
         case .podcast: return "播客"
         case .youtube: return "视频 / YouTube"
-        case .bilibili: return "视频 / B站"
+        case .bilibili: return "视频 / BiliBili"
         case .wechat:  return "微信公众号"
         }
     }
@@ -1850,7 +1876,7 @@ public enum ContentType: String, CaseIterable, Identifiable {
         case .article: return "常规 RSS 文章订阅"
         case .podcast: return "音频节目（可转录）"
         case .youtube: return "视频 / 视频播客（可转录）"
-        case .bilibili: return "B站 UP 主视频（可转录）"
+        case .bilibili: return "BiliBili UP 主视频（可转录）"
         case .wechat:  return "公众号转 RSS"
         }
     }

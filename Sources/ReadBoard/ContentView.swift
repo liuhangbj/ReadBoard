@@ -913,7 +913,7 @@ public struct ContentView: View {
         if let platformMode = FetchMode.platformDefault(for: sourceType) {
             return [platformMode, .summary]
         }
-        return FetchMode.allCases.filter { !$0.isPlatformSubtitle }
+        return FetchMode.allCases.filter(\.isUserSelectable)
     }
 
     // MARK: 文件夹抓取设置（与订阅源统一：打钩反映组内是否一致）
@@ -970,7 +970,7 @@ public struct ContentView: View {
             Button("重新检测") { Task { await sourceStore.redetectFolderFetchMode(folderId: fid) } }
             Divider()
             // 五层级手动选择（打钩：全组都是该手动模式）
-            ForEach(FetchMode.allCases.filter { !$0.isPlatformSubtitle }, id: \.rawValue) { fm in
+            ForEach(FetchMode.allCases.filter(\.isUserSelectable), id: \.rawValue) { fm in
                 Button {
                     sourceStore.setFolderFetchMode(folderId: fid, mode: fm)
                 } label: {
@@ -1438,30 +1438,36 @@ public struct ArticleRow: View {
     /// 紧凑密度下行距更紧。
     private var isCompact: Bool { density == "compact" }
 
-    /// 内容类型图标（不是平台识别）：RSS / Podcast / Video 各用固定语义色。
-    /// 返回 nil 表示暂不显示图标（等写对应订阅功能时再补）
-    private var ctypeIcon: String? {
-        switch item.ctype {
+    /// 平台图标以订阅源 stype 为准，不再用内容 ctype。RSS/Podcast 保留原有
+    /// 语义图标；YouTube/BiliBili/微信用平台典型符号和低饱和品牌色。
+    private var platformIcon: String? {
+        switch platformType {
         case "podcast": return "mic.fill"
-        case "video", "youtube": return "play.rectangle.fill"
-        case "wechat", "social": return nil   // 待微信订阅功能补齐品牌图标
+        case "youtube": return "play.rectangle.fill"
+        case "bilibili": return "tv.fill"
+        case "wechat": return "message.badge.filled.fill"
         default: return nil  // RSS 用自定义 RSSIcon 组件，不走 SF Symbol
         }
     }
 
-    /// 内容类型图标的强调色。
-    private var ctypeIconColor: Color {
-        switch item.ctype {
+    private var platformIconColor: Color {
+        switch platformType {
         case "podcast": return .rbPodcast
-        case "video", "youtube": return .rbVideo
+        case "youtube": return .rbYouTube
+        case "bilibili": return .rbBilibili
+        case "wechat": return .rbWeChat
         default: return Color.rbText3
         }
     }
 
-    /// 是否 RSS 协议源（用自定义三半圆图标）
-    private var isRSSSource: Bool {
-        item.ctype != "podcast" && item.ctype != "video" && item.ctype != "youtube" &&
-        item.ctype != "wechat" && item.ctype != "social"
+    /// 历史 content.source 不完全等于订阅源 stype（早期 podcast 条目曾写成 rss）。
+    /// 优先用 LEFT JOIN 拿到的 content_source.stype；无源/旧数据再回落到 source。
+    private var platformType: String {
+        (item.sourceStype ?? item.source).lowercased()
+    }
+
+    private var isRSSPlatform: Bool {
+        platformType == "rss" || platformType == "article"
     }
 
     /// 显示标题：媒体项优先标题译文（llm_title_translated）；否则有正文译文取 translatedHead 第一个非空行；都没有用原标题
@@ -1507,14 +1513,14 @@ public struct ArticleRow: View {
                     Spacer(minLength: 0)
                 }
 
-                // 第二行：内容类型图标 + 订阅源名称 + 时间
+                // 第二行：平台图标 + 订阅源名称 + 时间
                 HStack(spacing: 6) {
-                    if isRSSSource {
+                    if isRSSPlatform {
                         RSSIcon(size: 11, color: .rbRSS)
-                    } else if let icon = ctypeIcon {
+                    } else if let icon = platformIcon {
                         Image(systemName: icon)
                             .font(.system(size: 11))
-                            .foregroundStyle(ctypeIconColor)
+                            .foregroundStyle(platformIconColor)
                     }
                     if showSource {
                         Text(item.sourceName ?? item.source)

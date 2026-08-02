@@ -15,7 +15,7 @@ struct BilibiliQRLoginView: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            Text("扫码登录 B站")
+            Text("扫码登录 BiliBili")
                 .font(.title2)
                 .fontWeight(.semibold)
 
@@ -71,7 +71,7 @@ struct BilibiliQRLoginView: View {
             let (url, key) = try await BilibiliAuth.generateQRCode()
             qrcodeKey = key
             qrImage = generateQRImage(from: url)
-            statusText = "请用手机 B站 App 扫码"
+            statusText = "请用手机 BiliBili App 扫码"
             Trace.i("二维码生成成功 qrcode_key=\(key)", category: "bilibili")
             startPolling(key: key)
         } catch {

@@ -8,7 +8,7 @@ final class DatabaseBootstrapTests: XCTestCase {
             throw XCTSkip("需要 READBOARD_DB 指向临时数据库；跳过以免触碰真实库")
         }
         XCTAssertTrue(Database.shared.open())
-        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 29)
+        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 30)
 
         let requiredColumns = ["deleted_at", "llm_translated_md", "llm_transcript_md",
                                "first_image_url"]
@@ -70,6 +70,7 @@ final class DatabaseBootstrapTests: XCTestCase {
         let article = try XCTUnwrap(db.fetchContents(sourceId: sid, contentCategory: "article").first)
         XCTAssertEqual(article.id, articleId)
         XCTAssertEqual(article.sourceName, "轻量列表测试源")
+        XCTAssertEqual(article.sourceStype, "rss")
         XCTAssertEqual(article.imageUrl, "https://test.invalid/image.jpg")
         XCTAssertTrue(article.hasFulltext)
         XCTAssertEqual(db.fetchContents(sourceId: sid, processedFilters: ["fulltext": 1]).map(\.id),
@@ -83,6 +84,31 @@ final class DatabaseBootstrapTests: XCTestCase {
         XCTAssertEqual(db.markAllRead(sourceId: sid, restrictToContentIds: [videoId]), 1)
         XCTAssertEqual(db.scalarInt("SELECT read_at IS NOT NULL FROM content WHERE id=?",
                                     params: [videoId]), 1)
+    }
+
+    func testListItemPlatformTypeUsesSourceStypeInsteadOfLegacyContentSource() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_210_021
+        let itemId: Int64 = 9_210_031
+        cleanup(ids: [itemId], sourceIds: [sid])
+        defer { cleanup(ids: [itemId], sourceIds: [sid]) }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config, enabled)
+            VALUES (?, 'podcast', '历史播客源', ?, '{}', 1);
+            """, params: [sid, "https://test.invalid/legacy-podcast-\(sid)"]))
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content
+                (id,source_id,ctype,guid,source,title,url)
+            VALUES (?,?,'article',?,'rss','历史播客条目',?);
+            """, params: [itemId, sid, "legacy-guid-\(itemId)",
+                             "https://test.invalid/item/\(itemId)"]))
+
+        let item = try XCTUnwrap(db.fetchContents(sourceId: sid).first)
+        XCTAssertEqual(item.source, "rss")
+        XCTAssertEqual(item.sourceStype, "podcast")
     }
 
     func testUnmetProcessingViewUsesItemStandardsInsteadOfWorkerSnapshot() throws {
@@ -440,6 +466,61 @@ final class DatabaseBootstrapTests: XCTestCase {
             source: "podcast", sourceId: sid, entry: entry))
         XCTAssertEqual(db.scalarString("SELECT language FROM content WHERE id = ?", params: [contentId]),
                        "zh-cn")
+    }
+
+    @MainActor
+    func testExistingBilibiliContentBackfillsMissingPublishedAt() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_270_001
+        cleanup(ids: [], sourceIds: [sid])
+        defer {
+            db.execute("DELETE FROM content WHERE source_id = ?", params: [sid])
+            cleanup(ids: [], sourceIds: [sid])
+        }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config)
+            VALUES (?, 'bilibili', 'bilibili-date-backfill-test', ?, '{}');
+            """, params: [sid, "9270001"]))
+
+        let guid = "BV1DateBackfill"
+        let first = ParsedEntry(
+            guid: guid,
+            title: "首次缺少时间",
+            url: "https://www.bilibili.com/video/\(guid)",
+            published: nil,
+            html: "简介",
+            author: "测试 UP 主",
+            meta: ["video_id": guid]
+        )
+        let contentId = try XCTUnwrap(SourceStore.shared.upsertContentForTesting(
+            source: "bilibili", sourceId: sid, entry: first))
+        XCTAssertNil(db.scalarString(
+            "SELECT published_at FROM content WHERE id = ?", params: [contentId]))
+
+        let expectedDate = Date(timeIntervalSince1970: 1_722_470_400)
+        let refreshed = ParsedEntry(
+            guid: guid,
+            title: "刷新后得到时间",
+            url: "https://www.bilibili.com/video/\(guid)",
+            published: expectedDate,
+            html: "简介",
+            author: "测试 UP 主",
+            meta: ["video_id": guid]
+        )
+        XCTAssertNil(SourceStore.shared.upsertContentForTesting(
+            source: "bilibili", sourceId: sid, entry: refreshed),
+                     "已存在条目应更新元数据而不是重复插入")
+
+        let stored = try XCTUnwrap(db.scalarString(
+            "SELECT published_at FROM content WHERE id = ?", params: [contentId]))
+        XCTAssertEqual(
+            try XCTUnwrap(ISO8601DateFormatter().date(from: stored)).timeIntervalSince1970,
+            expectedDate.timeIntervalSince1970,
+            accuracy: 0.001
+        )
     }
 
     func testTranscriptFieldDrivesExportRenderingAndFilter() throws {

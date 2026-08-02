@@ -190,6 +190,34 @@ public enum BilibiliAuth {
 
     // MARK: - WBI 签名
 
+    /// 为必须绑定当前登录设备的 WBI 接口生成签名 URL 与配套 Cookie。
+    /// URL 和 Cookie 必须成对使用，避免把 SESSDATA 与另一个临时设备指纹混用。
+    static func signedWBIRequest(
+        path: String,
+        params: [String: String],
+        sessdata: String
+    ) async throws -> (url: String, cookie: String) {
+        let buvid3 = try await fetchBuvid3()
+        let cookie = "buvid3=\(buvid3); SESSDATA=\(sessdata)"
+        let (navData, _) = try await httpGet(
+            "https://api.bilibili.com/x/web-interface/nav",
+            cookie: cookie
+        )
+        guard let navJson = try? JSONSerialization.jsonObject(with: navData) as? [String: Any],
+              let navDataObj = navJson["data"] as? [String: Any],
+              let wbiImg = navDataObj["wbi_img"] as? [String: Any],
+              let imgURL = wbiImg["img_url"] as? String,
+              let subURL = wbiImg["sub_url"] as? String else {
+            throw BilibiliError.wbiKeyFailed
+        }
+        let imgKey = String(imgURL.split(separator: "/").last?.split(separator: ".").first ?? "")
+        let subKey = String(subURL.split(separator: "/").last?.split(separator: ".").first ?? "")
+        let mixinKey = generateMixinKey(imgKey: imgKey, subKey: subKey)
+        let query = wbiSign(params: params, mixinKey: mixinKey)
+        let normalizedPath = path.hasPrefix("/") ? path : "/" + path
+        return ("https://api.bilibili.com\(normalizedPath)?\(query)", cookie)
+    }
+
     private static func generateMixinKey(imgKey: String, subKey: String) -> String {
         let table = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,
                      37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52]

@@ -701,14 +701,8 @@ struct YouTubePlayerView: View {
                     AVPlayerViewRepresentable(player: player)
                         .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
                 } else {
-                    AsyncImage(url: URL(string: "https://i.ytimg.com/vi/\(videoId)/hqdefault.jpg")) { phase in
-                        if let image = phase.image {
-                            image.resizable().scaledToFill()
-                        } else {
-                            Color.black
-                        }
-                    }
-                    .clipped()
+                    YouTubeThumbnailView(videoId: videoId)
+                        .clipShape(RoundedRectangle(cornerRadius: RB.Radius.lg))
                 }
 
                 if let err = loadError, player == nil {
@@ -751,6 +745,23 @@ struct YouTubePlayerView: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                if !hasStartedPlayback, duration > 0 {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Text(formatTime(duration))
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 5))
+                        }
+                    }
+                    .padding(10)
+                    .allowsHitTesting(false)
+                }
             }
             .aspectRatio(16 / 9, contentMode: .fit)
             .frame(maxWidth: .infinity)
@@ -767,7 +778,7 @@ struct YouTubePlayerView: View {
                     .buttonStyle(.plain)
                 }
 
-                if player != nil {
+                if player != nil || duration > 0 {
                     VStack(spacing: 4) {
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
@@ -828,6 +839,7 @@ struct YouTubePlayerView: View {
                 let url = try await YouTubeStreamResolver.resolve(videoId: videoId)
                 try Task.checkCancellation()
                 resolvedStreamURL = url
+                duration = YouTubeStreamMetadata.durationHint(from: url)
             } catch {
                 // 快速切换文章时正常取消。
             }
@@ -887,7 +899,7 @@ struct YouTubePlayerView: View {
         guard let p = player else { return }
         currentTime = p.currentTime().seconds
         if let item = p.currentItem {
-            duration = item.duration.seconds.isFinite ? item.duration.seconds : 0
+            duration = YouTubeStreamMetadata.normalizedDuration(item.duration.seconds)
         }
         isPlaying = p.rate > 0
     }
@@ -901,8 +913,13 @@ struct YouTubePlayerView: View {
 
     private func formatTime(_ sec: Double) -> String {
         guard sec.isFinite, sec >= 0 else { return "--:--" }
-        let m = Int(sec) / 60, s = Int(sec) % 60
-        return String(format: "%d:%02d", m, s)
+        let total = Int(sec)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let seconds = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%d:%02d", minutes, seconds)
     }
 
     private func cleanup() {
@@ -916,6 +933,42 @@ struct YouTubePlayerView: View {
         isPlaying = false
         hasStartedPlayback = false
         playWhenReady = false
+    }
+}
+
+private struct YouTubeThumbnailView: View {
+    let videoId: String
+
+    var body: some View {
+        AsyncImage(url: thumbnailURL(named: "maxresdefault")) { phase in
+            switch phase {
+            case .success(let image):
+                fitted(image)
+            case .failure:
+                AsyncImage(url: thumbnailURL(named: "hqdefault")) { fallbackPhase in
+                    if let image = fallbackPhase.image {
+                        fitted(image)
+                    } else {
+                        Color.black
+                    }
+                }
+            default:
+                Color.black
+            }
+        }
+        .background(Color.black)
+    }
+
+    private func thumbnailURL(named name: String) -> URL? {
+        URL(string: "https://i.ytimg.com/vi/\(videoId)/\(name).jpg")
+    }
+
+    private func fitted(_ image: Image) -> some View {
+        image
+            .resizable()
+            .scaledToFit()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black)
     }
 }
 

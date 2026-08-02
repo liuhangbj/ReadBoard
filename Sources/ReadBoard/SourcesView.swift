@@ -436,7 +436,7 @@ public struct SourceRow: View {
                 }
             }
             Divider()
-            ForEach(FetchMode.allCases.filter { !$0.isPlatformSubtitle }, id: \.rawValue) { fm in
+            ForEach(FetchMode.allCases.filter(\.isUserSelectable), id: \.rawValue) { fm in
                 Button {
                     Task { await store.setFetchMode(id: src.id, mode: fm.rawValue) }
                 } label: {
@@ -606,6 +606,7 @@ public struct SourceRow: View {
         switch src.fetchMode {
         case .feedFull: return .rbScoreHigh
         case .defuddle: return .rbAccent
+        case .externalFulltext: return .rbScoreHigh
         case .youtubeSubtitle, .bilibiliSubtitle: return .rbAccent
         case .summary: return .rbScoreNone
         }
@@ -623,12 +624,19 @@ public struct AddSourceSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     // 类型下拉的合法值与展示
-    private static let stypeOptions: [(value: String, label: String)] = [
+    private static let builtinStypeOptions: [(value: String, label: String)] = [
         ("article", "RSS 文章"),
         ("podcast", "播客"),
         ("youtube", "YouTube"),
-        ("bilibili", "B站"),
+        ("bilibili", "BiliBili"),
     ]
+
+    private var stypeOptions: [(value: String, label: String)] {
+        Self.builtinStypeOptions
+            + ReadBoardSourceConnectorRegistry.shared.connectorsSupportingAddSource().map {
+                ($0.sourceType, $0.displayName)
+            }
+    }
 
     @State private var name = ""
     @State private var identifier = ""          // 唯一的地址栏
@@ -642,6 +650,7 @@ public struct AddSourceSheet: View {
     @State private var testing = false
     @State private var testResult = ""
     @State private var resolvedFeedURL: String? = nil   // 检测成功后定稿的 feed URL（自动发现可能改写）
+    @State private var resolvedSourceType: String? = nil // 外部连接器识别出的 stype
     @State private var testedOK = false                  // 检测通过才能添加
     @State private var detectedMode: FetchMode = .summary   // 检测阶段拿到的全文模式，添加时直接复用，不重复 probe
     @State private var historyScope: HistoryScope = .recent30d   // B站专属：历史回溯范围
@@ -664,6 +673,7 @@ public struct AddSourceSheet: View {
                         // 地址变了必须重新检测
                         testedOK = false
                         resolvedFeedURL = nil
+                        resolvedSourceType = nil
                         testResult = ""
                     }
             }
@@ -683,7 +693,7 @@ public struct AddSourceSheet: View {
                     .tracking(RB.Track.section)
                     .padding(.top, 4)
                 Picker("", selection: $stype) {
-                    ForEach(Self.stypeOptions, id: \.value) { opt in
+                    ForEach(stypeOptions, id: \.value) { opt in
                         Text(opt.label).tag(opt.value)
                     }
                 }
@@ -805,25 +815,45 @@ public struct AddSourceSheet: View {
     private func stypeForBilibili() -> String { "bilibili" }
 
     /// 解析用户输入为最终 identifier（先按 YouTube/B站特征识别，再下落 discover）
-    private func resolveIdentifier(_ input: String) async throws -> (feedURL: String, feed: ParsedFeed) {
+    private func resolveIdentifier(_ input: String) async throws -> (feedURL: String, feed: ParsedFeed, sourceType: String?) {
         let id = input.trimmingCharacters(in: .whitespaces)
+        if isWeChatArticleURL(id) {
+            for connector in ReadBoardSourceConnectorRegistry.shared.connectorsSupportingAddSource() {
+                guard let resolved = try await connector.resolveSourceIdentifier(id), !resolved.isEmpty else {
+                    continue
+                }
+                let feed = try await connector.previewSource(identifier: resolved)
+                return (resolved, feed, connector.sourceType)
+            }
+            throw NSError(
+                domain: "AddSource",
+                code: -10,
+                userInfo: [NSLocalizedDescriptionKey: "请升级 Pro 版本支持微信公众号订阅"]
+            )
+        }
         // YouTube 频道地址 → 解析为 videos.xml（需 async 解析 channel_id）
         if id.lowercased().contains("youtube.com") || id.lowercased().contains("youtu.be") {
             let feedURL = try await YouTubeResolver.resolveFeedURL(id)
             let feed = try await FeedFetcher.fetch(urlString: feedURL)
-            return (feedURL, feed)
+            return (feedURL, feed, nil)
         }
         // B站 UP 主空间地址 → 提取 UID，走 BilibiliFetcher（JSON API，非 RSS）
         if id.lowercased().contains("space.bilibili.com") || id.lowercased().contains("bilibili.com") {
             guard let uid = BilibiliFetcher.extractUID(from: id) else {
-                throw NSError(domain: "AddSource", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法从该地址提取 B站 UID"])
+                throw NSError(domain: "AddSource", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法从该地址提取 BiliBili UID"])
             }
             // B站不走 RSS，直接构造 ParsedFeed（stype 由 addSource 的 bilibili 分支处理）
             let feed = try await BilibiliFetcher.fetch(uid: uid, historyScope: .recent30d)
-            return (uid, feed)
+            return (uid, feed, nil)
         }
         // 其余：自动发现（feed URL 或网站主页），feed 内容探测类型
-        return try await FeedFetcher.discoverAndFetch(urlString: id)
+        let result = try await FeedFetcher.discoverAndFetch(urlString: id)
+        return (result.0, result.1, nil)
+    }
+
+    private func isWeChatArticleURL(_ input: String) -> Bool {
+        guard let url = URL(string: input), let host = url.host?.lowercased() else { return false }
+        return host == "mp.weixin.qq.com"
     }
 
     private func testFeed() {
@@ -834,19 +864,29 @@ public struct AddSourceSheet: View {
         Task {
             do {
                 let input = identifier.trimmingCharacters(in: .whitespaces)
-                let (feedURL, feed) = try await resolveIdentifier(input)
+                let (feedURL, feed, externalType) = try await resolveIdentifier(input)
                 // 平台字幕路径严格由 stype 决定，不能用笼统的 feed.kind.video 代替。
                 let isBilibili = input.lowercased().contains("bilibili.com")
-                let detected = isBilibili ? "bilibili" : stypeFromKind(feed.kind)
+                let detected = externalType ?? (isBilibili ? "bilibili" : stypeFromKind(feed.kind))
                 let storedType = detected == "article" ? "rss" : detected
                 let mode: FetchMode
-                if let platformMode = FetchMode.platformDefault(for: storedType) {
+                if let externalType,
+                   let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: externalType) {
+                    mode = connector.fulltextMode
+                } else if let platformMode = FetchMode.platformDefault(for: storedType) {
                     mode = platformMode
                 } else {
                     mode = await FullTextFetcher.shared.probeMode(feedUrl: feedURL)
                 }
-                let kindLabel = Self.stypeOptions.first(where: { $0.value == detected })?.label ?? detected
-                var msg = "✓ \(feed.title)：\(feed.entries.count) 条，识别为 \(kindLabel)，全文 \(mode.displayName)"
+                let kindLabel = stypeOptions.first(where: { $0.value == detected })?.label ?? detected
+                let fulltextLabel: String
+                if let externalType,
+                   let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: externalType) {
+                    fulltextLabel = connector.fulltextDisplayName
+                } else {
+                    fulltextLabel = mode.displayName
+                }
+                var msg = "✓ \(feed.title)：\(feed.entries.count) 条，识别为 \(kindLabel)，全文 \(fulltextLabel)"
                 if feedURL != input { msg += "\n（主页自动发现 feed: \(feedURL)）" }
                 await MainActor.run {
                     if store.existsByIdentifier(feedURL) {
@@ -856,6 +896,7 @@ public struct AddSourceSheet: View {
                     } else {
                         testResult = msg
                         resolvedFeedURL = feedURL
+                        resolvedSourceType = storedType
                         testedOK = true
                         stype = detected          // 自动填入类型
                         detectedMode = mode       // 记下检测到的全文模式，添加时直接复用
@@ -879,7 +920,7 @@ public struct AddSourceSheet: View {
         }
         // stype 下拉用 article/podcast/youtube，addSource 内部 rss 分支按 fetch_mode 处理；
         // 这里统一映射回 addSource 认识的 stype 约定：article→rss、podcast/youtube 原样
-        let storeStype = (stype == "article") ? "rss" : stype
+        let storeStype = resolvedSourceType ?? ((stype == "article") ? "rss" : stype)
         let finalName = name.isEmpty ? identifier : name
         testing = true
         testResult = ""

@@ -4,14 +4,39 @@ import Foundation
 // 收编原 FeedParser.php 逻辑：RSS 2.0 <item> / Atom <entry>，识别 podcast enclosure / YouTube 扩展
 
 public struct ParsedEntry: Sendable {
-    let guid: String
-    let title: String
-    let url: String
-    let published: Date?
-    let html: String
-    let author: String?
-    var language: String? = nil
-    var meta: [String: String] = [:]   // audio_url / video_id / duration 等
+    public let guid: String
+    public let title: String
+    public let url: String
+    public let published: Date?
+    public let html: String
+    public let author: String?
+    public var language: String?
+    public var meta: [String: String]   // audio_url / video_id / duration 等
+    /// 外部平台适配器已经完成提取的 Markdown。公开核心只负责统一入库，
+    /// 不需要知道微信等平台的鉴权和反爬协议。
+    public var contentMarkdown: String?
+
+    public init(
+        guid: String,
+        title: String,
+        url: String,
+        published: Date?,
+        html: String,
+        author: String?,
+        language: String? = nil,
+        meta: [String: String] = [:],
+        contentMarkdown: String? = nil
+    ) {
+        self.guid = guid
+        self.title = title
+        self.url = url
+        self.published = published
+        self.html = html
+        self.author = author
+        self.language = language
+        self.meta = meta
+        self.contentMarkdown = contentMarkdown
+    }
 }
 
 public enum FeedKind: String, Sendable {
@@ -19,10 +44,22 @@ public enum FeedKind: String, Sendable {
 }
 
 public struct ParsedFeed: Sendable {
-    let title: String
-    let siteURL: String?
-    let entries: [ParsedEntry]
-    var language: String? = nil
+    public let title: String
+    public let siteURL: String?
+    public let entries: [ParsedEntry]
+    public var language: String?
+
+    public init(
+        title: String,
+        siteURL: String?,
+        entries: [ParsedEntry],
+        language: String? = nil
+    ) {
+        self.title = title
+        self.siteURL = siteURL
+        self.entries = entries
+        self.language = language
+    }
     /// 按内容特征判定类型（收编 detectType 逻辑）
     var kind: FeedKind {
         // YouTube/media:content 是原生视频源；普通 RSS enclosure 即使承载 MP4，

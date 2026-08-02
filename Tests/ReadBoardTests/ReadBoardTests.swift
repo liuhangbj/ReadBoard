@@ -22,12 +22,28 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
         XCTAssertEqual(bStillValid, second)
     }
 
+    func testYouTubeDurationNormalizationRejectsInvalidMetadata() {
+        XCTAssertEqual(YouTubeStreamMetadata.normalizedDuration(.nan), 0)
+        XCTAssertEqual(YouTubeStreamMetadata.normalizedDuration(.infinity), 0)
+        XCTAssertEqual(YouTubeStreamMetadata.normalizedDuration(-1), 0)
+        XCTAssertEqual(YouTubeStreamMetadata.normalizedDuration(3_723), 3_723)
+    }
+
+    func testYouTubeDurationComesFromResolvedStreamURLWithoutExtraRequest() throws {
+        let url = try XCTUnwrap(URL(string: "https://video.example/videoplayback?id=abc&dur=2575.928&clen=10"))
+        XCTAssertEqual(YouTubeStreamMetadata.durationHint(from: url), 2_575.928, accuracy: 0.001)
+        let missing = try XCTUnwrap(URL(string: "https://video.example/videoplayback?id=abc"))
+        XCTAssertEqual(YouTubeStreamMetadata.durationHint(from: missing), 0)
+    }
+
     func testYouTubeStreamResolutionWhenNetworkTestsEnabled() async throws {
         guard ProcessInfo.processInfo.environment["READBOARD_NETWORK_TESTS"] == "1" else {
             throw XCTSkip("网络播放地址回归测试默认关闭")
         }
         let url = try await YouTubeStreamResolver.resolve(videoId: "CABDIzdTNLU")
         XCTAssertTrue(url.scheme == "https" || url.scheme == "http")
+        let duration = YouTubeStreamMetadata.durationHint(from: url)
+        XCTAssertGreaterThan(duration, 1)
     }
 
     func testYouTubeResolverProcessStopsPromptlyOnCancellation() async throws {
@@ -60,6 +76,13 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
         XCTAssertNil(FetchMode.platformDefault(for: "video"))
     }
 
+    func testExternalFulltextIsNotUserSelectableAndHasNoFallback() {
+        XCTAssertEqual(FetchMode.externalFulltext.rawValue, "external_fulltext")
+        XCTAssertEqual(FetchMode.externalFulltext.displayName, "平台内置全文提取")
+        XCTAssertFalse(FetchMode.externalFulltext.isUserSelectable)
+        XCTAssertFalse(FetchMode.allCases.filter(\.isUserSelectable).contains(.externalFulltext))
+    }
+
     func testVideoFeedKindDoesNotForceAPlatformMode() {
         let entry = ParsedEntry(
             guid: "video-1", title: "普通视频 RSS", url: "https://example.invalid/video",
@@ -81,6 +104,71 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
         let markdown = try XCTUnwrap(BilibiliFetcher.parseSubtitleMarkdown(data))
         XCTAssertTrue(markdown.contains("第一句。第二句。"))
         XCTAssertEqual(markdown.components(separatedBy: "第二句。").count - 1, 1)
+    }
+
+    func testBilibiliDynamicCardUsesModuleAuthorPublishTimestamp() throws {
+        let item: [String: Any] = [
+            "modules": [
+                "module_author": ["name": "测试 UP 主", "pub_ts": 1_722_470_400],
+                "module_dynamic": [
+                    "major": [
+                        "type": "MAJOR_TYPE_ARCHIVE",
+                        "archive": [
+                            "bvid": "BV1PublishedAt",
+                            "title": "带发布时间的视频",
+                            "desc": "简介"
+                        ]
+                    ]
+                ]
+            ]
+        ]
+
+        let entry = try XCTUnwrap(BilibiliFetcher.parseVideoCard(item))
+        XCTAssertEqual(entry.author, "测试 UP 主")
+        XCTAssertEqual(
+            try XCTUnwrap(entry.published).timeIntervalSince1970,
+            1_722_470_400,
+            accuracy: 0.001
+        )
+    }
+
+    func testBilibiliFeedUsesRealAuthorNameFromAnyDynamicType() {
+        let items: [[String: Any]] = [
+            [
+                "type": "DYNAMIC_TYPE_WORD",
+                "modules": [
+                    "module_author": ["name": "  真实 UP 主  "],
+                    "module_dynamic": ["desc": ["text": "普通动态"]]
+                ]
+            ]
+        ]
+
+        XCTAssertEqual(BilibiliFetcher.firstAuthorName(in: items), "真实 UP 主")
+    }
+
+    func testBilibiliDynamicCardFallsBackToArchivePublishTimestamp() throws {
+        let item: [String: Any] = [
+            "modules": [
+                "module_author": ["name": "测试 UP 主"],
+                "module_dynamic": [
+                    "major": [
+                        "type": "MAJOR_TYPE_ARCHIVE",
+                        "archive": [
+                            "bvid": "BV1LegacyDate",
+                            "title": "旧字段视频",
+                            "pubdate": "1722470400"
+                        ]
+                    ]
+                ]
+            ]
+        ]
+
+        let entry = try XCTUnwrap(BilibiliFetcher.parseVideoCard(item))
+        XCTAssertEqual(
+            try XCTUnwrap(entry.published).timeIntervalSince1970,
+            1_722_470_400,
+            accuracy: 0.001
+        )
     }
 
     func testYouTubePrefersOriginalAutomaticCaption() {
@@ -122,9 +210,11 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
         guard BilibiliAuth.sessdata != nil else { throw XCTSkip("当前测试进程没有 Bilibili 登录态") }
         let videoURL = ProcessInfo.processInfo.environment["READBOARD_BILIBILI_TEST_URL"]
             ?? "https://www.bilibili.com/video/BV1z63862ERk/"
-        let markdown = try await BilibiliFetcher.fetchSubtitleMarkdown(
-            videoURL: videoURL)
-        XCTAssertGreaterThan(try XCTUnwrap(markdown, "该视频没有返回可用字幕：\(videoURL)").count, 1_000)
+        let first = try await BilibiliFetcher.fetchSubtitleMarkdown(videoURL: videoURL)
+        let firstMarkdown = try XCTUnwrap(first, "该视频没有返回可用字幕：\(videoURL)")
+        let second = try await BilibiliFetcher.fetchSubtitleMarkdown(videoURL: videoURL)
+        XCTAssertEqual(second, firstMarkdown, "同一 BVID 连续提取必须返回同一份字幕")
+        XCTAssertGreaterThan(firstMarkdown.count, 1_000)
     }
 }
 

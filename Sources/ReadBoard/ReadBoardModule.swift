@@ -29,11 +29,14 @@ public protocol ReadBoardModule: AnyObject, Sendable {
     var info: ReadBoardModuleInfo { get }
     func start()
     func stop()
+    /// 模块自己的设置/管理页。公开版只负责承载，不了解私有功能内容。
+    func makeSettingsView() -> AnyView?
 }
 
 public extension ReadBoardModule {
     func start() {}
     func stop() {}
+    func makeSettingsView() -> AnyView? { nil }
 }
 
 public struct ReadBoardConfiguration: Sendable {

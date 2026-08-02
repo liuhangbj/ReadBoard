@@ -9,6 +9,9 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
     let source: String
     /// 订阅源名称；source 仍保留 rss/podcast/youtube 等平台标识。
     var sourceName: String? = nil
+    /// 订阅源真实平台类型（content_source.stype）；列表平台图标以它为准，
+    /// 不再使用内容 ctype 或历史 content.source。
+    var sourceStype: String? = nil
     let title: String
     let author: String?
     let url: String
@@ -60,6 +63,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
                     audioUrl: audioUrl, readAt: "now", starred: starred)
         copy.imageUrl = imageUrl
         copy.sourceName = sourceName
+        copy.sourceStype = sourceStype
         copy.hasTranslation = hasTranslation
         copy.hasTranscript = hasTranscript
         copy.isMedia = isMedia
@@ -80,6 +84,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
                     audioUrl: audioUrl, readAt: readAt, starred: !starred)
         copy.imageUrl = imageUrl
         copy.sourceName = sourceName
+        copy.sourceStype = sourceStype
         copy.hasTranslation = hasTranslation
         copy.hasTranscript = hasTranscript
         copy.isMedia = isMedia
@@ -101,6 +106,7 @@ public struct ContentItem: Identifiable, Hashable, Sendable {
                     audioUrl: audioUrl, readAt: readAt, starred: starred)
         copy.imageUrl = imageUrl
         copy.sourceName = sourceName
+        copy.sourceStype = sourceStype
         copy.hasTranslation = hasTranslation
         copy.hasTranscript = hasTranscript
         copy.isMedia = isMedia
@@ -742,7 +748,7 @@ public final class Database: @unchecked Sendable {
                    (c.content_md IS NOT NULL AND LENGTH(c.content_md) > 500) AS has_fulltext,
                    (c.llm_excerpt_translated IS NOT NULL AND c.llm_excerpt_translated != '') AS has_excerpt_trans,
                    (EXISTS (SELECT 1 FROM export_record er WHERE er.content_id = c.id AND er.status = 'delivered')) AS has_export,
-                   c.source_id, COALESCE(s.name, c.source) AS source_name,
+                   c.source_id, COALESCE(s.name, c.source) AS source_name, s.stype AS source_stype,
                    (\(Self.unmetProcessingCondition(columnPrefix: "c."))) AS has_unmet_processing
             FROM content c
             JOIN content_fts f ON f.rowid = c.id
@@ -761,7 +767,7 @@ public final class Database: @unchecked Sendable {
                    (c.content_md IS NOT NULL AND LENGTH(c.content_md) > 500) AS has_fulltext,
                    (c.llm_excerpt_translated IS NOT NULL AND c.llm_excerpt_translated != '') AS has_excerpt_trans,
                    (EXISTS (SELECT 1 FROM export_record er WHERE er.content_id = c.id AND er.status = 'delivered')) AS has_export,
-                   c.source_id, COALESCE(s.name, c.source) AS source_name,
+                   c.source_id, COALESCE(s.name, c.source) AS source_name, s.stype AS source_stype,
                    (\(Self.unmetProcessingCondition(columnPrefix: "c."))) AS has_unmet_processing
             FROM content c
             LEFT JOIN content_source s ON s.id = c.source_id
@@ -1275,7 +1281,10 @@ public final class Database: @unchecked Sendable {
             item.sourceName = text(24)
         }
         if sqlite3_column_count(stmt) > 25 {
-            item.hasUnmetProcessing = sqlite3_column_int(stmt, 25) == 1
+            item.sourceStype = text(25)
+        }
+        if sqlite3_column_count(stmt) > 26 {
+            item.hasUnmetProcessing = sqlite3_column_int(stmt, 26) == 1
         }
         return item
     }

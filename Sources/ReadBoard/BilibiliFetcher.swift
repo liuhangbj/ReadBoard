@@ -26,6 +26,7 @@ public enum BilibiliFetcher {
         var offset = ""
         var hasMore = true
         var pageCount = 0
+        var creatorName: String?
         let maxPages = historyScope.maxPages
 
         while hasMore && pageCount < maxPages {
@@ -38,6 +39,9 @@ public enum BilibiliFetcher {
             }
 
             let items = dataObj["items"] as? [[String: Any]] ?? []
+            if creatorName == nil {
+                creatorName = firstAuthorName(in: items)
+            }
             let videoEntries = items.compactMap { parseVideoCard($0) }
             allEntries.append(contentsOf: videoEntries)
 
@@ -58,7 +62,7 @@ public enum BilibiliFetcher {
         let filtered = filterByHistoryScope(allEntries, scope: historyScope)
 
         return ParsedFeed(
-            title: "B站 UP 主 \(uid)",
+            title: creatorName ?? "BiliBili UP 主 \(uid)",
             siteURL: "https://space.bilibili.com/\(uid)",
             entries: filtered
         )
@@ -81,15 +85,29 @@ public enum BilibiliFetcher {
               let pages = pageRoot["data"] as? [[String: Any]],
               let cid = pages.first?["cid"] as? Int else { return nil }
 
-        let playerData = try await httpGet(
-            "https://api.bilibili.com/x/player/v2?bvid=\(bvid)&cid=\(cid)", cookie: cookie)
+#if DEBUG
+        let diagnosticsEnabled = ProcessInfo.processInfo.environment["READBOARD_BILIBILI_DIAGNOSTICS"] == "1"
+        if diagnosticsEnabled {
+            let part = pages.first?["part"] as? String ?? ""
+            print("BILIBILI_SUBTITLE_DIAGNOSTIC bvid=\(bvid) cid=\(cid) part=\(part)")
+        }
+#endif
+
+        // 旧的 /x/player/v2 在当前风控下会对同一 bvid/cid 随机返回其他视频的字幕轨。
+        // 改用 WBI 播放器接口，并确保签名与设备 Cookie 成对生成。
+        let playerRequest = try await BilibiliAuth.signedWBIRequest(
+            path: "/x/player/wbi/v2",
+            params: ["bvid": bvid, "cid": String(cid)],
+            sessdata: sessdata
+        )
+        let playerData = try await httpGet(playerRequest.url, cookie: playerRequest.cookie)
         guard let playerRoot = try? JSONSerialization.jsonObject(with: playerData) as? [String: Any],
               let player = playerRoot["data"] as? [String: Any],
               let subtitle = player["subtitle"] as? [String: Any],
               let tracks = subtitle["subtitles"] as? [[String: Any]] else { return nil }
 
 #if DEBUG
-        if ProcessInfo.processInfo.environment["READBOARD_BILIBILI_DIAGNOSTICS"] == "1" {
+        if diagnosticsEnabled {
             let languages = tracks.compactMap { $0["lan"] as? String }
             print("BILIBILI_SUBTITLE_DIAGNOSTIC bvid=\(bvid) track_count=\(tracks.count) languages=\(languages)")
         }
@@ -106,8 +124,18 @@ public enum BilibiliFetcher {
         for track in candidates {
             guard var subtitleURL = track["subtitle_url"] as? String, !subtitleURL.isEmpty else { continue }
             if subtitleURL.hasPrefix("//") { subtitleURL = "https:" + subtitleURL }
-            guard let subtitleData = try? await httpGet(subtitleURL, cookie: cookie),
+            guard let subtitleData = try? await httpGet(subtitleURL, cookie: playerRequest.cookie),
                   let markdown = parseSubtitleMarkdown(subtitleData), !markdown.isEmpty else { continue }
+#if DEBUG
+            if diagnosticsEnabled {
+                let trackId = track["id_str"] as? String
+                    ?? (track["id"] as? Int).map(String.init)
+                    ?? "unknown"
+                let language = track["lan"] as? String ?? "unknown"
+                let preview = markdown.prefix(80).replacingOccurrences(of: "\n", with: " ")
+                print("BILIBILI_SUBTITLE_DIAGNOSTIC bvid=\(bvid) cid=\(cid) track=\(trackId) lan=\(language) chars=\(markdown.count) preview=\(preview)")
+            }
+#endif
             if markdown.count > (best?.count ?? 0) { best = markdown }
         }
         return best
@@ -128,8 +156,18 @@ public enum BilibiliFetcher {
 
     // MARK: - 视频卡解析
 
+    static func firstAuthorName(in items: [[String: Any]]) -> String? {
+        items.lazy.compactMap { item -> String? in
+            guard let modules = item["modules"] as? [String: Any],
+                  let moduleAuthor = modules["module_author"] as? [String: Any],
+                  let rawName = moduleAuthor["name"] as? String else { return nil }
+            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : name
+        }.first
+    }
+
     /// 从动态流 items 中解析视频卡(MAJOR_TYPE_ARCHIVE)
-    private static func parseVideoCard(_ item: [String: Any]) -> ParsedEntry? {
+    static func parseVideoCard(_ item: [String: Any]) -> ParsedEntry? {
         guard let modules = item["modules"] as? [String: Any],
               let moduleDynamic = modules["module_dynamic"] as? [String: Any],
               let major = moduleDynamic["major"] as? [String: Any],
@@ -147,13 +185,16 @@ public enum BilibiliFetcher {
         // 视频页 URL
         let videoURL = "https://www.bilibili.com/video/\(bvid)"
 
-        // 作者信息
-        let author = (modules["module_author"] as? [String: Any])?["name"] as? String
+        // 作者与发布时间位于 module_author。旧响应偶尔在 archive.pubdate
+        // 返回时间戳，因此保留它作为兼容回退。
+        let moduleAuthor = modules["module_author"] as? [String: Any]
+        let author = moduleAuthor?["name"] as? String
 
         // 发布时间
         let published: Date? = {
-            guard let ts = archive["pubdate"] as? Int else { return nil }
-            return Date(timeIntervalSince1970: TimeInterval(ts))
+            guard let timestamp = unixTimestamp(moduleAuthor?["pub_ts"])
+                    ?? unixTimestamp(archive["pubdate"]) else { return nil }
+            return Date(timeIntervalSince1970: timestamp)
         }()
 
         // 视频简介(用于 summary 落 md)
@@ -180,6 +221,21 @@ public enum BilibiliFetcher {
             author: author,
             meta: meta
         )
+    }
+
+    private static func unixTimestamp(_ value: Any?) -> TimeInterval? {
+        switch value {
+        case let value as Int:
+            return TimeInterval(value)
+        case let value as Int64:
+            return TimeInterval(value)
+        case let value as Double:
+            return value
+        case let value as String:
+            return TimeInterval(value)
+        default:
+            return nil
+        }
     }
 
     // MARK: - 历史范围过滤
