@@ -15,6 +15,7 @@ public struct ReadBoardServices: Sendable {
     public let configuration: any ConfigurationGateway
     public let authentication: any AuthenticationGateway
     public let maintenance: any MaintenanceGateway
+    public let remoteAccess: any RemoteAccessGateway
 
     public init(
         library: any LibraryGateway,
@@ -28,7 +29,8 @@ public struct ReadBoardServices: Sendable {
         administration: any AdministrationGateway,
         configuration: any ConfigurationGateway,
         authentication: any AuthenticationGateway,
-        maintenance: any MaintenanceGateway
+        maintenance: any MaintenanceGateway,
+        remoteAccess: any RemoteAccessGateway
     ) {
         self.library = library
         self.contentDetail = contentDetail
@@ -42,6 +44,7 @@ public struct ReadBoardServices: Sendable {
         self.configuration = configuration
         self.authentication = authentication
         self.maintenance = maintenance
+        self.remoteAccess = remoteAccess
     }
 
     public static var live: ReadBoardServices {
@@ -57,7 +60,8 @@ public struct ReadBoardServices: Sendable {
             administration: LocalAdministrationGateway(),
             configuration: LocalConfigurationGateway(),
             authentication: LocalAuthenticationGateway(),
-            maintenance: LocalMaintenanceGateway()
+            maintenance: LocalMaintenanceGateway(),
+            remoteAccess: LocalRemoteAccessGateway()
         )
     }
 }

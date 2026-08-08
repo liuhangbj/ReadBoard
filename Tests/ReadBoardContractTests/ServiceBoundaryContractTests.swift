@@ -19,4 +19,17 @@ final class ServiceBoundaryContractTests: XCTestCase {
         let data = try JSONEncoder().encode(value)
         XCTAssertEqual(try JSONDecoder().decode(MaintenanceSnapshot.self, from: data), value)
     }
+
+    func testRemoteAccessContractRoundTripDoesNotContainServerTokenHashes() throws {
+        let value = RemoteAccessSnapshot(
+            configuration: RemoteAccessConfiguration(enabled: true, allowLAN: true, port: 7331),
+            state: .running,
+            serviceURLs: ["http://10.0.0.5:7331"],
+            devices: [PairedRemoteDevice(id: "device", name: "iPad", createdAt: 1)])
+        let data = try JSONEncoder().encode(value)
+        XCTAssertEqual(try JSONDecoder().decode(RemoteAccessSnapshot.self, from: data), value)
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(text.contains("tokenHash"))
+        XCTAssertFalse(text.contains("token\":"))
+    }
 }

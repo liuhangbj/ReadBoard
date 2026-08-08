@@ -39,12 +39,24 @@ private struct RuntimeSnapshotRequest: Codable { let refreshCounts: Bool }
 /// 与 socket 无关的可测试路由器。所有错误都被转换为稳定 JSON，不把数据库或平台异常堆栈暴露给客户端。
 public struct ReadBoardHTTPRouter: Sendable {
     private let services: ReadBoardServices
-    private let bearerToken: String
+    private let authorizeToken: @Sendable (String) async -> Bool
+    private let redeemPairing: (@Sendable (RemotePairingRequest) async throws -> RemotePairingCredential)?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
     public init(services: ReadBoardServices, bearerToken: String) {
-        self.services = services; self.bearerToken = bearerToken
+        self.services = services
+        self.authorizeToken = { token in !bearerToken.isEmpty && token == bearerToken }
+        self.redeemPairing = nil
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+    }
+
+    init(services: ReadBoardServices, deviceStore: RemoteDeviceStore,
+         pairingService: RemotePairingService) {
+        self.services = services
+        self.authorizeToken = { token in await deviceStore.validate(token: token) }
+        self.redeemPairing = { request in try await pairingService.redeem(request) }
         encoder.dateEncodingStrategy = .millisecondsSince1970
         decoder.dateDecodingStrategy = .millisecondsSince1970
     }
@@ -57,11 +69,35 @@ public struct ReadBoardHTTPRouter: Sendable {
         guard request.headers[ReadBoardAPI.versionHeader] == ReadBoardAPI.version else {
             return failure(426, "version_mismatch", "客户端与服务端 API 版本不兼容")
         }
-        guard request.headers["authorization"] == "Bearer \(bearerToken)", !bearerToken.isEmpty else {
-            return failure(401, "unauthorized", "设备令牌无效")
-        }
         guard request.body.count <= ReadBoardAPI.maximumRequestBytes else {
             return failure(413, "request_too_large", "请求体超过限制")
+        }
+
+        if request.method.uppercased() == "POST", request.path == "/api/v1/pair" {
+            guard let redeemPairing else {
+                return failure(403, "pairing_unavailable", "服务端未开启设备配对")
+            }
+            do {
+                let credential = try await redeemPairing(
+                    try decode(RemotePairingRequest.self, request.body))
+                return json(credential, status: 201)
+            } catch let error as RemotePairingError {
+                let status: Int = switch error {
+                case .invalidCode: 403
+                case .tooManyAttempts: 429
+                case .expired, .noActiveChallenge: 410
+                case .serviceUnavailable: 503
+                }
+                return failure(status, "pairing_failed", error.localizedDescription)
+            } catch {
+                return failure(400, "pairing_failed", error.localizedDescription)
+            }
+        }
+
+        let authorization = request.headers["authorization"] ?? ""
+        let token = authorization.hasPrefix("Bearer ") ? String(authorization.dropFirst(7)) : ""
+        guard await authorizeToken(token) else {
+            return failure(401, "unauthorized", "设备令牌无效或已撤销")
         }
 
         do {
@@ -129,19 +165,41 @@ public struct ReadBoardHTTPRouter: Sendable {
     }
 }
 
-/// 小型 HTTP/1.1 服务。默认只绑定回环地址；LAN 暴露必须显式开启。
+public enum ReadBoardHTTPServerState: Sendable {
+    case starting
+    case ready
+    case waiting(String)
+    case failed(String)
+    case stopped
+}
+
+/// 小型 HTTP/1.1 服务。默认绑定所有 IPv4 网卡；可在远程访问设置中切回仅本机。
 public final class ReadBoardHTTPServer: @unchecked Sendable {
     private let router: ReadBoardHTTPRouter
     private let port: NWEndpoint.Port
     private let allowLAN: Bool
+    private let stateHandler: @Sendable (ReadBoardHTTPServerState) -> Void
     private let queue = DispatchQueue(label: "readboard.http.server", qos: .utility)
     private var listener: NWListener?
     private let lock = NSLock()
 
-    public init(services: ReadBoardServices, token: String, port: UInt16 = 7331, allowLAN: Bool = true) {
+    public init(services: ReadBoardServices, token: String, port: UInt16 = 7331,
+                allowLAN: Bool = true,
+                stateHandler: @escaping @Sendable (ReadBoardHTTPServerState) -> Void = { _ in }) {
         self.router = ReadBoardHTTPRouter(services: services, bearerToken: token)
         self.port = NWEndpoint.Port(rawValue: port) ?? 7331
         self.allowLAN = allowLAN
+        self.stateHandler = stateHandler
+    }
+
+    init(services: ReadBoardServices, deviceStore: RemoteDeviceStore,
+         pairingService: RemotePairingService, port: UInt16, allowLAN: Bool,
+         stateHandler: @escaping @Sendable (ReadBoardHTTPServerState) -> Void) {
+        self.router = ReadBoardHTTPRouter(services: services, deviceStore: deviceStore,
+                                          pairingService: pairingService)
+        self.port = NWEndpoint.Port(rawValue: port) ?? 7331
+        self.allowLAN = allowLAN
+        self.stateHandler = stateHandler
     }
 
     public func start() throws {
@@ -152,9 +210,14 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
         parameters.requiredLocalEndpoint = .hostPort(host: host, port: port)
         let value = try NWListener(using: parameters)
         value.newConnectionHandler = { [weak self] in self?.accept($0) }
-        value.stateUpdateHandler = { state in
-            if case .failed(let error) = state {
-                fputs("[http] listener failed: \(error)\n", stderr)
+        value.stateUpdateHandler = { [stateHandler] state in
+            switch state {
+            case .setup: stateHandler(.starting)
+            case .ready: stateHandler(.ready)
+            case .waiting(let error): stateHandler(.waiting(error.localizedDescription))
+            case .failed(let error): stateHandler(.failed(error.localizedDescription))
+            case .cancelled: stateHandler(.stopped)
+            @unknown default: stateHandler(.waiting("未知网络状态"))
             }
         }
         value.start(queue: queue)
@@ -164,6 +227,7 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
     public func stop() {
         lock.lock(); let value = listener; listener = nil; lock.unlock()
         value?.cancel()
+        stateHandler(.stopped)
     }
 
     private func accept(_ connection: NWConnection) {
@@ -213,8 +277,10 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
 
     private func send(_ response: ReadBoardHTTPResponse, on connection: NWConnection) {
         let reason: String = switch response.status {
-        case 200: "OK"; case 400: "Bad Request"; case 401: "Unauthorized"
-        case 404: "Not Found"; case 413: "Payload Too Large"; case 426: "Upgrade Required"
+        case 200: "OK"; case 201: "Created"; case 400: "Bad Request"
+        case 401: "Unauthorized"; case 403: "Forbidden"; case 404: "Not Found"
+        case 410: "Gone"; case 413: "Payload Too Large"; case 426: "Upgrade Required"
+        case 429: "Too Many Requests"; case 503: "Service Unavailable"
         default: "Internal Server Error"
         }
         var headers = response.headers

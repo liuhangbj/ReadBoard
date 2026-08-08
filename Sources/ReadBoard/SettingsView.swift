@@ -5,12 +5,13 @@ import ReadBoardContract
 // MARK: - 独立设置窗口（⌘, 打开，手写侧栏+详情分页）
 
 public enum SettingsPage: String, CaseIterable, Identifiable, Sendable {
-    case general, reader, llm, deps, boards, sources, fetch, content, export, pipeline, cleanup
+    case general, remote, reader, llm, deps, boards, sources, fetch, content, export, pipeline, cleanup
     public var id: String { rawValue }
 
     var title: String {
         switch self {
         case .general:  return "通用"
+        case .remote:   return "远程访问"
         case .reader:   return "阅读器"
         case .llm:      return "LLM模型"
         case .deps:     return "依赖"
@@ -27,6 +28,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable, Sendable {
     var icon: String {
         switch self {
         case .general:  return "gearshape"
+        case .remote:   return "network"
         case .reader:   return "doc.text"
         case .llm:      return "brain.head.profile"
         case .deps:     return "shippingbox"
@@ -100,6 +102,7 @@ public struct SettingsView: View {
                     switch page {
                     case .general:  GeneralPane(sourceManagement: services.sourceManagement,
                                                 configuration: services.configuration)
+                    case .remote:   RemoteAccessPane(remoteAccess: services.remoteAccess)
                     case .reader:   ReaderPane()
                     case .llm:      LLMPane(configuration: services.configuration)
                     case .deps:     DepsPane()
