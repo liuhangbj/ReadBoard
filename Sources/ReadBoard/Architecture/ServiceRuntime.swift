@@ -54,7 +54,9 @@ enum RemoteAccessSettings {
     static var enabled: Bool {
         UserDefaults.standard.object(forKey: "service.http.enabled") as? Bool ?? true
     }
-    static var allowLAN: Bool { UserDefaults.standard.bool(forKey: "service.http.allowLAN") }
+    static var allowLAN: Bool {
+        UserDefaults.standard.object(forKey: "service.http.allowLAN") as? Bool ?? true
+    }
     static var port: UInt16 {
         let value = UserDefaults.standard.integer(forKey: "service.http.port")
         return UInt16(exactly: value > 0 ? value : 7331) ?? 7331

@@ -138,7 +138,7 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
     private var listener: NWListener?
     private let lock = NSLock()
 
-    public init(services: ReadBoardServices, token: String, port: UInt16 = 7331, allowLAN: Bool = false) {
+    public init(services: ReadBoardServices, token: String, port: UInt16 = 7331, allowLAN: Bool = true) {
         self.router = ReadBoardHTTPRouter(services: services, bearerToken: token)
         self.port = NWEndpoint.Port(rawValue: port) ?? 7331
         self.allowLAN = allowLAN
@@ -148,13 +148,9 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard listener == nil else { return }
         let parameters = NWParameters.tcp
-        let value: NWListener
-        if !allowLAN {
-            parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port)
-            value = try NWListener(using: parameters)
-        } else {
-            value = try NWListener(using: parameters, on: port)
-        }
+        let host: NWEndpoint.Host = allowLAN ? "0.0.0.0" : "127.0.0.1"
+        parameters.requiredLocalEndpoint = .hostPort(host: host, port: port)
+        let value = try NWListener(using: parameters)
         value.newConnectionHandler = { [weak self] in self?.accept($0) }
         value.stateUpdateHandler = { state in
             if case .failed(let error) = state {
