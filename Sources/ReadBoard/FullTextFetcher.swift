@@ -261,6 +261,21 @@ public final class FullTextFetcher: @unchecked Sendable {
         storeMd(contentId: contentId, md: value, engine: engine)
     }
 
+    /// 外部平台的源列表已经更新成功，但某一条正文提取失败。
+    /// 错误只落到 content，不得污染 content_source.error 或中断同源其他条目。
+    func markExternalFailure(contentId: Int64, error: Error, engine: String) {
+        let message = String(error.localizedDescription.prefix(1_000))
+        db.execute(
+            """
+            UPDATE content
+            SET fetch_status = 3, fetch_engine = ?, fetch_error = ?, fetched_full_at = NULL
+            WHERE id = ?
+            """,
+            params: [engine, message, contentId]
+        )
+        NotificationCenter.default.post(name: .contentUpdated, object: nil)
+    }
+
     fileprivate func extractExternalHTML(_ html: String) -> String? {
         runCLI(stdinHTML: html)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -268,7 +283,12 @@ public final class FullTextFetcher: @unchecked Sendable {
 
     private func storeMd(contentId: Int64, md: String, engine: String) {
         db.execute(
-            "UPDATE content SET content_md = ?, fetch_status = 2, fetch_engine = ? WHERE id = ?",
+            """
+            UPDATE content
+            SET content_md = ?, fetch_status = 2, fetch_engine = ?, fetch_error = NULL,
+                fetched_full_at = datetime('now')
+            WHERE id = ?
+            """,
             params: [md, engine, contentId]
         )
         // 全文提取完成——发通知刷新 ArticleRow 全文 badge（绿/红）
@@ -461,10 +481,17 @@ extension FullTextFetcher {
     /// 重抓单篇全文
     func refetchSingleFulltext(contentId: Int64) async {
         guard let row = Database.shared.queryRows("""
-            SELECT c.url, c.content_html, s.config
+            SELECT c.url, c.content_html, s.config, s.stype
             FROM content c LEFT JOIN content_source s ON c.source_id = s.id
             WHERE c.id = ?
             """, params: [contentId]).first else { return }
+        if let sourceType = row["stype"],
+           await MainActor.run(body: {
+               ReadBoardSourceConnectorRegistry.shared.connector(for: sourceType) != nil
+           }) {
+            _ = await SourceStore.shared.retryExternalFulltext(contentId: contentId)
+            return
+        }
         let url = row["url"] ?? ""
         let feedHtml = row["content_html"]
         // 从源 config 解析 fetch_mode
@@ -480,12 +507,19 @@ extension FullTextFetcher {
     /// 重抓某源全部文章全文
     func refetchSourceFulltext(sourceId: Int64) async {
         let rows = Database.shared.queryRows("""
-            SELECT c.id, c.url, c.content_html, s.config
+            SELECT c.id, c.url, c.content_html, s.config, s.stype
             FROM content c LEFT JOIN content_source s ON c.source_id = s.id
             WHERE c.source_id = ? AND c.is_duplicate = 0
             """, params: [sourceId])
         for row in rows {
             guard let cid = Int64(row["id"] ?? "") else { continue }
+            if let sourceType = row["stype"],
+               await MainActor.run(body: {
+                   ReadBoardSourceConnectorRegistry.shared.connector(for: sourceType) != nil
+               }) {
+                _ = await SourceStore.shared.retryExternalFulltext(contentId: cid)
+                continue
+            }
             let url = row["url"] ?? ""
             let feedHtml = row["content_html"]
             var mode: FetchMode = .summary

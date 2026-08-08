@@ -8,7 +8,7 @@ final class DatabaseBootstrapTests: XCTestCase {
             throw XCTSkip("需要 READBOARD_DB 指向临时数据库；跳过以免触碰真实库")
         }
         XCTAssertTrue(Database.shared.open())
-        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 30)
+        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 31)
 
         let requiredColumns = ["deleted_at", "llm_translated_md", "llm_transcript_md",
                                "first_image_url"]
@@ -25,6 +25,8 @@ final class DatabaseBootstrapTests: XCTestCase {
             XCTAssertTrue(indexes.contains(index), "全新数据库缺少内容处理索引 \(index)")
         }
         XCTAssertFalse(columns.contains("is_archived"), "归档状态字段应已从当前数据库结构移除")
+        XCTAssertEqual(Database.shared.scalarInt(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='content_processing_ignore';"), 1)
         XCTAssertEqual(Database.shared.scalarInt(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='content_fts';"), 1)
     }
@@ -175,6 +177,49 @@ final class DatabaseBootstrapTests: XCTestCase {
         XCTAssertNil(db.scalarString("SELECT error FROM content_source WHERE id = ?",
                                      params: [sid]))
         XCTAssertFalse(SourceStore.shared.isExternalSyncing)
+    }
+
+    @MainActor
+    func testExternalFulltextFailureIsStoredOnContentWithoutFailingSource() async throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_210_061
+        cleanup(ids: [], sourceIds: [sid])
+
+        let connector = ThrowingExternalFulltextConnector()
+        db.execute("DELETE FROM content WHERE source=?", params: [connector.sourceType])
+        defer {
+            db.execute("DELETE FROM content WHERE source=?", params: [connector.sourceType])
+            cleanup(ids: [], sourceIds: [sid])
+        }
+        ReadBoardSourceConnectorRegistry.shared.register(connector)
+        defer { ReadBoardSourceConnectorRegistry.shared.unregister(sourceType: connector.sourceType) }
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config, enabled)
+            VALUES (?, ?, '单篇失败测试', 'external-test',
+                    '{"fetch_mode":"external_fulltext"}', 1);
+            """, params: [sid, connector.sourceType]))
+        SourceStore.shared.reload()
+        let source = try XCTUnwrap(SourceStore.shared.sources.first { $0.id == sid })
+
+        let added = try await SourceStore.shared.syncOne(source)
+
+        XCTAssertEqual(added, 2)
+        XCTAssertNil(db.scalarString("SELECT error FROM content_source WHERE id=?", params: [sid]))
+        XCTAssertNotNil(db.scalarString(
+            "SELECT last_fetched_at FROM content_source WHERE id=?", params: [sid]))
+        let failed = try XCTUnwrap(db.queryRows(
+            "SELECT id,fetch_status,fetch_engine,fetch_error FROM content WHERE source_id=? AND guid='failed'",
+            params: [sid]).first)
+        XCTAssertEqual(failed["fetch_status"], "3")
+        XCTAssertEqual(failed["fetch_engine"], "\(connector.sourceType)_connector")
+        XCTAssertTrue(failed["fetch_error"]?.contains("模拟正文失败") == true)
+        let succeeded = try XCTUnwrap(db.queryRows(
+            "SELECT fetch_status,content_md FROM content WHERE source_id=? AND guid='succeeded'",
+            params: [sid]).first)
+        XCTAssertEqual(succeeded["fetch_status"], "2")
+        XCTAssertTrue((succeeded["content_md"] ?? "").count >= 40)
     }
 
     func testUnmetProcessingViewUsesItemStandardsInsteadOfWorkerSnapshot() throws {
@@ -991,5 +1036,30 @@ private struct DummyExternalFulltextConnector: ReadBoardSourceConnector {
 
     func fetch(identifier: String, configuration: String) async throws -> ParsedFeed {
         ParsedFeed(title: "微信公众号", siteURL: nil, entries: [], language: "zh")
+    }
+}
+
+private struct ThrowingExternalFulltextConnector: ReadBoardSourceConnector {
+    struct ExpectedFailure: LocalizedError {
+        var errorDescription: String? { "模拟正文失败" }
+    }
+
+    let sourceType = "test_external_fulltext"
+    let fulltextMode = FetchMode.externalFulltext
+
+    func fetch(identifier: String, configuration: String) async throws -> ParsedFeed {
+        ParsedFeed(title: "测试外部源", siteURL: nil, entries: [
+            ParsedEntry(
+                guid: "failed", title: "正文失败", url: "https://test.invalid/failed",
+                published: nil, html: "失败条目的摘要", author: nil),
+            ParsedEntry(
+                guid: "succeeded", title: "正文成功", url: "https://test.invalid/succeeded",
+                published: nil, html: "成功条目的摘要", author: nil)
+        ])
+    }
+
+    func contentMarkdown(for entry: ParsedEntry) async throws -> String? {
+        if entry.guid == "failed" { throw ExpectedFailure() }
+        return String(repeating: "可用正文", count: 20)
     }
 }

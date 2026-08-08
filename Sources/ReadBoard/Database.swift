@@ -1220,10 +1220,14 @@ public final class Database: @unchecked Sendable {
     private static func unmetProcessingCondition(columnPrefix: String) -> String {
         let c = columnPrefix
         return """
-        ((\(c)auto_score=1 AND \(c)llm_score IS NULL)
-         OR (\(c)auto_summarize=1 AND LENGTH(TRIM(COALESCE(\(c)llm_summary,'')))=0)
-         OR (\(c)auto_translate=1 AND LENGTH(TRIM(COALESCE(\(c)llm_translated_md,'')))=0)
-         OR (\(c)auto_transcribe=1 AND LENGTH(TRIM(COALESCE(\(c)llm_transcript_md,'')))=0))
+        ((\(c)auto_score=1 AND \(c)llm_score IS NULL
+          AND NOT EXISTS (SELECT 1 FROM content_processing_ignore i WHERE i.content_id=\(c)id AND i.jtype='score'))
+         OR (\(c)auto_summarize=1 AND LENGTH(TRIM(COALESCE(\(c)llm_summary,'')))=0
+          AND NOT EXISTS (SELECT 1 FROM content_processing_ignore i WHERE i.content_id=\(c)id AND i.jtype='summarize'))
+         OR (\(c)auto_translate=1 AND LENGTH(TRIM(COALESCE(\(c)llm_translated_md,'')))=0
+          AND NOT EXISTS (SELECT 1 FROM content_processing_ignore i WHERE i.content_id=\(c)id AND i.jtype='translate'))
+         OR (\(c)auto_transcribe=1 AND LENGTH(TRIM(COALESCE(\(c)llm_transcript_md,'')))=0
+          AND NOT EXISTS (SELECT 1 FROM content_processing_ignore i WHERE i.content_id=\(c)id AND i.jtype='transcribe')))
         """
     }
 

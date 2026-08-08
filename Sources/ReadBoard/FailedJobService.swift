@@ -29,16 +29,61 @@ public final class FailedJobService: @unchecked Sendable {
     private let db = Database.shared
     private init() {}
 
+    /// 失败记录是自动处理的告警，不是永久历史。展示或计数前再次核对当前目标：
+    /// 工序已关闭、内容/来源已失效，或对应结果已经存在时，旧失败不再有行动价值。
+    @discardableResult
+    func clearResolvedAutomaticFailures() -> Bool {
+        db.execute("""
+            DELETE FROM content_job
+            WHERE status = 3
+              AND (
+                NOT EXISTS (
+                    SELECT 1 FROM content c WHERE c.id = content_job.content_id
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM content c
+                    LEFT JOIN content_source s ON s.id = c.source_id
+                    WHERE c.id = content_job.content_id
+                      AND (
+                        c.deleted_at IS NOT NULL
+                        OR c.is_duplicate = 1
+                        OR COALESCE(s.enabled, 0) = 0
+                        OR CASE content_job.jtype
+                            WHEN 'score' THEN
+                                c.auto_score IS NOT 1 OR c.llm_score IS NOT NULL
+                            WHEN 'translate' THEN
+                                c.auto_translate IS NOT 1
+                                OR LENGTH(TRIM(COALESCE(c.llm_translated_md, ''))) > 0
+                            WHEN 'summarize' THEN
+                                c.auto_summarize IS NOT 1
+                                OR LENGTH(TRIM(COALESCE(c.llm_summary, ''))) > 0
+                            WHEN 'transcribe' THEN
+                                c.auto_transcribe IS NOT 1
+                                OR LENGTH(TRIM(COALESCE(c.llm_transcript_md, ''))) > 0
+                            ELSE 0
+                           END
+                      )
+                )
+              );
+            """)
+    }
+
     /// 最近失败的 job：每个 content+jtype 先取最新一次任务，只有最新状态仍失败才展示。
     /// 不能先筛 status=3，否则“失败后已成功”的旧记录会永远留在失败页。
     func recentFailures(limit: Int = 100) -> [FailedJob] {
-        db.queryRows("""
+        clearResolvedAutomaticFailures()
+        return db.queryRows("""
             WITH latest AS (
                 SELECT j.*,
                        ROW_NUMBER() OVER (
                            PARTITION BY j.content_id, j.jtype ORDER BY j.id DESC
                        ) AS rn
                 FROM content_job j
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM content_processing_ignore i
+                    WHERE i.content_id=j.content_id AND i.jtype=j.jtype
+                )
             )
             SELECT latest.id, latest.content_id, latest.jtype, latest.error,
                    latest.finished_at, COALESCE(c.title, '(已删除)') AS title
@@ -60,13 +105,18 @@ public final class FailedJobService: @unchecked Sendable {
 
     /// 连续失败至少 3 次、已被 Worker 暂停的任务。与 Worker 的失败计数使用同一口径。
     func pausedFailures(limit: Int = 200) -> [PausedContentFailure] {
-        db.queryRows("""
+        clearResolvedAutomaticFailures()
+        return db.queryRows("""
             WITH ranked AS (
               SELECT j.*,
                      ROW_NUMBER() OVER (
                        PARTITION BY j.content_id, j.jtype ORDER BY j.id DESC
                      ) AS rn
               FROM content_job j
+              WHERE NOT EXISTS (
+                SELECT 1 FROM content_processing_ignore i
+                WHERE i.content_id=j.content_id AND i.jtype=j.jtype
+              )
             ),
             consec AS (
               SELECT content_id, jtype, COUNT(*) AS fails
@@ -113,6 +163,20 @@ public final class FailedJobService: @unchecked Sendable {
             finishedAt: failure.finishedAt,
             title: failure.title
         ))
+    }
+
+    /// 永久忽略该内容的自动处理目标。手动处理按钮不读取此表，仍可直接执行。
+    @discardableResult
+    func ignore(_ failure: PausedContentFailure) -> Bool {
+        let inserted = db.execute("""
+            INSERT OR IGNORE INTO content_processing_ignore(content_id,jtype)
+            VALUES (?, ?);
+            """, params: [failure.contentId, failure.jtype])
+        guard inserted else { return false }
+        db.execute(
+            "DELETE FROM content_job WHERE content_id=? AND jtype=? AND status=3",
+            params: [failure.contentId, failure.jtype])
+        return true
     }
 
     /// 手动重试某条失败 job（按 jtype 重跑对应管线）

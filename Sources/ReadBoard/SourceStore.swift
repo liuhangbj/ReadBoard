@@ -125,6 +125,11 @@ public final class SourceStore: ObservableObject {
         var errorDescription: String? { "已有抓取任务正在运行" }
     }
 
+    private enum ExternalFullTextError: LocalizedError {
+        case emptyMarkdown
+        var errorDescription: String? { "平台未返回可用正文" }
+    }
+
     struct SourceRetryResult: Sendable {
         let success: Bool
         let message: String
@@ -781,6 +786,11 @@ public final class SourceStore: ObservableObject {
                 db.execute("UPDATE content_source SET error = ? WHERE id = ?",
                            params: [error.localizedDescription, src.id])
             }
+            if src.stype == "bilibili" {
+                // 动态接口对同一设备连续批量请求敏感；缓存 buvid3 后仍保留源间节流，
+                // 避免一轮几十个 UP 主被 412/-352 风控成批拦截。
+                try? await Task.sleep(nanoseconds: 800_000_000)
+            }
         }
         var msg = failed > 0 ? "完成：新增 \(total) 条，\(failed) 个源失败" : "完成：新增 \(total) 条"
         if skipped > 0 { msg += "（跳过未到期 \(skipped)）" }
@@ -801,13 +811,31 @@ public final class SourceStore: ObservableObject {
             isExternalSyncing = false
             reload()
         }
-        for src in sources where src.enabled && isExternalSource(src) {
-            if !manual && !src.isDue { continue }
+        let candidates = sources.filter {
+            $0.enabled && isExternalSource($0) && (manual || $0.isDue)
+        }
+        var pausedTypes = Set<String>()
+        for (index, src) in candidates.enumerated() {
+            guard !pausedTypes.contains(src.stype) else { continue }
+            let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype)
             do {
                 _ = try await syncOneUnlocked(src)
             } catch {
+                let message = error.localizedDescription
                 db.execute("UPDATE content_source SET error = ? WHERE id = ?",
-                           params: [error.localizedDescription, src.id])
+                           params: [message, src.id])
+                if connector?.shouldPauseBatch(after: error) == true {
+                    pausedTypes.insert(src.stype)
+                    // 同一授权根因影响整个平台；停止继续请求，并让问题中心按影响数量聚合。
+                    for remaining in candidates.dropFirst(index + 1) where remaining.stype == src.stype {
+                        db.execute("UPDATE content_source SET error = ? WHERE id = ?",
+                                   params: [message, remaining.id])
+                    }
+                }
+            }
+            if !pausedTypes.contains(src.stype), let spacing = connector?.minimumFetchSpacing,
+               spacing > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(spacing * 1_000_000_000))
             }
         }
     }
@@ -849,6 +877,59 @@ public final class SourceStore: ObservableObject {
             lastSyncMessage = "\(source.name)：更新失败"
             reload()
             return SourceRetryResult(success: false, message: message)
+        }
+    }
+
+    /// 重试外部平台的单篇正文。源列表更新与正文提取分离后，自动恢复、问题中心
+    /// 和阅读页手动重提均复用此入口，确保仍走平台连接器的鉴权与解析逻辑。
+    @discardableResult
+    func retryExternalFulltext(contentId: Int64) async -> Bool {
+        guard let row = db.queryRows("""
+            SELECT c.guid, c.title, c.url, c.published_at, c.content_html,
+                   c.author, c.language, c.meta, s.stype
+            FROM content c
+            JOIN content_source s ON s.id=c.source_id
+            WHERE c.id=? AND c.deleted_at IS NULL;
+            """, params: [contentId]).first,
+              let sourceType = row["stype"],
+              let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: sourceType)
+        else { return false }
+
+        let rawMeta = row["meta"] ?? "{}"
+        let object = (try? JSONSerialization.jsonObject(with: Data(rawMeta.utf8)) as? [String: Any]) ?? [:]
+        let meta = object.reduce(into: [String: String]()) { result, pair in
+            switch pair.value {
+            case let value as String: result[pair.key] = value
+            case let value as NSNumber: result[pair.key] = value.stringValue
+            default: break
+            }
+        }
+        let published = row["published_at"].flatMap { ISO8601DateFormatter().date(from: $0) }
+        let stored = ParsedEntry(
+            guid: row["guid"] ?? "",
+            title: row["title"] ?? "",
+            url: row["url"] ?? "",
+            published: published,
+            html: row["content_html"] ?? "",
+            author: row["author"],
+            language: row["language"],
+            meta: meta
+        )
+        let engine = "\(sourceType)_connector"
+        do {
+            let prepared = try await connector.prepareForImport(stored)
+            guard let markdown = try await connector.contentMarkdown(for: prepared)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !markdown.isEmpty else {
+                throw ExternalFullTextError.emptyMarkdown
+            }
+            FullTextFetcher.shared.storeExternalMarkdown(
+                contentId: contentId, markdown: markdown, engine: engine)
+            return true
+        } catch {
+            FullTextFetcher.shared.markExternalFailure(
+                contentId: contentId, error: error, engine: engine)
+            return false
         }
     }
 
@@ -896,16 +977,21 @@ public final class SourceStore: ObservableObject {
             let source = src.stype
             let sourceId = src.id
             let pipeline = src.policy
-            let importEntry: ParsedEntry
+            var importEntry = entry
+            var preparationError: Error?
             if let connector = externalConnector {
                 let alreadyExists = db.scalarInt(
                     "SELECT 1 FROM content WHERE source = ? AND guid = ? LIMIT 1",
                     params: [source, entry.guid]
                 ) != nil
                 if alreadyExists { continue }
-                importEntry = try await connector.prepareForImport(entry)
-            } else {
-                importEntry = entry
+                do {
+                    importEntry = try await connector.prepareForImport(entry)
+                } catch {
+                    // 单篇最终链接解析失败仍先入库元数据，错误落到 content.fetch_error。
+                    // 源列表本身已经成功，不应因此把整个订阅源标成更新失败。
+                    preparationError = error
+                }
             }
             let newId = await Task.detached(priority: .utility) {
                 Self.upsertContent(source: source, sourceId: sourceId,
@@ -917,15 +1003,25 @@ public final class SourceStore: ObservableObject {
                 // YouTube/Bilibili 由 stype 固定走字幕提取；普通 RSS/播客仍按各自配置。
                 // 各模式现在都会把 feed 自带正文落到 content_md（summary 模式经 writeBackFeedHtmlAsMd），
                 // 不再按 audio_url/video_url 类型跳过；落在 .summary 不再等于"不抓正文"。
-                let connectorMarkdown = try await externalConnector?.contentMarkdown(for: importEntry)
-                if let markdown = (connectorMarkdown ?? importEntry.contentMarkdown)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                   !markdown.isEmpty {
-                    FullTextFetcher.shared.storeExternalMarkdown(
-                        contentId: newId,
-                        markdown: markdown,
-                        engine: "\(src.stype)_connector"
-                    )
+                if let connector = externalConnector {
+                    let engine = "\(src.stype)_connector"
+                    if let preparationError {
+                        FullTextFetcher.shared.markExternalFailure(
+                            contentId: newId, error: preparationError, engine: engine)
+                    } else {
+                        do {
+                            guard let markdown = try await connector.contentMarkdown(for: importEntry)?
+                                .trimmingCharacters(in: .whitespacesAndNewlines),
+                                  !markdown.isEmpty else {
+                                throw ExternalFullTextError.emptyMarkdown
+                            }
+                            FullTextFetcher.shared.storeExternalMarkdown(
+                                contentId: newId, markdown: markdown, engine: engine)
+                        } catch {
+                            FullTextFetcher.shared.markExternalFailure(
+                                contentId: newId, error: error, engine: engine)
+                        }
+                    }
                 } else {
                     await FullTextFetcher.shared.fetchAndStore(
                         contentId: newId, url: importEntry.url,
@@ -946,6 +1042,9 @@ public final class SourceStore: ObservableObject {
                 "UPDATE content_source SET last_fetched_at = datetime('now'), error = NULL WHERE id = ?",
                 params: [sourceId])
         }.value
+        // 同步不仅可能新增内容，也会合并动态卡片里的访问权限等元数据。
+        // 批次结束统一刷新一次列表，让既有 B站条目的付费标签无需重新进页面即可出现。
+        NotificationCenter.default.post(name: .contentUpdated, object: nil)
         return added
     }
 

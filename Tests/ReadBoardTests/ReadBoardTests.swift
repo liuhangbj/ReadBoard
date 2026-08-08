@@ -83,7 +83,7 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
             ]
         ])
         XCTAssertEqual(access.state, .upowerExclusive)
-        XCTAssertEqual(access.state.listLabel, "高档充电")
+        XCTAssertEqual(access.state.listLabel, "充电专属")
         XCTAssertEqual(access.toast, "试看中・开通「30元档包月充电」即可观看")
         XCTAssertEqual(access.privilegeType, 20)
         XCTAssertTrue(access.isPartial)
@@ -96,8 +96,18 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
             "is_upower_play": 0
         ])
         XCTAssertEqual(access.state, .upowerExclusive)
-        XCTAssertEqual(access.state.listLabel, "高档充电")
+        XCTAssertEqual(access.state.listLabel, "充电专属")
         XCTAssertTrue(access.isPartial)
+    }
+
+    func testBilibiliUnlockedUpowerStillKeepsPaidTypeWithoutPartialWarning() {
+        let access = BilibiliFetcher.videoAccess(from: [
+            "is_upower_exclusive": true,
+            "is_upower_play": true,
+            "elec_high_level": ["title": "该视频为「充电专属」视频"]
+        ])
+        XCTAssertEqual(access.state, .upowerExclusive)
+        XCTAssertFalse(access.isPartial)
     }
 
     func testPlatformModesComeFromSourceType() {
@@ -161,6 +171,58 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
             1_722_470_400,
             accuracy: 0.001
         )
+    }
+
+    func testBilibiliDynamicChargingCardCarriesAccessMetadataAtIngest() throws {
+        let item: [String: Any] = [
+            "modules": [
+                "module_author": ["name": "测试 UP 主", "pub_ts": 1_722_470_400],
+                "module_dynamic": [
+                    "major": [
+                        "type": "MAJOR_TYPE_ARCHIVE",
+                        "archive": [
+                            "bvid": "BV1ChargingMeta",
+                            "title": "充电专属视频",
+                            "is_charging_arc": true,
+                            "elec_arc_type": 1,
+                            "badge": ["text": "充电专属"]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+
+        let entry = try XCTUnwrap(BilibiliFetcher.parseVideoCard(item))
+        XCTAssertEqual(entry.meta["bilibili_access_state"], "upowerExclusive")
+        XCTAssertEqual(entry.meta["bilibili_access_label"], "充电专属")
+        XCTAssertEqual(entry.meta["bilibili_access_source"], "dynamic_card")
+    }
+
+    func testBilibiliDynamicCardDistinguishesEarlyAccessAndUgcPay() {
+        let early = BilibiliFetcher.dynamicVideoAccess(from: [
+            "is_charging_arc": true,
+            "elec_arc_type": 2,
+            "elec_arc_badge": "抢先看"
+        ])
+        XCTAssertEqual(early?.state, .upowerEarlyAccess)
+        XCTAssertEqual(early?.state.listLabel, "充电抢先看")
+
+        let paid = BilibiliFetcher.dynamicVideoAccess(from: [
+            "is_ugcpay": true,
+            "ugc_pay": 1,
+            "ugc_pay_preview": 1
+        ])
+        XCTAssertEqual(paid?.state, .paidPreview)
+        XCTAssertEqual(paid?.state.listLabel, "单片付费")
+    }
+
+    func testBilibiliDynamicCardRecognizesPaidSeason() {
+        let access = BilibiliFetcher.dynamicVideoAccess(from: [
+            "is_chargeable_season": true,
+            "ugc_season": ["is_pay_season": true]
+        ])
+        XCTAssertEqual(access?.state, .paidSeason)
+        XCTAssertEqual(access?.state.listLabel, "付费合集")
     }
 
     func testBilibiliFeedUsesRealAuthorNameFromAnyDynamicType() {
@@ -246,6 +308,39 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
         let second = try await BilibiliFetcher.fetchSubtitleMarkdown(videoURL: videoURL)
         XCTAssertEqual(second, firstMarkdown, "同一 BVID 连续提取必须返回同一份字幕")
         XCTAssertGreaterThan(firstMarkdown.count, 1_000)
+    }
+
+    func testBilibiliFeedFallbackWhenEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["READBOARD_BILIBILI_FEED_LIVE"] == "1" else {
+            throw XCTSkip("B站动态/WBI/移动端降级网络回归测试默认关闭")
+        }
+        let uid = ProcessInfo.processInfo.environment["READBOARD_BILIBILI_FEED_UID"]
+            ?? "443551651"
+
+        let feed = try await BilibiliFetcher.fetch(uid: uid, historyScope: .recent30d)
+
+        XCTAssertFalse(feed.entries.isEmpty)
+        XCTAssertTrue(feed.entries.allSatisfy { $0.meta["video_id"] != nil })
+    }
+
+    func testBilibiliAppArchiveFallbackPreservesMetadataAndPaidState() throws {
+        let entry = try XCTUnwrap(BilibiliFetcher.parseAppArchiveVideo([
+            "bvid": "BV1ReadBoard",
+            "title": "移动端降级视频",
+            "author": "测试 UP 主",
+            "ctime": 1_700_000_000,
+            "cover": "https://example.com/cover.jpg",
+            "duration": 3_661,
+            "is_ugcpay": true
+        ]))
+
+        XCTAssertEqual(entry.guid, "BV1ReadBoard")
+        XCTAssertEqual(entry.author, "测试 UP 主")
+        XCTAssertEqual(entry.published, Date(timeIntervalSince1970: 1_700_000_000))
+        XCTAssertEqual(entry.meta["duration"], "1:01:01")
+        XCTAssertEqual(entry.meta["bilibili_access_source"], "app_archive_fallback")
+        XCTAssertEqual(entry.meta["bilibili_access_state"], BilibiliAccessState.paidPreview.rawValue)
+        XCTAssertEqual(entry.meta["bilibili_access_label"], "单片付费")
     }
 }
 

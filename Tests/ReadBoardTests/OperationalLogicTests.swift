@@ -6,18 +6,31 @@ final class FailedJobServiceTests: XCTestCase {
         try requireIsolatedDatabase()
         let db = Database.shared
         XCTAssertTrue(db.open())
+        let sourceId: Int64 = 9_500_010
         let recoveredId: Int64 = 9_500_011
         let failingId: Int64 = 9_500_012
         cleanup(ids: [recoveredId, failingId])
-        defer { cleanup(ids: [recoveredId, failingId]) }
+        db.execute("DELETE FROM content_source WHERE id = ?", params: [sourceId])
+        defer {
+            cleanup(ids: [recoveredId, failingId])
+            db.execute("DELETE FROM content_source WHERE id = ?", params: [sourceId])
+        }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, enabled, config)
+            VALUES (?, 'rss', '最近失败测试', ?, 1, '{}');
+            """, params: [sourceId, "https://test.invalid/recent-failure-\(sourceId)"]))
 
         for id in [recoveredId, failingId] {
             XCTAssertTrue(db.execute("""
-                INSERT INTO content (id, guid, ctype, source, title, url, fetch_status)
-                VALUES (?, ?, 'article', 'rss', ?, ?, 2);
-                """, params: [id, "failed-job-guid-\(id)", "失败任务测试 \(id)",
+                INSERT INTO content (id, guid, source_id, ctype, source, title, url, fetch_status)
+                VALUES (?, ?, ?, 'article', 'rss', ?, ?, 2);
+                """, params: [id, "failed-job-guid-\(id)", sourceId, "失败任务测试 \(id)",
                                 "https://test.invalid/item/\(id)"]))
         }
+        XCTAssertTrue(db.execute(
+            "UPDATE content SET auto_score=1, auto_translate=1 WHERE id IN (?, ?)",
+            params: [recoveredId, failingId]))
         XCTAssertTrue(db.execute("""
             INSERT INTO content_job (content_id, jtype, status, finished_at, error)
             VALUES (?, 'score', 3, datetime('now', '-2 minutes'), '旧失败'),
@@ -55,6 +68,9 @@ final class FailedJobServiceTests: XCTestCase {
                 """, params: [id, "paused-failure-guid-\(id)", sourceId,
                                 "暂停任务测试 \(id)", "https://test.invalid/item/\(id)"]))
         }
+        XCTAssertTrue(db.execute(
+            "UPDATE content SET auto_translate=1, auto_score=1 WHERE id IN (?, ?)",
+            params: [pausedId, recoveredId]))
         XCTAssertTrue(db.execute("""
             INSERT INTO content_job (content_id, jtype, status, finished_at, error)
             VALUES
@@ -79,6 +95,109 @@ final class FailedJobServiceTests: XCTestCase {
         XCTAssertFalse(failures.contains { $0.contentId == recoveredId && $0.jtype == "score" })
     }
 
+    func testResolvedAutomaticFailureIsRemovedBeforeDisplay() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sourceId: Int64 = 9_500_030
+        let completedId: Int64 = 9_500_031
+        let pendingId: Int64 = 9_500_032
+        cleanup(ids: [completedId, pendingId])
+        db.execute("DELETE FROM content_source WHERE id = ?", params: [sourceId])
+        defer {
+            cleanup(ids: [completedId, pendingId])
+            db.execute("DELETE FROM content_source WHERE id = ?", params: [sourceId])
+        }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, enabled, config)
+            VALUES (?, 'rss', '目标复核测试', ?, 1, '{}');
+            """, params: [sourceId, "https://test.invalid/resolved-failure-\(sourceId)"]))
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content
+                (id, guid, source_id, ctype, source, title, url, fetch_status,
+                 auto_summarize, llm_summary)
+            VALUES (?, ?, ?, 'article', 'rss', '已补齐摘要', ?, 2, 1, '摘要结果'),
+                   (?, ?, ?, 'article', 'rss', '仍缺摘要', ?, 2, 1, NULL);
+            """, params: [
+                completedId, "resolved-guid-\(completedId)", sourceId,
+                "https://test.invalid/item/\(completedId)",
+                pendingId, "resolved-guid-\(pendingId)", sourceId,
+                "https://test.invalid/item/\(pendingId)"]))
+        for id in [completedId, pendingId] {
+            for attempt in 1...3 {
+                XCTAssertTrue(db.execute("""
+                    INSERT INTO content_job
+                        (content_id, jtype, status, finished_at, error)
+                    VALUES (?, 'summarize', 3, datetime('now'), ?);
+                    """, params: [id, "失败 \(attempt)"]))
+            }
+        }
+
+        let failures = FailedJobService.shared.pausedFailures()
+
+        XCTAssertFalse(failures.contains { $0.contentId == completedId })
+        XCTAssertTrue(failures.contains { $0.contentId == pendingId })
+        XCTAssertEqual(db.scalarInt(
+            "SELECT COUNT(*) FROM content_job WHERE content_id=? AND status=3",
+            params: [completedId]), 0)
+        XCTAssertEqual(db.scalarInt(
+            "SELECT COUNT(*) FROM content_job WHERE content_id=? AND status=3",
+            params: [pendingId]), 3)
+    }
+
+    @MainActor
+    func testIgnoringPermanentFailureRemovesTargetFromAllAutomaticChecks() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sourceId: Int64 = 9_500_050
+        let contentId: Int64 = 9_500_051
+        cleanup(ids: [contentId])
+        db.execute("DELETE FROM content_source WHERE id=?", params: [sourceId])
+        defer {
+            cleanup(ids: [contentId])
+            db.execute("DELETE FROM content_source WHERE id=?", params: [sourceId])
+        }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source(id,stype,name,identifier,enabled,config)
+            VALUES (?,'rss','忽略测试源',?,1,'{}');
+            """, params: [sourceId, "https://test.invalid/ignore-\(sourceId)"]))
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content
+                (id,source_id,guid,ctype,source,title,url,content_md,fetch_status,auto_summarize)
+            VALUES (?,?,?,'article','rss','永久失败内容',?,'正文',2,1);
+            """, params: [contentId, sourceId, "ignore-guid-\(contentId)",
+                             "https://test.invalid/item/\(contentId)"]))
+        for attempt in 1...3 {
+            XCTAssertTrue(db.execute("""
+                INSERT INTO content_job(content_id,jtype,status,finished_at,error)
+                VALUES (?,'summarize',3,datetime('now'),?);
+                """, params: [contentId, "失败 \(attempt)"]))
+        }
+        let failure = try XCTUnwrap(FailedJobService.shared.pausedFailures().first {
+            $0.contentId == contentId && $0.jtype == "summarize"
+        })
+        XCTAssertTrue(db.fetchContents(sourceId: sourceId, unmetProcessingOnly: true)
+            .contains { $0.id == contentId })
+
+        XCTAssertTrue(FailedJobService.shared.ignore(failure))
+        PipelineWorker.shared.requestPendingRefresh()
+
+        XCTAssertFalse(db.fetchContents(sourceId: sourceId, unmetProcessingOnly: true)
+            .contains { $0.id == contentId })
+        XCTAssertFalse(PipelineWorker.shared.pendingTaskIdsForTesting(
+            ignoreWatermark: true, onlySourceId: sourceId).contains(contentId))
+        XCTAssertFalse(FailedJobService.shared.pausedFailures().contains {
+            $0.contentId == contentId && $0.jtype == "summarize"
+        })
+        XCTAssertEqual(db.scalarInt("""
+            SELECT COUNT(*) FROM content_processing_ignore
+            WHERE content_id=? AND jtype='summarize';
+            """, params: [contentId]), 1)
+    }
+
     private func requireIsolatedDatabase() throws {
         guard ProcessInfo.processInfo.environment["READBOARD_DB"] != nil else {
             throw XCTSkip("需要 READBOARD_DB 指向临时数据库；跳过以免触碰真实库")
@@ -90,6 +209,68 @@ final class FailedJobServiceTests: XCTestCase {
             Database.shared.execute("DELETE FROM content_job WHERE content_id = ?", params: [id])
             Database.shared.execute("DELETE FROM content WHERE id = ?", params: [id])
         }
+    }
+}
+
+@MainActor
+final class ManualProcessingStateStoreTests: XCTestCase {
+    func testDashboardTracksAcceptedManualTaskLifecycle() {
+        let store = ContentProcessingStateStore.shared
+        let contentId: Int64 = 9_500_041
+        store.clear(contentId: contentId)
+        defer { store.clear(contentId: contentId) }
+
+        store.enqueue(contentId: contentId, title: "单篇转录", operation: "AI 转录")
+        XCTAssertEqual(store.state(for: contentId)?.phase, .queued)
+        XCTAssertTrue(store.dashboardEntries.contains { $0.contentId == contentId })
+
+        store.begin(contentId: contentId, message: "转录中…")
+        XCTAssertEqual(store.state(for: contentId)?.phase, .running)
+        XCTAssertEqual(store.state(for: contentId)?.title, "单篇转录")
+
+        store.finish(contentId: contentId, message: "✅ 转录完成", succeeded: true)
+        XCTAssertEqual(store.state(for: contentId)?.phase, .succeeded)
+        XCTAssertTrue(store.dashboardEntries.contains { $0.contentId == contentId })
+    }
+
+    func testRejectedManualClickDoesNotCreateDashboardTask() {
+        let store = ContentProcessingStateStore.shared
+        let contentId: Int64 = 9_500_042
+        store.clear(contentId: contentId)
+        defer { store.clear(contentId: contentId) }
+
+        store.notice(contentId: contentId, message: "该篇正在后台处理中，请稍候")
+
+        XCTAssertFalse(store.dashboardEntries.contains { $0.contentId == contentId })
+    }
+}
+
+@MainActor
+final class IssueCenterStoreTests: XCTestCase {
+    func testStaleSourceCreatesActionableSourceIssue() async throws {
+        guard ProcessInfo.processInfo.environment["READBOARD_DB"] != nil else {
+            throw XCTSkip("需要 READBOARD_DB 指向临时数据库；跳过以免触碰真实库")
+        }
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sourceId: Int64 = 9_500_060
+        db.execute("DELETE FROM content_source WHERE id=?", params: [sourceId])
+        defer { db.execute("DELETE FROM content_source WHERE id=?", params: [sourceId]) }
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source
+                (id,stype,name,identifier,enabled,last_fetched_at,config)
+            VALUES (?,'rss','过期源',?,1,'2020-01-01 00:00:00','{}');
+            """, params: [sourceId, "https://test.invalid/stale-\(sourceId)"]))
+        SourceStore.shared.reload()
+
+        let store = IssueCenterStore()
+        await store.refresh()
+
+        XCTAssertEqual(store.status, .needsAttention)
+        XCTAssertTrue(store.issues.contains {
+            $0.id == "sources.rss.stale" && $0.category == .sources
+                && $0.action == .sourceFailures
+        })
     }
 }
 

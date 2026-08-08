@@ -218,6 +218,7 @@ private struct SourceHealthDashboardRow: View {
 
 private struct AIProcessingDashboardCard: View {
     @StateObject private var worker = PipelineWorker.shared
+    @StateObject private var manualTasks = ContentProcessingStateStore.shared
     @State private var showFailureList = false
 
     private var phaseLabel: String {
@@ -317,6 +318,65 @@ private struct AIProcessingDashboardCard: View {
                     .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
             )
 
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("手动任务")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.rbText2)
+                    Spacer()
+                    let activeCount = manualTasks.dashboardEntries.filter(\.isProcessing).count
+                    if activeCount > 0 {
+                        Text("\(activeCount) 项处理中")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(Color.rbAccent)
+                    }
+                }
+
+                if manualTasks.dashboardEntries.isEmpty {
+                    HStack(spacing: 7) {
+                        Image(systemName: "hand.tap")
+                            .foregroundStyle(Color.rbText3)
+                        Text("本次运行暂无手动任务")
+                            .font(.caption)
+                            .foregroundStyle(Color.rbText3)
+                    }
+                } else {
+                    ForEach(Array(manualTasks.dashboardEntries.prefix(8))) { entry in
+                        HStack(spacing: 7) {
+                            manualTaskIcon(entry)
+                                .frame(width: 14, height: 14)
+                            Text(entry.operation)
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(manualTaskColor(entry))
+                                .frame(width: 58, alignment: .leading)
+                            Text(entry.title)
+                                .font(.caption)
+                                .foregroundStyle(Color.rbText2)
+                                .lineLimit(1)
+                            Spacer(minLength: 8)
+                            Text(entry.message)
+                                .font(.caption2)
+                                .foregroundStyle(manualTaskColor(entry))
+                                .lineLimit(1)
+                                .help(entry.message)
+                        }
+                    }
+                    if manualTasks.dashboardEntries.count > 8 {
+                        Text("另有 \(manualTasks.dashboardEntries.count - 8) 条较早记录")
+                            .font(.caption2)
+                            .foregroundStyle(Color.rbText3)
+                    }
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
+            .background(Color.rbSurface.opacity(0.55))
+            .clipShape(RoundedRectangle(cornerRadius: RB.Radius.md))
+            .overlay(
+                RoundedRectangle(cornerRadius: RB.Radius.md)
+                    .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
+            )
+
             HStack(spacing: 10) {
                 Image(systemName: worker.deadLetterCount > 0
                       ? "exclamationmark.triangle.fill"
@@ -354,6 +414,28 @@ private struct AIProcessingDashboardCard: View {
             worker.requestPendingRefresh()
         }) {
             ContentFailureListSheet()
+        }
+    }
+
+    @ViewBuilder
+    private func manualTaskIcon(_ entry: ContentProcessingStateStore.Entry) -> some View {
+        switch entry.phase {
+        case .queued, .running:
+            ProgressView().controlSize(.mini)
+        case .succeeded:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Color.rbScoreHigh)
+        case .failed:
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(Color.rbScoreLow)
+        }
+    }
+
+    private func manualTaskColor(_ entry: ContentProcessingStateStore.Entry) -> Color {
+        switch entry.phase {
+        case .queued, .running: return .rbAccent
+        case .succeeded: return .rbScoreHigh
+        case .failed: return .rbScoreLow
         }
     }
 }

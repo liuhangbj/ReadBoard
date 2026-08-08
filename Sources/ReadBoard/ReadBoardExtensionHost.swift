@@ -1,5 +1,12 @@
 import Foundation
 
+public enum ReadBoardConnectorAuthenticationState: Sendable, Equatable {
+    case notRequired
+    case authenticated
+    case repairing(String)
+    case needsAttention(String)
+}
+
 /// 付费模块和后续平台适配器向公开核心交付统一内容的最小协议。
 /// 平台登录态、请求签名、反爬和正文提取均由适配器自己负责。
 public protocol ReadBoardSourceConnector: Sendable {
@@ -12,6 +19,10 @@ public protocol ReadBoardSourceConnector: Sendable {
     var proHintMessage: String { get }
     var fulltextMode: FetchMode { get }
     var fulltextDisplayName: String { get }
+    /// 问题中心用于定位 Pro 模块设置页；nil 表示没有独立设置页。
+    var settingsModuleIdentifier: String? { get }
+    /// 批量同步同一平台多个源时的最小请求间隔，避免触发平台风控。
+    var minimumFetchSpacing: TimeInterval { get }
 
     func resolveSourceIdentifier(_ input: String) async throws -> String?
     func previewSource(identifier: String) async throws -> ParsedFeed
@@ -27,6 +38,12 @@ public protocol ReadBoardSourceConnector: Sendable {
 
     /// 仅在公开核心确认条目是首次入库后调用，避免同步时反复下载历史全文。
     func contentMarkdown(for entry: ParsedEntry) async throws -> String?
+
+    /// 只做轻量本地状态判断，不应为了刷新问题中心频繁访问平台接口。
+    func authenticationState() async -> ReadBoardConnectorAuthenticationState
+
+    /// 某错误意味着继续抓同平台其余源只会制造重复失败时，暂停本轮该平台。
+    func shouldPauseBatch(after error: Error) -> Bool
 }
 
 public extension ReadBoardSourceConnector {
@@ -36,6 +53,8 @@ public extension ReadBoardSourceConnector {
     var proHintMessage: String { "请升级 Pro 版本后使用 \(displayName)。" }
     var fulltextMode: FetchMode { .externalFulltext }
     var fulltextDisplayName: String { fulltextMode.displayName }
+    var settingsModuleIdentifier: String? { nil }
+    var minimumFetchSpacing: TimeInterval { 0 }
 
     func resolveSourceIdentifier(_ input: String) async throws -> String? { nil }
 
@@ -48,6 +67,9 @@ public extension ReadBoardSourceConnector {
     func contentMarkdown(for entry: ParsedEntry) async throws -> String? {
         entry.contentMarkdown
     }
+
+    func authenticationState() async -> ReadBoardConnectorAuthenticationState { .notRequired }
+    func shouldPauseBatch(after error: Error) -> Bool { false }
 }
 
 /// 运行期适配器注册表。限制在 MainActor，避免同步任务与模块生命周期之间出现竞态。

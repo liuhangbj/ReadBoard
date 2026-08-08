@@ -3,7 +3,7 @@ import AppKit
 
 // MARK: - 独立设置窗口（⌘, 打开，手写侧栏+详情分页）
 
-public enum SettingsPage: String, CaseIterable, Identifiable {
+public enum SettingsPage: String, CaseIterable, Identifiable, Sendable {
     case general, reader, llm, deps, boards, sources, fetch, content, export, pipeline, cleanup
     public var id: String { rawValue }
 
@@ -40,8 +40,27 @@ public enum SettingsPage: String, CaseIterable, Identifiable {
     }
 }
 
+public enum SettingsRoute: Equatable, Sendable {
+    case page(SettingsPage)
+    case module(String)
+}
+
+/// 主窗口可先写入目标，再调用 openSettings；设置窗口创建后会消费并定位。
+@MainActor
+public final class SettingsNavigationStore: ObservableObject {
+    public static let shared = SettingsNavigationStore()
+    @Published private(set) var route: SettingsRoute?
+
+    private init() {}
+
+    public func request(_ route: SettingsRoute) {
+        self.route = route
+    }
+}
+
 public struct SettingsView: View {
     @Environment(\.readBoardConfiguration) private var configuration
+    @StateObject private var navigation = SettingsNavigationStore.shared
     @State private var selection: SettingsDestination? = .page(.general)
 
     public var body: some View {
@@ -102,6 +121,16 @@ public struct SettingsView: View {
         // （系统「设置」风格：保留红绿灯/关闭按钮，内容贴顶）。各 pane 的
         // .toolbar(placement: .principal) 标题会显示在透明栏里，不再空一大截。
         .overlay(SettingsWindowAccessor().frame(width: 0, height: 0))
+        .onAppear { apply(navigation.route) }
+        .onChange(of: navigation.route) { _, route in apply(route) }
+    }
+
+    private func apply(_ route: SettingsRoute?) {
+        switch route {
+        case .page(let page): selection = .page(page)
+        case .module(let identifier): selection = .module(identifier)
+        case nil: break
+        }
     }
 }
 

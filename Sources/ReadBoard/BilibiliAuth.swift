@@ -218,6 +218,48 @@ public enum BilibiliAuth {
         return ("https://api.bilibili.com\(normalizedPath)?\(query)", identity.cookie)
     }
 
+    /// 生成 B站移动端投稿接口请求。Web 动态流和 WBI 投稿列表可能同时被
+    /// -352/HTTP 412 风控拦截，移动端使用独立的 App 签名，可作为只读降级路径。
+    static func signedAppArchiveRequest(
+        params: [String: String],
+        sessdata: String
+    ) throws -> URLRequest {
+        let appKey = "dfca71928277209b"
+        let appSecret = "b5475a8825547a4fc26c7d518eaaa02e"
+        var allParams = params
+        allParams["appkey"] = appKey
+        allParams["mobi_app"] = "android_hd"
+        allParams["platform"] = "android"
+        allParams["ts"] = String(Int(Date().timeIntervalSince1970))
+
+        let unsignedQuery = appQuery(allParams)
+        allParams["sign"] = md5(unsignedQuery + appSecret)
+        let query = appQuery(allParams)
+        guard let url = URL(
+            string: "https://app.biliapi.com/x/v2/space/archive/cursor?\(query)"
+        ) else {
+            throw BilibiliError.badURL
+        }
+        var request = URLRequest(url: url)
+        request.setValue(
+            "bili-universal/103300 (iPhone; iOS 18.2; Scale/3.00)",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("SESSDATA=\(sessdata)", forHTTPHeaderField: "Cookie")
+        return request
+    }
+
+    private static func appQuery(_ params: [String: String]) -> String {
+        params.sorted { $0.key < $1.key }.map { key, value in
+            "\(appPercentEncode(key))=\(appPercentEncode(value))"
+        }.joined(separator: "&")
+    }
+
+    private static func appPercentEncode(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
     /// WBI 设备指纹与签名密钥缓存。批量回填时不能逐条重新取 buvid3/nav，
     /// 否则 4,000 条历史视频会制造数倍无意义请求。
     private static func wbiIdentity(sessdata: String) async throws -> (cookie: String, mixinKey: String) {
@@ -314,6 +356,8 @@ public enum BilibiliAuth {
 public enum BilibiliError: Error, LocalizedError {
     case badURL
     case httpError(Int)
+    case apiError(Int, String)
+    case loginRequired
     case qrGenerateFailed
     case qrPollFailed
     case userInfoFailed
@@ -325,6 +369,8 @@ public enum BilibiliError: Error, LocalizedError {
         switch self {
         case .badURL: return "无效的 URL"
         case .httpError(let c): return "HTTP 错误 \(c)"
+        case .apiError(let code, let message): return "B站接口错误 \(code)：\(message)"
+        case .loginRequired: return "B站登录态不可用，请重新扫码登录"
         case .qrGenerateFailed: return "生成二维码失败"
         case .qrPollFailed: return "轮询扫码状态失败"
         case .userInfoFailed: return "获取用户信息失败"

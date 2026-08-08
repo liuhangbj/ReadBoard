@@ -3,14 +3,18 @@ import Foundation
 enum BilibiliAccessState: String, Sendable {
     case open
     case paidPreview
+    case paidSeason
     case upowerExclusive
+    case upowerEarlyAccess
     case loginRequired
 
     var listLabel: String? {
         switch self {
         case .open: return nil
-        case .paidPreview: return "付费试看"
-        case .upowerExclusive: return "高档充电"
+        case .paidPreview: return "单片付费"
+        case .paidSeason: return "付费合集"
+        case .upowerExclusive: return "充电专属"
+        case .upowerEarlyAccess: return "充电抢先看"
         case .loginRequired: return "需登录"
         }
     }
@@ -21,16 +25,34 @@ struct BilibiliVideoAccess: Sendable, Equatable {
     let toast: String?
     let privilegeType: Int?
     let jumpURL: URL?
+    let isPartial: Bool
 
-    var isPartial: Bool { state != .open }
+    init(
+        state: BilibiliAccessState,
+        toast: String?,
+        privilegeType: Int?,
+        jumpURL: URL?,
+        isPartial: Bool? = nil
+    ) {
+        self.state = state
+        self.toast = toast
+        self.privilegeType = privilegeType
+        self.jumpURL = jumpURL
+        self.isPartial = isPartial ?? (state != .open)
+    }
 
     var transcriptNotice: String {
         switch state {
         case .paidPreview:
             return "> ⚠️ 该视频为 B站付费内容，当前账号仅获得试看片段，以下转录稿不完整。"
+        case .paidSeason:
+            return "> ⚠️ 该视频属于 B站付费合集，当前账号仅获得试看片段，以下转录稿不完整。"
         case .upowerExclusive:
             let detail = toast ?? "当前账号仅获得试看片段"
-            return "> ⚠️ 该视频为 B站 UP 主高档充电专属内容，\(detail)，以下转录稿不完整。"
+            return "> ⚠️ 该视频为 B站 UP 主充电专属内容，\(detail)，以下转录稿不完整。"
+        case .upowerEarlyAccess:
+            let detail = toast ?? "当前账号尚未解锁完整内容"
+            return "> ⚠️ 该视频为 B站 UP 主充电抢先看内容，\(detail)，以下转录稿不完整。"
         case .loginRequired:
             return "> ⚠️ 该视频需要更高登录权限，以下转录稿可能不完整。"
         case .open:
@@ -43,9 +65,23 @@ struct BilibiliVideoAccess: Sendable, Equatable {
 /// 用 feed/space 接口(零 WBI 签名，只需 buvid3 + SESSDATA)拉取视频动态
 public enum BilibiliFetcher {
 
+    private actor DeviceIdentityStore {
+        private var value: (buvid3: String, createdAt: Date)?
+
+        func current(maxAge: TimeInterval) -> String? {
+            guard let value, Date().timeIntervalSince(value.createdAt) < maxAge else { return nil }
+            return value.buvid3
+        }
+
+        func store(_ buvid3: String) {
+            value = (buvid3, Date())
+        }
+    }
+
     // MARK: - 常量
 
     private static let feedSpaceURL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
+    private static let deviceIdentityStore = DeviceIdentityStore()
 
     // MARK: - 主入口
 
@@ -56,8 +92,40 @@ public enum BilibiliFetcher {
     /// - Returns: ParsedFeed(entries 为视频卡)
     static func fetch(uid: String, historyScope: HistoryScope = .recent30d) async throws -> ParsedFeed {
         guard let sessdata = BilibiliAuth.sessdata else {
-            throw BilibiliError.badURL
+            throw BilibiliError.loginRequired
         }
+        do {
+            return try await fetchDynamicFeed(
+                uid: uid, historyScope: historyScope, sessdata: sessdata)
+        } catch {
+            guard isRiskControlError(error) else { throw error }
+            do {
+                return try await fetchWBIArchiveFeed(
+                    uid: uid, historyScope: historyScope, sessdata: sessdata)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // WBI 与动态流都属于 Web 风控域，可能同时返回 412。移动端投稿
+                // 列表使用独立 App 签名，保留标题、发布时间和 UGC 付费标记。
+                return try await fetchAppArchiveFeed(
+                    uid: uid, historyScope: historyScope, sessdata: sessdata)
+            }
+        }
+    }
+
+    private static func isRiskControlError(_ error: Error) -> Bool {
+        switch error {
+        case BilibiliError.apiError(let code, _): return code == -352
+        case BilibiliError.httpError(let code): return code == 412
+        default: return false
+        }
+    }
+
+    private static func fetchDynamicFeed(
+        uid: String,
+        historyScope: HistoryScope,
+        sessdata: String
+    ) async throws -> ParsedFeed {
         let buvid3 = try await fetchBuvid3()
         let cookie = "buvid3=\(buvid3); SESSDATA=\(sessdata)"
 
@@ -72,9 +140,14 @@ public enum BilibiliFetcher {
             let url = "\(feedSpaceURL)?host_mid=\(uid)&offset=\(offset)&timezone_offset=-480"
             let data = try await httpGet(url, cookie: cookie)
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let code = json["code"] as? Int, code == 0,
-                  let dataObj = json["data"] as? [String: Any] else {
-                throw BilibiliError.badURL
+                  let code = json["code"] as? Int else {
+                throw BilibiliError.apiError(-1, "响应格式异常")
+            }
+            guard code == 0 else {
+                throw BilibiliError.apiError(code, json["message"] as? String ?? "unknown")
+            }
+            guard let dataObj = json["data"] as? [String: Any] else {
+                throw BilibiliError.apiError(code, "响应缺少 data")
             }
 
             let items = dataObj["items"] as? [[String: Any]] ?? []
@@ -105,6 +178,192 @@ public enum BilibiliFetcher {
             siteURL: "https://space.bilibili.com/\(uid)",
             entries: filtered
         )
+    }
+
+    /// 动态接口触发 -352/412 后的只读降级路径。WBI 投稿列表与 bili-cli 的
+    /// user-videos 使用同一接口，不依赖动态流风控；下一轮动态恢复时会合并补齐付费标签。
+    private static func fetchWBIArchiveFeed(
+        uid: String,
+        historyScope: HistoryScope,
+        sessdata: String
+    ) async throws -> ParsedFeed {
+        var entries: [ParsedEntry] = []
+        var creatorName: String?
+        for page in 1...historyScope.maxPages {
+            let request = try await BilibiliAuth.signedWBIRequest(
+                path: "/x/space/wbi/arc/search",
+                params: [
+                    "mid": uid,
+                    "pn": String(page),
+                    "ps": "30",
+                    "tid": "0",
+                    "keyword": "",
+                    "order": "pubdate"
+                ],
+                sessdata: sessdata
+            )
+            let data = try await httpGet(request.url, cookie: request.cookie)
+            guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let code = root["code"] as? Int else {
+                throw BilibiliError.apiError(-1, "WBI 投稿列表响应格式异常")
+            }
+            guard code == 0 else {
+                throw BilibiliError.apiError(code, root["message"] as? String ?? "unknown")
+            }
+            guard let dataObject = root["data"] as? [String: Any],
+                  let list = dataObject["list"] as? [String: Any],
+                  let videos = list["vlist"] as? [[String: Any]] else {
+                throw BilibiliError.apiError(code, "WBI 投稿列表缺少 vlist")
+            }
+            if videos.isEmpty { break }
+            let pageEntries = videos.compactMap(parseArchiveListVideo)
+            if creatorName == nil {
+                creatorName = videos.compactMap { $0["author"] as? String }
+                    .first { !$0.isEmpty }
+            }
+            entries.append(contentsOf: pageEntries)
+            if videos.count < 30 { break }
+            if let cutoff = historyScope.cutoffDate,
+               let oldest = pageEntries.last?.published, oldest < cutoff {
+                break
+            }
+        }
+        return ParsedFeed(
+            title: creatorName ?? "BiliBili UP 主 \(uid)",
+            siteURL: "https://space.bilibili.com/\(uid)",
+            entries: filterByHistoryScope(entries, scope: historyScope)
+        )
+    }
+
+    private static func parseArchiveListVideo(_ value: [String: Any]) -> ParsedEntry? {
+        guard let bvid = value["bvid"] as? String,
+              let title = value["title"] as? String else { return nil }
+        let videoURL = "https://www.bilibili.com/video/\(bvid)"
+        let published = unixTimestamp(value["created"] ?? value["pubdate"])
+            .map { Date(timeIntervalSince1970: $0) }
+        var meta = ["video_id": bvid, "video_url": videoURL,
+                    "bilibili_access_source": "wbi_archive_fallback"]
+        if let cover = value["pic"] as? String { meta["cover_url"] = cover }
+        if let duration = value["length"] as? String { meta["duration"] = duration }
+        return ParsedEntry(
+            guid: bvid,
+            title: title,
+            url: videoURL,
+            published: published,
+            html: value["description"] as? String ?? value["desc"] as? String ?? "",
+            author: value["author"] as? String,
+            meta: meta
+        )
+    }
+
+    /// Web 动态流和 WBI 投稿列表都触发风控时的移动端签名降级路径。
+    private static func fetchAppArchiveFeed(
+        uid: String,
+        historyScope: HistoryScope,
+        sessdata: String
+    ) async throws -> ParsedFeed {
+        let pageSize = 20
+        var entries: [ParsedEntry] = []
+        var creatorName: String?
+        var cursorAid: String?
+
+        for _ in 0..<historyScope.maxPages {
+            var params = [
+                "build": "8430300",
+                "version": "8.43.0",
+                "c_locale": "zh_CN",
+                "channel": "master",
+                "order": "pubdate",
+                "ps": String(pageSize),
+                "qn": "80",
+                "s_locale": "zh_CN",
+                "statistics": #"{"appId":1,"platform":3,"version":"8.43.0","abtest":""}"#,
+                "vmid": uid
+            ]
+            if let cursorAid { params["aid"] = cursorAid }
+            let request = try BilibiliAuth.signedAppArchiveRequest(
+                params: params, sessdata: sessdata)
+            let data = try await httpGet(request)
+            guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let code = root["code"] as? Int else {
+                throw BilibiliError.apiError(-1, "移动端投稿列表响应格式异常")
+            }
+            guard code == 0 else {
+                throw BilibiliError.apiError(code, root["message"] as? String ?? "unknown")
+            }
+            guard let dataObject = root["data"] as? [String: Any],
+                  let videos = dataObject["item"] as? [[String: Any]] else {
+                throw BilibiliError.apiError(code, "移动端投稿列表缺少 item")
+            }
+            if videos.isEmpty { break }
+            let pageEntries = videos.compactMap(parseAppArchiveVideo)
+            if creatorName == nil {
+                creatorName = videos.compactMap { $0["author"] as? String }
+                    .first { !$0.isEmpty }
+            }
+            entries.append(contentsOf: pageEntries)
+
+            guard let nextAid = videos.last.flatMap(appArchiveAid),
+                  nextAid != cursorAid else { break }
+            cursorAid = nextAid
+            if videos.count < pageSize { break }
+            if let cutoff = historyScope.cutoffDate,
+               let oldest = pageEntries.last?.published, oldest < cutoff {
+                break
+            }
+        }
+        return ParsedFeed(
+            title: creatorName ?? "BiliBili UP 主 \(uid)",
+            siteURL: "https://space.bilibili.com/\(uid)",
+            entries: filterByHistoryScope(entries, scope: historyScope)
+        )
+    }
+
+    static func parseAppArchiveVideo(_ value: [String: Any]) -> ParsedEntry? {
+        guard let bvid = value["bvid"] as? String,
+              let title = value["title"] as? String else { return nil }
+        let videoURL = "https://www.bilibili.com/video/\(bvid)"
+        let published = unixTimestamp(value["ctime"] ?? value["pubdate"])
+            .map { Date(timeIntervalSince1970: $0) }
+        var meta = [
+            "video_id": bvid,
+            "video_url": videoURL,
+            "bilibili_access_source": "app_archive_fallback"
+        ]
+        if let cover = value["cover"] as? String { meta["cover_url"] = cover }
+        if let duration = flexibleInt(value["duration"]) {
+            meta["duration"] = durationText(duration)
+        }
+        if let access = dynamicVideoAccess(from: value) {
+            meta["bilibili_access_state"] = access.state.rawValue
+            meta["bilibili_access_label"] = access.state.listLabel
+            meta["bilibili_access_checked_at"] = ISO8601DateFormatter().string(from: Date())
+        }
+        return ParsedEntry(
+            guid: bvid,
+            title: title,
+            url: videoURL,
+            published: published,
+            html: value["subtitle"] as? String ?? "",
+            author: value["author"] as? String,
+            meta: meta
+        )
+    }
+
+    private static func appArchiveAid(_ value: [String: Any]) -> String? {
+        if let aid = value["param"] as? String, !aid.isEmpty { return aid }
+        if let aid = flexibleInt(value["aid"]) { return String(aid) }
+        return nil
+    }
+
+    private static func durationText(_ seconds: Int) -> String {
+        let total = max(seconds, 0)
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let remaining = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, remaining)
+            : String(format: "%02d:%02d", minutes, remaining)
     }
 
     // MARK: - 字幕全文
@@ -225,26 +484,28 @@ public enum BilibiliFetcher {
     }
 
     static func videoAccess(from player: [String: Any]) -> BilibiliVideoAccess {
-        func flag(_ key: String) -> Bool {
-            if let value = player[key] as? Int { return value != 0 }
-            if let value = player[key] as? Bool { return value }
-            if let value = player[key] as? String { return value == "1" || value.lowercased() == "true" }
-            return false
-        }
         let highLevel = player["elec_high_level"] as? [String: Any]
+        let highLevelTitle = highLevel?["title"] as? String
         let highLevelToast = highLevel?["sub_title"] as? String
         let privilegeType = highLevel?["privilege_type"] as? Int
         let jumpURL = (highLevel?["jump_url"] as? String).flatMap(URL.init(string:))
         let toast = highLevelToast ?? player["preview_toast"] as? String
-        if flag("is_upower_exclusive") && !flag("is_upower_play") {
+        if flexibleFlag(player["is_upower_exclusive"]) {
+            let hint = [highLevelTitle, highLevelToast, toast]
+                .compactMap { $0 }
+                .joined(separator: " ")
+            let state: BilibiliAccessState = hint.contains("抢先")
+                ? .upowerEarlyAccess
+                : .upowerExclusive
             return BilibiliVideoAccess(
-                state: .upowerExclusive,
+                state: state,
                 toast: toast,
                 privilegeType: privilegeType,
-                jumpURL: jumpURL
+                jumpURL: jumpURL,
+                isPartial: !flexibleFlag(player["is_upower_play"])
             )
         }
-        if flag("is_ugc_pay_preview") {
+        if flexibleFlag(player["is_ugc_pay_preview"]) {
             return BilibiliVideoAccess(
                 state: .paidPreview,
                 toast: toast,
@@ -252,7 +513,7 @@ public enum BilibiliFetcher {
                 jumpURL: nil
             )
         }
-        if flag("need_login_subtitle") {
+        if flexibleFlag(player["need_login_subtitle"]) {
             return BilibiliVideoAccess(
                 state: .loginRequired,
                 toast: toast,
@@ -260,7 +521,65 @@ public enum BilibiliFetcher {
                 jumpURL: nil
             )
         }
-        return BilibiliVideoAccess(state: .open, toast: toast, privilegeType: nil, jumpURL: nil)
+        return BilibiliVideoAccess(
+            state: .open, toast: toast, privilegeType: nil, jumpURL: nil, isPartial: false)
+    }
+
+    /// 动态流的视频卡在入库前已经返回付费类型。这里做内容类型识别，不判断当前账号
+    /// 是否已购买；完整播放权限会在转录时由 player/wbi/v2 再精确覆盖。
+    static func dynamicVideoAccess(from archive: [String: Any]) -> BilibiliVideoAccess? {
+        let badgeText: String? = {
+            if let value = archive["elec_arc_badge"] as? String, !value.isEmpty { return value }
+            if let badge = archive["badge"] as? [String: Any],
+               let value = badge["text"] as? String, !value.isEmpty { return value }
+            if let value = archive["badge"] as? String, !value.isEmpty { return value }
+            return nil
+        }()
+        let chargingType = flexibleInt(archive["elec_arc_type"]) ?? 0
+        if flexibleFlag(archive["is_charging_arc"]) || chargingType > 0 {
+            let state: BilibiliAccessState = chargingType == 2 || badgeText?.contains("抢先") == true
+                ? .upowerEarlyAccess
+                : .upowerExclusive
+            let level = (archive["charging_pay"] as? [String: Any])
+                .flatMap { flexibleInt($0["level"]) }
+            return BilibiliVideoAccess(
+                state: state,
+                toast: badgeText,
+                privilegeType: level,
+                jumpURL: nil,
+                isPartial: false
+            )
+        }
+
+        let rights = archive["rights"] as? [String: Any] ?? [:]
+        let isPaidSeason = flexibleFlag(archive["is_chargeable_season"])
+            || ((archive["ugc_season"] as? [String: Any])
+                .map { flexibleFlag($0["is_pay_season"]) } ?? false)
+        if isPaidSeason {
+            return BilibiliVideoAccess(
+                state: .paidSeason,
+                toast: badgeText,
+                privilegeType: nil,
+                jumpURL: nil,
+                isPartial: false
+            )
+        }
+
+        let isUGCPaid = flexibleFlag(archive["is_ugcpay"])
+            || (flexibleInt(archive["ugc_pay"]) ?? 0) > 0
+            || (flexibleInt(archive["ugc_pay_preview"]) ?? 0) > 0
+            || (flexibleInt(rights["ugc_pay"]) ?? 0) > 0
+            || (flexibleInt(rights["ugc_pay_preview"]) ?? 0) > 0
+        if isUGCPaid {
+            return BilibiliVideoAccess(
+                state: .paidPreview,
+                toast: badgeText,
+                privilegeType: nil,
+                jumpURL: nil,
+                isPartial: false
+            )
+        }
+        return nil
     }
 
     static func parseSubtitleMarkdown(_ data: Data) -> String? {
@@ -333,6 +652,16 @@ public enum BilibiliFetcher {
         meta["video_url"] = videoURL
         if let cover { meta["cover_url"] = cover }
         if let duration { meta["duration"] = duration }
+        if let access = dynamicVideoAccess(from: archive) {
+            meta["bilibili_access_state"] = access.state.rawValue
+            meta["bilibili_access_label"] = access.state.listLabel
+            meta["bilibili_access_toast"] = access.toast
+            if let privilegeType = access.privilegeType {
+                meta["bilibili_access_privilege_type"] = String(privilegeType)
+            }
+            meta["bilibili_access_source"] = "dynamic_card"
+            meta["bilibili_access_checked_at"] = ISO8601DateFormatter().string(from: Date())
+        }
 
         return ParsedEntry(
             guid: bvid,
@@ -358,6 +687,21 @@ public enum BilibiliFetcher {
         default:
             return nil
         }
+    }
+
+    private static func flexibleFlag(_ value: Any?) -> Bool {
+        if let value = value as? Bool { return value }
+        if let value = value as? NSNumber { return value.intValue != 0 }
+        if let value = value as? String {
+            return value == "1" || value.lowercased() == "true"
+        }
+        return false
+    }
+
+    private static func flexibleInt(_ value: Any?) -> Int? {
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? String { return Int(value) }
+        return nil
     }
 
     // MARK: - 历史范围过滤
@@ -403,6 +747,9 @@ public enum BilibiliFetcher {
     // MARK: - buvid3
 
     private static func fetchBuvid3() async throws -> String {
+        if let cached = await deviceIdentityStore.current(maxAge: 3_600) {
+            return cached
+        }
         let data = try await httpGet("https://api.bilibili.com/x/frontend/finger/spi", cookie: nil)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let code = json["code"] as? Int, code == 0,
@@ -410,6 +757,7 @@ public enum BilibiliFetcher {
               let buvid3 = dataObj["b_3"] as? String else {
             throw BilibiliError.buvid3Failed
         }
+        await deviceIdentityStore.store(buvid3)
         return buvid3
     }
 
@@ -421,6 +769,14 @@ public enum BilibiliFetcher {
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
         request.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
         if let cookie { request.setValue(cookie, forHTTPHeaderField: "Cookie") }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw BilibiliError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return data
+    }
+
+    private static func httpGet(_ request: URLRequest) async throws -> Data {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw BilibiliError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)

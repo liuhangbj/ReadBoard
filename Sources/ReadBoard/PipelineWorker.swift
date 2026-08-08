@@ -105,6 +105,20 @@ public final class PipelineWorker: ObservableObject {
 
     nonisolated private let db = Database.shared
     private static let workScheduler = PipelineWorkScheduler()
+
+    /// 手动任务只复用资源并发通道，不经过 Worker 的候选扫描、自动开关、
+    /// 水位线或结果缺失判定。用户点了哪个工序，就直接执行哪个工序。
+    nonisolated static func scheduleManualLLM<T: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await workScheduler.run(in: .llm, operation: operation)
+    }
+
+    nonisolated static func scheduleManualTranscription<T: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await workScheduler.run(in: .transcription, operation: operation)
+    }
     /// 真正驱动轮询的任务。必须保存句柄，stop() 才能取消它，并阻止重复启动。
     private var workerTask: Task<Void, Never>?
     /// 全文失败补抓属于抓取模块，独立执行，不能挡在 AI 任务前面。
@@ -623,31 +637,32 @@ public final class PipelineWorker: ObservableObject {
             branchBaseParts.append(order == .newest ? "c.id<\(boundary)" : "c.id>\(boundary)")
         }
         let base = branchBaseParts.joined(separator: " AND ")
-        func branches(column: String, resultMissing: String, extra: String,
+        func branches(column: String, jtype: String, resultMissing: String, extra: String,
                       fallbackIds: String) -> [String] {
-            var result = ["SELECT c.id FROM content c WHERE \(base) AND c.\(column)=1 AND \(resultMissing) AND \(extra)"]
+            let notIgnored = "NOT EXISTS (SELECT 1 FROM content_processing_ignore i WHERE i.content_id=c.id AND i.jtype='\(jtype)')"
+            var result = ["SELECT c.id FROM content c WHERE \(base) AND c.\(column)=1 AND \(resultMissing) AND \(extra) AND \(notIgnored)"]
             if ignoreWatermark, !fallbackIds.isEmpty {
-                result.append("SELECT c.id FROM content c WHERE \(base) AND c.\(column) IS NULL AND c.source_id IN (\(fallbackIds)) AND \(resultMissing) AND \(extra)")
+                result.append("SELECT c.id FROM content c WHERE \(base) AND c.\(column) IS NULL AND c.source_id IN (\(fallbackIds)) AND \(resultMissing) AND \(extra) AND \(notIgnored)")
             }
             return result
         }
         var candidateBranches: [String] = []
         candidateBranches += branches(
-            column: "auto_score", resultMissing: "c.llm_score IS NULL",
+            column: "auto_score", jtype: "score", resultMissing: "c.llm_score IS NULL",
             extra: "\(articleOrMedia) AND \(body)", fallbackIds: sourceIds { $0.autoScore })
         candidateBranches += branches(
-            column: "auto_translate",
+            column: "auto_translate", jtype: "translate",
             resultMissing: "LENGTH(TRIM(COALESCE(c.llm_translated_md,'')))=0",
             extra: "\(articleOrMedia) AND \(body)", fallbackIds: sourceIds { $0.autoTranslate })
         // 摘要候选分支允许媒体：媒体入库时已抓字幕稿(content_md)，与文章共用合并调用体系，
         // 失败可经 content_job 退避/死信自愈，不再依赖转录链尾那次无重试的内嵌调用。
         candidateBranches += branches(
-            column: "auto_summarize",
+            column: "auto_summarize", jtype: "summarize",
             resultMissing: "LENGTH(TRIM(COALESCE(c.llm_summary,'')))=0",
             extra: "\(body)",
             fallbackIds: sourceIds { $0.autoSummarize })
         candidateBranches += branches(
-            column: "auto_transcribe",
+            column: "auto_transcribe", jtype: "transcribe",
             resultMissing: "LENGTH(TRIM(COALESCE(c.llm_transcript_md,'')))=0",
             extra: "\(media) AND (LENGTH(TRIM(c.url))>0 OR c.meta LIKE '%audio_url%' OR c.meta LIKE '%video_url%')",
             fallbackIds: sourceIds { $0.autoTranscribe })
@@ -893,38 +908,46 @@ public final class PipelineWorker: ObservableObject {
         let policies = fetchEffectivePolicies()
         guard db.open() else { return 0 }
         var stmt: OpaquePointer?
-        // (id, source_id, url, content_html)
+        // (id, source_id, url, content_html, source_type)
         // fetch_status IN (0,1,3)：0=未抓 3=失败 1=抓取中卡死（修 P1-9——
         // 历史 PG 数据或异常中断可能带 1，卡中间态两边都不管，一并捞出来重试）
         let sql = """
-        SELECT id, source_id, url, content_html FROM content
-        WHERE id > \(watermark)
-          AND is_duplicate = 0
-          AND deleted_at IS NULL
-          AND fetch_status IN (0, 1, 3)
-          AND ctype IN ('article', 'podcast', 'video')
-          AND source_id IS NOT NULL
-        ORDER BY id DESC LIMIT 10;
+        SELECT c.id, c.source_id, c.url, c.content_html, s.stype
+        FROM content c
+        JOIN content_source s ON s.id=c.source_id
+        WHERE c.id > \(watermark)
+          AND c.is_duplicate = 0
+          AND c.deleted_at IS NULL
+          AND c.fetch_status IN (0, 1, 3)
+          AND (c.fetch_status != 3 OR c.updated_at <= datetime('now', '-15 minutes'))
+          AND c.ctype IN ('article', 'podcast', 'video')
+        ORDER BY c.id DESC LIMIT 10;
         """
         guard db.prepare(sql, &stmt) else { return 0 }
-        var rows: [(Int64, Int64, String, String?)] = []
+        var rows: [(Int64, Int64, String, String?, String)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let sid = sqlite3_column_int64(stmt, 1)
             let url = colText(stmt, 2) ?? ""
             let html = colText(stmt, 3)
-            rows.append((id, sid, url, html))
+            let sourceType = colText(stmt, 4) ?? "rss"
+            rows.append((id, sid, url, html, sourceType))
         }
         sqlite3_finalize(stmt)
 
         var ok = 0
-        for (id, sid, url, html) in rows {
+        for (id, sid, url, html, sourceType) in rows {
             guard !Task.isCancelled else { break }
             guard let pol = policies[sid], pol.enabled else { continue }
             // summary 模式不需要抓(本来就没全文), 跳过避免来回置状态
             if pol.fetchMode == .summary { continue }
-            let success = await FullTextFetcher.shared.fetchAndStore(
-                contentId: id, url: url, feedHtml: html, mode: pol.fetchMode)
+            let success: Bool
+            if ReadBoardSourceConnectorRegistry.shared.connector(for: sourceType) != nil {
+                success = await SourceStore.shared.retryExternalFulltext(contentId: id)
+            } else {
+                success = await FullTextFetcher.shared.fetchAndStore(
+                    contentId: id, url: url, feedHtml: html, mode: pol.fetchMode)
+            }
             if success { ok += 1 }
         }
         return ok
@@ -943,6 +966,8 @@ public final class PipelineWorker: ObservableObject {
             return PendingSnapshot(breakdown: PendingBreakdown(), contentIds: [],
                                    processed: 0, deadLetters: 0)
         }
+        // 结果可能由手动处理补齐；刷新看板时先清掉已经达标或不再启用的旧失败。
+        FailedJobService.shared.clearResolvedAutomaticFailures()
         let policies = fetchEffectivePolicies()
         let rows = fetchPendingRows(
             policies: policies, ignoreWatermark: false, onlySourceId: nil,
@@ -1160,6 +1185,10 @@ public final class PipelineWorker: ObservableObject {
               SELECT content_id, jtype, status,
                      ROW_NUMBER() OVER (PARTITION BY content_id, jtype ORDER BY id DESC) AS rn
               FROM content_job
+              WHERE NOT EXISTS (
+                SELECT 1 FROM content_processing_ignore i
+                WHERE i.content_id=content_job.content_id AND i.jtype=content_job.jtype
+              )
             ),
             consec AS (
               SELECT content_id, jtype, COUNT(*) AS fails

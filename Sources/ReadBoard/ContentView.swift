@@ -52,6 +52,9 @@ enum ManualReprocessPlanner {
 public struct ContentView: View {
     @StateObject private var vm = ContentViewModel()
     @EnvironmentObject private var appTab: AppTab
+    @Environment(\.openSettings) private var openSettings
+    @StateObject private var issueCenter = IssueCenterStore()
+    @State private var showIssueCenter = false
     @FocusState private var listFocused: Bool
     @FocusState private var searchFocused: Bool
     /// 界面缩放（@AppStorage 直接绑 UserDefaults——改值视图自动重建，静态读取不会触发刷新）
@@ -96,6 +99,24 @@ public struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: vm.toastMessage)
         .sheet(isPresented: $showShortcutHelp) {
             ShortcutHelpView()
+        }
+        .sheet(isPresented: $showIssueCenter) {
+            IssueCenterView(
+                store: issueCenter,
+                onOpenSettings: { route in
+                    SettingsNavigationStore.shared.request(route)
+                    openSettings()
+                },
+                onOpenDashboard: { appTab.selection = 3 })
+        }
+        .task {
+            while !Task.isCancelled {
+                await issueCenter.refresh()
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pipelinePendingUpdated)) { _ in
+            Task { await issueCenter.refresh() }
         }
     }
 
@@ -167,6 +188,19 @@ public struct ContentView: View {
         VStack(spacing: 0) {
             // 顶部眉题条：小标题 + 添加文件夹 / 添加源
             HStack(spacing: 4) {
+                Button { showIssueCenter = true } label: {
+                    ZStack {
+                        Circle()
+                            .fill(issueCenterStatusColor.opacity(0.16))
+                            .frame(width: 24, height: 24)
+                        Image(systemName: issueCenterStatusIcon)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(issueCenterStatusColor)
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("问题中心：\(issueCenter.statusText)")
+
                 SectionLabel(text: "订阅源")
                 Spacer()
                 Button { showAddFolder = true } label: {
@@ -367,6 +401,26 @@ public struct ContentView: View {
             } else {
                 expandedFolders = Set(vm.sidebarTree.filter { $0.isFolder }.map { $0.id })
             }
+            Task { await issueCenter.refresh() }
+        }
+        .onChange(of: sourceStore.sources) { _, _ in
+            Task { await issueCenter.refresh() }
+        }
+    }
+
+    private var issueCenterStatusColor: Color {
+        switch issueCenter.status {
+        case .healthy: .rbScoreHigh
+        case .repairing: .rbScoreMid
+        case .needsAttention: .rbScoreLow
+        }
+    }
+
+    private var issueCenterStatusIcon: String {
+        switch issueCenter.status {
+        case .healthy: "checkmark"
+        case .repairing: "arrow.triangle.2.circlepath"
+        case .needsAttention: "exclamationmark"
         }
     }
 
@@ -728,6 +782,8 @@ public struct ContentView: View {
             vm.showToast("该篇正在处理中，请稍候")
             return
         }
+        ContentProcessingStateStore.shared.enqueue(
+            contentId: item.id, title: item.title, operation: "内容处理")
         Task {
             defer { PipelineWorker.shared.unlockContent(item.id) }
             let contentId = item.id
@@ -757,33 +813,54 @@ public struct ContentView: View {
                 switch step {
                 case .translateFull:
                     if pipeline.isAvailable {
-                        ok = await pipeline.translateFull(
-                            contentId: item.id, title: item.title, body: body, policy: policy)
+                        ok = (try? await PipelineWorker.scheduleManualLLM {
+                            await ContentProcessingStateStore.shared.begin(
+                                contentId: item.id, message: "翻译中…")
+                            return await pipeline.translateFull(
+                                contentId: item.id, title: item.title, body: body, policy: policy)
+                        }) ?? false
                     } else {
                         ok = false
                     }
                 case .scoreWithSummary:
                     if pipeline.isAvailable {
-                        ok = await pipeline.score(
-                            contentId: item.id, title: item.title, body: body)
+                        ok = (try? await PipelineWorker.scheduleManualLLM {
+                            await ContentProcessingStateStore.shared.begin(
+                                contentId: item.id, message: "评分与摘要中…")
+                            return await pipeline.score(
+                                contentId: item.id, title: item.title, body: body)
+                        }) ?? false
                     } else {
                         ok = false
                     }
                 case .summarize:
                     if pipeline.isAvailable {
-                        ok = await pipeline.summarize(
-                            contentId: item.id, title: item.title, body: body)
+                        ok = (try? await PipelineWorker.scheduleManualLLM {
+                            await ContentProcessingStateStore.shared.begin(
+                                contentId: item.id, message: "摘要中…")
+                            return await pipeline.summarize(
+                                contentId: item.id, title: item.title, body: body)
+                        }) ?? false
                     } else {
                         ok = false
                     }
                 case .transcribe:
-                    ok = await TranscribePipeline().transcribe(
-                        contentId: item.id, title: item.title, audioUrl: audioUrl,
-                        pageUrl: item.url, language: item.language)
+                    let transcriber = TranscribePipeline()
+                    ok = (try? await PipelineWorker.scheduleManualTranscription {
+                        await ContentProcessingStateStore.shared.begin(
+                            contentId: item.id, message: "转录中…")
+                        return await transcriber.transcribe(
+                            contentId: item.id, title: item.title, audioUrl: audioUrl,
+                            pageUrl: item.url, language: item.language)
+                    }) ?? false
                 }
                 succeeded = succeeded || ok
             }
 
+            ContentProcessingStateStore.shared.finish(
+                contentId: item.id,
+                message: steps.isEmpty ? "无已开启的内容处理项" : (succeeded ? "✅ 内容处理完成" : "❌ 内容处理失败"),
+                succeeded: steps.isEmpty || succeeded)
             if succeeded {
                 await ExportService.shared.runPending(trigger: "ready", contentId: item.id)
                 NotificationCenter.default.post(name: .contentUpdated, object: nil)
@@ -797,6 +874,16 @@ public struct ContentView: View {
             vm.showToast("该篇正在处理中，请稍候")
             return
         }
+        let operation: String
+        switch type {
+        case "score": operation = "AI 评分"
+        case "summarize": operation = "AI 摘要"
+        case "translate": operation = "AI 翻译"
+        case "transcribe": operation = "AI 转录"
+        default: operation = "手动处理"
+        }
+        ContentProcessingStateStore.shared.enqueue(
+            contentId: item.id, title: item.title, operation: operation)
         Task {
             defer { PipelineWorker.shared.unlockContent(item.id) }
             let pipeline = LLMPipeline()
@@ -813,25 +900,50 @@ public struct ContentView: View {
             let ok: Bool
             switch type {
             case "score":
-                ok = await pipeline.score(contentId: item.id, title: item.title, body: body)
+                ok = (try? await PipelineWorker.scheduleManualLLM {
+                    await ContentProcessingStateStore.shared.begin(
+                        contentId: item.id, message: "AI 评分中…")
+                    return await pipeline.score(contentId: item.id, title: item.title, body: body)
+                }) ?? false
             case "summarize":
-                ok = await pipeline.summarize(contentId: item.id, title: item.title, body: body)
+                ok = (try? await PipelineWorker.scheduleManualLLM {
+                    await ContentProcessingStateStore.shared.begin(
+                        contentId: item.id, message: "摘要中…")
+                    return await pipeline.summarize(contentId: item.id, title: item.title, body: body)
+                }) ?? false
             case "translate":
                 // 媒体项使用简介专用翻译；非媒体项翻译正文。
                 if item.ctype == "podcast" || item.ctype == "video" || item.ctype == "youtube" || audioUrl != nil {
-                    ok = await pipeline.translateExcerpt(
-                        contentId: item.id, title: item.title,
-                        contentHtml: loaded?.contentHtml ?? item.contentHtml ?? item.excerpt ?? body)
+                    let html = loaded?.contentHtml ?? item.contentHtml ?? item.excerpt ?? body
+                    ok = (try? await PipelineWorker.scheduleManualLLM {
+                        await ContentProcessingStateStore.shared.begin(
+                            contentId: item.id, message: "翻译中…")
+                        return await pipeline.translateExcerpt(
+                            contentId: item.id, title: item.title, contentHtml: html)
+                    }) ?? false
                 } else {
-                    ok = await pipeline.translate(contentId: item.id, title: item.title, body: body)
+                    ok = (try? await PipelineWorker.scheduleManualLLM {
+                        await ContentProcessingStateStore.shared.begin(
+                            contentId: item.id, message: "翻译中…")
+                        return await pipeline.translate(contentId: item.id, title: item.title, body: body)
+                    }) ?? false
                 }
             case "transcribe":
-                ok = await transcriber.transcribe(contentId: item.id, title: item.title,
+                ok = (try? await PipelineWorker.scheduleManualTranscription {
+                    await ContentProcessingStateStore.shared.begin(
+                        contentId: item.id, message: "转录中…")
+                    return await transcriber.transcribe(contentId: item.id, title: item.title,
                                                   audioUrl: audioUrl, pageUrl: item.url,
                                                   language: item.language)
+                }) ?? false
             default:
                 ok = false
             }
+            let failure = pipeline.lastError ?? "未知错误"
+            ContentProcessingStateStore.shared.finish(
+                contentId: item.id,
+                message: ok ? "✅ \(operation)完成" : "❌ \(operation)失败：\(failure)",
+                succeeded: ok)
             if ok {
                 await ExportService.shared.runPending(trigger: "ready", contentId: item.id)
                 NotificationCenter.default.post(name: .contentUpdated, object: nil)
@@ -1576,7 +1688,7 @@ public struct ArticleRow: View {
                 // 第三行：加工状态；已导出与前五项分开并固定靠右。
                 HStack(spacing: 6) {
                     if let accessBadge {
-                        RBadge(text: accessBadge, color: .rbScoreMid, scale: scale)
+                        RBadge(text: accessBadge.text, color: accessBadge.color, scale: scale)
                     }
                     if item.ctype != "podcast", item.hasFulltext {
                         RBadge(text: "全文", color: .rbScoreHigh, scale: scale)
@@ -1624,11 +1736,13 @@ public struct ArticleRow: View {
         return String(publishedAt.prefix(10))
     }
 
-    private var accessBadge: String? {
+    private var accessBadge: (text: String, color: Color)? {
         switch item.accessState {
-        case "paidPreview": return "付费试看"
-        case "upowerExclusive": return "高档充电"
-        case "loginRequired": return "需登录"
+        case "paidPreview": return ("单片付费", .rbScoreLow)
+        case "paidSeason": return ("付费合集", .rbScoreLow)
+        case "upowerExclusive": return ("充电专属", .rbScoreMid)
+        case "upowerEarlyAccess": return ("充电抢先看", .rbScoreMid)
+        case "loginRequired": return ("需登录", .rbText2)
         default: return nil
         }
     }
@@ -2380,29 +2494,46 @@ public struct ReadingView: View {
         let audioUrl = MediaAudioURLResolver.preferred(loadedAudioUrl, item.audioUrl)
         let skipMediaTranslation = isMediaItem && ContentLanguage.isChinese(
             declared: item.language, fallbackText: item.title + "\n" + body)
-        processingStates.begin(contentId: cid, message: "内容处理中…")
+        processingStates.enqueue(contentId: cid, title: item.title, operation: "内容处理")
         Task {
             var results: [String] = []
             if policy.autoScore, pipeline.isAvailable {
-                let ok = await pipeline.score(contentId: cid, title: item.title, body: body)
+                let ok = (try? await PipelineWorker.scheduleManualLLM {
+                    await processingStates.begin(contentId: cid, message: "AI 评分中…")
+                    return await pipeline.score(contentId: cid, title: item.title, body: body)
+                }) ?? false
                 results.append(ok ? "评分✅" : "评分❌ \(pipeline.lastError ?? "未知错误")")
             }
             if policy.autoTranslate, !skipMediaTranslation, pipeline.isAvailable {
-                let ok = await pipeline.translate(contentId: cid, title: item.title, body: body)
+                let ok = (try? await PipelineWorker.scheduleManualLLM {
+                    await processingStates.begin(contentId: cid, message: "翻译中…")
+                    return await pipeline.translate(contentId: cid, title: item.title, body: body)
+                }) ?? false
                 results.append(ok ? "翻译✅" : "翻译❌ \(pipeline.lastError ?? "未知错误")")
             }
             if policy.autoSummarize, pipeline.isAvailable {
-                let ok = await pipeline.summarize(contentId: cid, title: item.title, body: body)
+                let ok = (try? await PipelineWorker.scheduleManualLLM {
+                    await processingStates.begin(contentId: cid, message: "摘要中…")
+                    return await pipeline.summarize(contentId: cid, title: item.title, body: body)
+                }) ?? false
                 results.append(ok ? "摘要✅" : "摘要❌ \(pipeline.lastError ?? "未知错误")")
             }
             if policy.autoTranscribe, isMediaItem {
-                results.append(await transcriber.transcribe(contentId: cid, title: item.title, audioUrl: audioUrl, pageUrl: item.url, language: item.language) ? "转录✅" : "转录❌")
+                let ok = (try? await PipelineWorker.scheduleManualTranscription {
+                    await processingStates.begin(contentId: cid, message: "转录中…")
+                    return await transcriber.transcribe(
+                        contentId: cid, title: item.title, audioUrl: audioUrl,
+                        pageUrl: item.url, language: item.language)
+                }) ?? false
+                results.append(ok ? "转录✅" : "转录❌")
             }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
+                let succeeded = results.contains { $0.contains("✅") }
                 processingStates.finish(
                     contentId: cid,
-                    message: results.isEmpty ? "无已开启的内容处理项" : results.joined(separator: " "))
+                    message: results.isEmpty ? "无已开启的内容处理项" : results.joined(separator: " "),
+                    succeeded: results.isEmpty || succeeded)
                 refreshLoadedBody()
                 // 重新处理完成后触发导出规则
                 if results.first(where: { $0.hasSuffix("✅") }) != nil {
@@ -2419,7 +2550,8 @@ public struct ReadingView: View {
             processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
             return
         }
-        processingStates.begin(contentId: cid, message: "提取全文中…")
+        processingStates.begin(
+            contentId: cid, title: item.title, operation: "提取全文", message: "提取全文中…")
         Task {
             // 从源 config 解析 fetch_mode + 获取 feed html（feed_full 模式需要）
             let row = await Task.detached(priority: .userInitiated) {
@@ -2441,7 +2573,8 @@ public struct ReadingView: View {
                 PipelineWorker.shared.unlockContent(cid)
                 processingStates.finish(
                     contentId: cid,
-                    message: ok ? "✅ 全文提取完成" : "❌ 全文提取失败")
+                    message: ok ? "✅ 全文提取完成" : "❌ 全文提取失败",
+                    succeeded: ok)
                 if ok {
                     refreshLoadedBody()
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)
@@ -2457,16 +2590,21 @@ public struct ReadingView: View {
             processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
             return
         }
-        processingStates.begin(contentId: cid, message: "AI 评分中…")
+        processingStates.enqueue(contentId: cid, title: item.title, operation: "AI 评分")
         Task {
-            let ok = await pipeline.score(contentId: cid, title: item.title, body: contentBody)
+            let body = contentBody
+            let ok = (try? await PipelineWorker.scheduleManualLLM {
+                await processingStates.begin(contentId: cid, message: "AI 评分中…")
+                return await pipeline.score(contentId: cid, title: item.title, body: body)
+            }) ?? false
             let failure = pipeline.lastError ?? "未知错误"
             if !ok { Trace.e("手动评分失败 id=\(cid)：\(failure)", category: "llm.manual") }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 processingStates.finish(
                     contentId: cid,
-                    message: ok ? "✅ AI 评分完成" : "❌ AI 评分失败：\(failure)")
+                    message: ok ? "✅ AI 评分完成" : "❌ AI 评分失败：\(failure)",
+                    succeeded: ok)
                 if ok {
                     refreshLoadedBody()
                     Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
@@ -2482,7 +2620,7 @@ public struct ReadingView: View {
             processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
             return
         }
-        processingStates.begin(contentId: cid, message: "翻译中…")
+        processingStates.enqueue(contentId: cid, title: item.title, operation: "AI 翻译")
         Task {
             // 媒体项：翻译 defuddle 全文（loadedContentMd）→ llm_translated_md（「译文」标签）；
             // 兜底走 feed 简介翻译（translateExcerpt），简介空则返回 false 不浪费 LLM 调用。
@@ -2490,13 +2628,25 @@ public struct ReadingView: View {
             let ok: Bool
             if isMediaItem {
                 if let fulltext = loadedContentMd, !fulltext.isEmpty {
-                    ok = await pipeline.translate(contentId: cid, title: item.title, body: fulltext)
+                    ok = (try? await PipelineWorker.scheduleManualLLM {
+                        await processingStates.begin(contentId: cid, message: "翻译中…")
+                        return await pipeline.translate(
+                            contentId: cid, title: item.title, body: fulltext)
+                    }) ?? false
                 } else {
                     let excerpt = item.excerpt ?? item.contentHtml ?? ""
-                    ok = await pipeline.translateExcerpt(contentId: cid, title: item.title, contentHtml: excerpt)
+                    ok = (try? await PipelineWorker.scheduleManualLLM {
+                        await processingStates.begin(contentId: cid, message: "翻译中…")
+                        return await pipeline.translateExcerpt(
+                            contentId: cid, title: item.title, contentHtml: excerpt)
+                    }) ?? false
                 }
             } else {
-                ok = await pipeline.translate(contentId: cid, title: item.title, body: contentBody)
+                let body = contentBody
+                ok = (try? await PipelineWorker.scheduleManualLLM {
+                    await processingStates.begin(contentId: cid, message: "翻译中…")
+                    return await pipeline.translate(contentId: cid, title: item.title, body: body)
+                }) ?? false
             }
             let failure = pipeline.lastError ?? "未知错误"
             if !ok { Trace.e("手动翻译失败 id=\(cid)：\(failure)", category: "llm.manual") }
@@ -2504,7 +2654,8 @@ public struct ReadingView: View {
                 PipelineWorker.shared.unlockContent(cid)
                 processingStates.finish(
                     contentId: cid,
-                    message: ok ? "✅ 翻译完成" : "❌ 翻译失败：\(failure)")
+                    message: ok ? "✅ 翻译完成" : "❌ 翻译失败：\(failure)",
+                    succeeded: ok)
                 if ok {
                     refreshLoadedBody()
                     Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
@@ -2523,16 +2674,21 @@ public struct ReadingView: View {
             processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
             return
         }
-        processingStates.begin(contentId: cid, message: "摘要中…")
+        processingStates.enqueue(contentId: cid, title: item.title, operation: "AI 摘要")
         Task {
-            let ok = await pipeline.summarize(contentId: cid, title: item.title, body: contentBody)
+            let body = contentBody
+            let ok = (try? await PipelineWorker.scheduleManualLLM {
+                await processingStates.begin(contentId: cid, message: "摘要中…")
+                return await pipeline.summarize(contentId: cid, title: item.title, body: body)
+            }) ?? false
             let failure = pipeline.lastError ?? "未知错误"
             if !ok { Trace.e("手动摘要失败 id=\(cid)：\(failure)", category: "llm.manual") }
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 processingStates.finish(
                     contentId: cid,
-                    message: ok ? "✅ 摘要完成" : "❌ 摘要失败：\(failure)")
+                    message: ok ? "✅ 摘要完成" : "❌ 摘要失败：\(failure)",
+                    succeeded: ok)
                 if ok {
                     refreshLoadedBody()
                     Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
@@ -2548,16 +2704,21 @@ public struct ReadingView: View {
             processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
             return
         }
-        processingStates.begin(contentId: cid, message: "转录中（下载+识别，较长）…")
+        processingStates.enqueue(contentId: cid, title: item.title, operation: "AI 转录")
         let audioUrl = MediaAudioURLResolver.preferred(loadedAudioUrl, item.audioUrl)
         Task {
-            let ok = await transcriber.transcribe(
-                contentId: cid, title: item.title, audioUrl: audioUrl, pageUrl: item.url, language: item.language)
+            let ok = (try? await PipelineWorker.scheduleManualTranscription {
+                await processingStates.begin(contentId: cid, message: "转录中（下载+识别，较长）…")
+                return await transcriber.transcribe(
+                    contentId: cid, title: item.title, audioUrl: audioUrl,
+                    pageUrl: item.url, language: item.language)
+            }) ?? false
             await MainActor.run {
                 PipelineWorker.shared.unlockContent(cid)
                 processingStates.finish(
                     contentId: cid,
-                    message: ok ? "✅ 转录完成" : "❌ 转录失败")
+                    message: ok ? "✅ 转录完成" : "❌ 转录失败",
+                    succeeded: ok)
                 if ok {
                     refreshLoadedBody()
                     Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }

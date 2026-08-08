@@ -16,6 +16,8 @@ enum BilibiliAccessMetaStore {
         object["bilibili_access_checked_at"] = ISO8601DateFormatter().string(from: Date())
         guard let data = try? JSONSerialization.data(withJSONObject: object),
               let json = String(data: data, encoding: .utf8) else { return }
-        db.execute("UPDATE content SET meta = ? WHERE id = ?", params: [json, contentId])
+        if db.execute("UPDATE content SET meta = ? WHERE id = ?", params: [json, contentId]) {
+            NotificationCenter.default.post(name: .contentUpdated, object: nil)
+        }
     }
 }
