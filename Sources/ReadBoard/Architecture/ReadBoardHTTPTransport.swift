@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import ReadBoardContract
+import Security
 
 public enum ReadBoardAPI {
     public static let version = ReadBoardRemoteAPI.version
@@ -37,6 +38,7 @@ public struct ReadBoardHTTPRouter: Sendable {
     private let services: ReadBoardServices
     private let authorizeToken: @Sendable (String) async -> [RemoteAccessScope]?
     private let redeemPairing: (@Sendable (RemotePairingRequest) async throws -> RemotePairingCredential)?
+    private let loginWithPassword: (@Sendable (RemotePasswordLoginRequest) async throws -> RemotePairingCredential)?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -46,15 +48,17 @@ public struct ReadBoardHTTPRouter: Sendable {
             !bearerToken.isEmpty && token == bearerToken ? RemoteAccessScope.fullControl : nil
         }
         self.redeemPairing = nil
+        self.loginWithPassword = nil
         encoder.dateEncodingStrategy = .millisecondsSince1970
         decoder.dateDecodingStrategy = .millisecondsSince1970
     }
 
     init(services: ReadBoardServices, deviceStore: RemoteDeviceStore,
-         pairingService: RemotePairingService) {
+         pairingService: RemotePairingService, passwordService: RemotePasswordService) {
         self.services = services
         self.authorizeToken = { token in await deviceStore.authorization(token: token) }
         self.redeemPairing = { request in try await pairingService.redeem(request) }
+        self.loginWithPassword = { request in try await passwordService.login(request) }
         encoder.dateEncodingStrategy = .millisecondsSince1970
         decoder.dateDecodingStrategy = .millisecondsSince1970
     }
@@ -92,6 +96,26 @@ public struct ReadBoardHTTPRouter: Sendable {
             }
         }
 
+        if request.method.uppercased() == "POST", request.path == "/api/v1/login" {
+            guard let loginWithPassword else {
+                return failure(403, "login_unavailable", "服务端未开启密码登录")
+            }
+            do {
+                return json(try await loginWithPassword(
+                    try decode(RemotePasswordLoginRequest.self, request.body)), status: 201)
+            } catch let error as RemotePasswordError {
+                let status: Int = switch error {
+                case .invalidCredentials: 401
+                case .rateLimited: 429
+                case .notConfigured: 503
+                case .invalidPasswordLength, .derivationFailed: 400
+                }
+                return failure(status, "login_failed", error.localizedDescription)
+            } catch {
+                return failure(400, "login_failed", error.localizedDescription)
+            }
+        }
+
         let authorization = request.headers["authorization"] ?? ""
         let token = authorization.hasPrefix("Bearer ") ? String(authorization.dropFirst(7)) : ""
         guard let grantedScopes = await authorizeToken(token) else {
@@ -109,7 +133,7 @@ public struct ReadBoardHTTPRouter: Sendable {
                     ?? "ReadBoard"
                 return json(RemoteServerProfile(apiVersion: ReadBoardAPI.version,
                     serverName: name, capabilities: services.remoteCapabilities,
-                    grantedScopes: grantedScopes, transportSecurity: "none"))
+                    grantedScopes: grantedScopes, transportSecurity: "tls"))
             case ("POST", "/api/v1/library/page"):
                 return json(try await services.library.page(try decode(ContentQuery.self, request.body)))
             case ("GET", "/api/v1/library/snapshot"):
@@ -437,6 +461,9 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
     private let router: ReadBoardHTTPRouter
     private let port: NWEndpoint.Port
     private let allowLAN: Bool
+    private let tlsIdentity: RemoteTLSIdentity?
+    private let bonjourServiceName: String?
+    private let bonjourTXTRecord: NWTXTRecord?
     private let stateHandler: @Sendable (ReadBoardHTTPServerState) -> Void
     private let queue = DispatchQueue(label: "readboard.http.server", qos: .utility)
     private var listener: NWListener?
@@ -448,26 +475,51 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
         self.router = ReadBoardHTTPRouter(services: services, bearerToken: token)
         self.port = NWEndpoint.Port(rawValue: port) ?? 7331
         self.allowLAN = allowLAN
+        self.tlsIdentity = nil
+        self.bonjourServiceName = nil
+        self.bonjourTXTRecord = nil
         self.stateHandler = stateHandler
     }
 
     init(services: ReadBoardServices, deviceStore: RemoteDeviceStore,
-         pairingService: RemotePairingService, port: UInt16, allowLAN: Bool,
+         pairingService: RemotePairingService, passwordService: RemotePasswordService,
+         tlsIdentity: RemoteTLSIdentity, port: UInt16, allowLAN: Bool,
+         bonjourServiceName: String, serviceURLs: [String],
          stateHandler: @escaping @Sendable (ReadBoardHTTPServerState) -> Void) {
         self.router = ReadBoardHTTPRouter(services: services, deviceStore: deviceStore,
-                                          pairingService: pairingService)
+            pairingService: pairingService, passwordService: passwordService)
         self.port = NWEndpoint.Port(rawValue: port) ?? 7331
         self.allowLAN = allowLAN
+        self.tlsIdentity = tlsIdentity
+        self.bonjourServiceName = bonjourServiceName
+        self.bonjourTXTRecord = NWTXTRecord([
+            "api": ReadBoardAPI.version,
+            "urls": serviceURLs.joined(separator: ","),
+            "fingerprint": tlsIdentity.certificateFingerprint,
+            "name": bonjourServiceName,
+        ])
         self.stateHandler = stateHandler
     }
 
     public func start() throws {
         lock.lock(); defer { lock.unlock() }
         guard listener == nil else { return }
-        let parameters = NWParameters.tcp
+        let parameters: NWParameters
+        if let tlsIdentity {
+            let tlsOptions = NWProtocolTLS.Options()
+            sec_protocol_options_set_local_identity(
+                tlsOptions.securityProtocolOptions, tlsIdentity.identity)
+            parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+        } else {
+            parameters = .tcp
+        }
         let host: NWEndpoint.Host = allowLAN ? "0.0.0.0" : "127.0.0.1"
         parameters.requiredLocalEndpoint = .hostPort(host: host, port: port)
         let value = try NWListener(using: parameters)
+        if allowLAN, let bonjourServiceName, let bonjourTXTRecord {
+            value.service = NWListener.Service(name: bonjourServiceName,
+                type: "_readboard._tcp", txtRecord: bonjourTXTRecord)
+        }
         value.newConnectionHandler = { [weak self] in self?.accept($0) }
         value.stateUpdateHandler = { [stateHandler] state in
             switch state {

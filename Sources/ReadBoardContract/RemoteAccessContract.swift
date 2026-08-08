@@ -103,15 +103,23 @@ public struct RemoteAccessSnapshot: Codable, Equatable, Sendable {
     public let serviceURLs: [String]
     public let devices: [PairedRemoteDevice]
     public let lastError: String?
+    public let passwordConfigured: Bool
+    public let certificateFingerprint: String?
+    public let bonjourServiceName: String?
 
     public init(configuration: RemoteAccessConfiguration, state: RemoteServiceState,
                 serviceURLs: [String] = [], devices: [PairedRemoteDevice] = [],
-                lastError: String? = nil) {
+                lastError: String? = nil, passwordConfigured: Bool = false,
+                certificateFingerprint: String? = nil,
+                bonjourServiceName: String? = nil) {
         self.configuration = configuration
         self.state = state
         self.serviceURLs = serviceURLs
         self.devices = devices
         self.lastError = lastError
+        self.passwordConfigured = passwordConfigured
+        self.certificateFingerprint = certificateFingerprint
+        self.bonjourServiceName = bonjourServiceName
     }
 }
 
@@ -142,6 +150,16 @@ public struct RemotePairingRequest: Codable, Equatable, Sendable {
     }
 }
 
+public struct RemotePasswordLoginRequest: Codable, Equatable, Sendable {
+    public let password: String
+    public let deviceName: String
+
+    public init(password: String, deviceName: String) {
+        self.password = password
+        self.deviceName = deviceName
+    }
+}
+
 /// 配对成功时只返回一次。服务端仅保存 token 的 SHA-256 哈希。
 public struct RemotePairingCredential: Codable, Equatable, Sendable {
     public let deviceID: String
@@ -166,4 +184,5 @@ public protocol RemoteAccessGateway: Sendable {
     func beginPairing(scopes: [RemoteAccessScope]) async throws -> RemotePairingChallenge
     func cancelPairing(challengeID: String) async
     func revokeDevice(id: String) async throws
+    func setAccessPassword(_ password: String) async throws
 }

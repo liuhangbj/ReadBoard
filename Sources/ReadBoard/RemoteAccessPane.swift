@@ -13,6 +13,8 @@ public struct RemoteAccessPane: View {
     @State private var busy = false
     @State private var challenge: RemotePairingChallenge?
     @State private var pairingPreset: RemoteAccessPreset = .reader
+    @State private var newPassword = ""
+    @State private var confirmPassword = ""
     @State private var message = ""
     @State private var messageIsError = false
 
@@ -85,6 +87,44 @@ public struct RemoteAccessPane: View {
                 }
             }
 
+            Section {
+                LabeledContent("密码登录") {
+                    Text(snapshot.passwordConfigured ? "已启用" : "尚未设置")
+                        .foregroundStyle(snapshot.passwordConfigured
+                            ? Color.rbScoreHigh : Color.rbScoreMid)
+                }
+                SecureField(snapshot.passwordConfigured ? "输入新密码" : "设置访问密码",
+                            text: $newPassword)
+                    .textFieldStyle(.roundedBorder)
+                SecureField("再次输入", text: $confirmPassword)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Text("至少 10 个字符。修改密码不会自动撤销已登录设备。")
+                        .font(.caption).foregroundStyle(Color.rbText3)
+                    Spacer()
+                    Button(snapshot.passwordConfigured ? "更新密码" : "启用密码登录") {
+                        setAccessPassword()
+                    }
+                    .buttonStyle(.primaryCapsule).controlSize(.small)
+                    .disabled(busy || newPassword.count < 10 || newPassword != confirmPassword)
+                }
+                if let name = snapshot.bonjourServiceName {
+                    LabeledContent("局域网发现名称", value: name)
+                }
+                if let fingerprint = snapshot.certificateFingerprint {
+                    LabeledContent("TLS 证书指纹") {
+                        Text(formattedFingerprint(fingerprint))
+                            .font(.system(.caption2, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                }
+            } header: {
+                Text("访问密码与 HTTPS")
+            } footer: {
+                Text("ReadBoard Go 首次连接时固定此证书指纹；登录后只保存可单独撤销的设备令牌。")
+                    .font(.caption).foregroundStyle(Color.rbText3)
+            }
+
             Section("设备配对") {
                 if let challenge, challenge.expiresAt > Date().timeIntervalSince1970 {
                     HStack(alignment: .top, spacing: 18) {
@@ -96,7 +136,7 @@ public struct RemoteAccessPane: View {
                                 .clipShape(RoundedRectangle(cornerRadius: RB.Radius.md))
                         }
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("使用 Reader 扫描二维码")
+                            Text("使用 ReadBoard Go 扫描二维码")
                                 .font(.system(size: 13, weight: .semibold))
                             Text("或手动输入配对码")
                                 .font(.caption).foregroundStyle(Color.rbText3)
@@ -168,7 +208,7 @@ public struct RemoteAccessPane: View {
             } header: {
                 Text("已配对设备")
             } footer: {
-                Text("设备令牌只在配对成功时返回一次；服务端仅保存 SHA-256 哈希。当前传输未启用 TLS，请只在可信局域网或安全隧道内使用。")
+                Text("设备令牌只在登录或配对成功时返回一次；服务端仅保存 SHA-256 哈希。")
                     .font(.caption).foregroundStyle(Color.rbText3)
             }
 
@@ -234,6 +274,24 @@ public struct RemoteAccessPane: View {
         }
     }
 
+    private func setAccessPassword() {
+        guard newPassword == confirmPassword else { return }
+        busy = true; message = ""
+        Task {
+            do {
+                try await remoteAccess.setAccessPassword(newPassword)
+                newPassword = ""; confirmPassword = ""
+                message = "远程访问密码已更新"
+                messageIsError = false
+                await refresh(forceConfiguration: false)
+            } catch {
+                message = error.localizedDescription
+                messageIsError = true
+            }
+            busy = false
+        }
+    }
+
     private func cancelPairing() {
         guard let challenge else { return }
         self.challenge = nil
@@ -277,6 +335,15 @@ public struct RemoteAccessPane: View {
         let lastSeen = Date(timeIntervalSince1970: lastSeenAt)
             .formatted(date: .abbreviated, time: .shortened)
         return "\(permission) · 配对于 \(created) · 最近连接 \(lastSeen)"
+    }
+
+    private func formattedFingerprint(_ value: String) -> String {
+        stride(from: 0, to: value.count, by: 2).compactMap { offset in
+            let start = value.index(value.startIndex, offsetBy: offset)
+            let end = value.index(start, offsetBy: min(2, value.distance(from: start,
+                                                                         to: value.endIndex)))
+            return String(value[start..<end]).uppercased()
+        }.joined(separator: ":")
     }
 
     private func qrImage(_ value: String) -> NSImage? {

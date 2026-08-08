@@ -80,6 +80,35 @@ public enum RemotePairingClient {
     }
 }
 
+public enum RemotePasswordLoginClient {
+    public static func login(baseURL: URL, password: String, deviceName: String,
+                             session: URLSession) async throws -> RemotePairingCredential {
+        guard let url = URL(string: "api/v1/login", relativeTo: baseURL) else {
+            throw RemoteClientError.invalidURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue(ReadBoardRemoteAPI.version,
+                         forHTTPHeaderField: ReadBoardRemoteAPI.versionHeader)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(
+            RemotePasswordLoginRequest(password: password, deviceName: deviceName))
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw RemoteClientError.invalidResponse }
+        guard http.value(forHTTPHeaderField: ReadBoardRemoteAPI.versionHeader)
+                == ReadBoardRemoteAPI.version else {
+            throw RemoteClientError.versionMismatch
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = try? JSONDecoder().decode(RemoteErrorBody.self, from: data)
+            throw RemoteClientError.server(status: http.statusCode,
+                                           message: body?.message ?? "密码登录失败")
+        }
+        return try JSONDecoder().decode(RemotePairingCredential.self, from: data)
+    }
+}
+
 public struct RemoteLibraryGateway: LibraryGateway {
     private let client: ReadBoardHTTPClient
     public init(client: ReadBoardHTTPClient) { self.client = client }
