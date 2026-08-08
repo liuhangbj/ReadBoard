@@ -10,6 +10,8 @@ public struct LLMProvider: Hashable {
     /// 温度：本质是模型属性（推理模型如 kimi-k2 强制 1，普通模型 0.3 即可）。
     /// 默认 0.3 兼容旧行为；Kimi 类 preset 会设 1。
     var temperature: Double = 0.3
+    /// 关闭思考：推理模型会先把输出预算耗在 reasoning_content，关闭后直接产出正文。
+    var disableThinking: Bool = true
 }
 
 // MARK: - OpenAI 兼容客户端（fallback 链）
@@ -52,7 +54,9 @@ public final class LLMClient {
     private func activeProviders() -> [LLMProvider] {
         var list: [LLMProvider] = []
         for (i, s) in LLMSettings.profiles().enumerated() {
-            list.append(LLMProvider(name: "profile\(i + 1)", endpoint: s.baseURL, apiKey: s.apiKey, model: s.model, temperature: s.temperature))
+            list.append(LLMProvider(
+                name: "profile\(i + 1)", endpoint: s.baseURL, apiKey: s.apiKey, model: s.model,
+                temperature: s.temperature, disableThinking: s.disableThinking))
         }
         return list
     }
@@ -137,7 +141,9 @@ public final class LLMClient {
     /// 测试连接：只测传入的这条配置，不走 fallback 链
     func testConnection(_ s: LLMSettings) async -> (Bool, String) {
         guard s.isValid else { return (false, "配置不完整：baseURL / apiKey / model 都要填") }
-        let p = LLMProvider(name: "test", endpoint: s.baseURL, apiKey: s.apiKey, model: s.model, temperature: 1)
+        let p = LLMProvider(
+            name: "test", endpoint: s.baseURL, apiKey: s.apiKey, model: s.model,
+            temperature: 1, disableThinking: s.disableThinking)
         do {
             let text = try await call(
                 p, messages: [ChatMessage(role: "user", content: "回复\"ok\"两个字即可")],
@@ -161,14 +167,33 @@ public final class LLMClient {
         req.setValue("Bearer \(p.apiKey)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let payload: [String: Any] = [
+        let modelLower = p.model.lowercased()
+        let isOpenAI = p.endpoint.contains("api.openai.com")
+        // OpenAI 新版推理模型（GPT-5 / o1/o3/o4 系）不认 max_tokens，必须用 max_completion_tokens；
+        // 关思考对应 reasoning_effort: low。gpt-4o 及以下仍用 max_tokens，且不接受这两个参数。
+        let isOpenAIReasoning = isOpenAI
+            && (modelLower.contains("gpt-5")
+                || modelLower.hasPrefix("o1") || modelLower.hasPrefix("o3")
+                || modelLower.hasPrefix("o4") || modelLower.hasPrefix("o5"))
+        var requestBody: [String: Any] = [
             "model": p.model,
             "messages": messages.map { ["role": $0.role, "content": $0.content] },
             "temperature": p.temperature,
-            "max_tokens": maxTokens,
             "stream": false,
         ]
-        req.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        if isOpenAIReasoning {
+            requestBody["max_completion_tokens"] = maxTokens
+            // OpenAI 关思考 = 最低推理预算；不发送 Kimi 格式的 thinking 参数。
+            if p.disableThinking { requestBody["reasoning_effort"] = "low" }
+        } else {
+            requestBody["max_tokens"] = maxTokens
+            // 推理模型专用开关：实测 deepseek-v4-flash / kimi-k2p6 接受 thinking.disabled，
+            // 关闭后 reasoning_content=0，正文直接返回（否则 max_tokens 先被思考吃光）。
+            if p.disableThinking, !isOpenAI {
+                requestBody["thinking"] = ["type": "disabled"]
+            }
+        }
+        req.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
         let (data, resp) = try await URLSession.shared.data(for: req)
         try Task.checkCancellation()

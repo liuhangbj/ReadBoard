@@ -107,6 +107,9 @@ public struct LLMSettings {
     var model: String
     /// 温度：模型属性。推理模型（kimi-k2 等）强制 1，普通模型 0.3 即可
     var temperature: Double = 0.3
+    /// 关闭模型思考：推理模型（deepseek-v4/kimi-k2 等）会把输出预算先耗在 reasoning_content，
+    /// max_tokens 偏小或任务较长时正文为空。结构化任务关闭思考更快、更稳、更省钱。
+    var disableThinking: Bool = true
 
     /// 常用 provider 预设（baseURL + 默认 model），设置页选中自动填
     /// modelListURL 非空时，选该预设即**实时拉取**可用模型做成下拉（纯实时，无硬编码清单）。
@@ -164,19 +167,32 @@ public struct LLMSettings {
         static func baseURL(_ i: Int) -> String { "llm.slot\(i).baseURL" }
         static func model(_ i: Int) -> String { "llm.slot\(i).model" }
         static func temperature(_ i: Int) -> String { "llm.slot\(i).temperature" }
+        static func disableThinking(_ i: Int) -> String { "llm.slot\(i).disableThinking" }
         static func secretKey(_ i: Int) -> String { "llm.slot\(i).apiKey" }
         static func keySet(_ i: Int) -> String { "llm.slot\(i).keySet" }
+    }
+
+    /// 推理模型预设默认关闭思考；其他 provider（OpenAI/自定义）不带 thinking 参数更稳。
+    private static func defaultDisableThinking(baseURL: String) -> Bool {
+        baseURL.contains("deepseek.com")
+            || baseURL.contains("moonshot.cn")
+            || baseURL.contains("api.kimi.com")
     }
 
     /// 读某档配置（可能为空档）。会读 SecretStore 取真实 Key。
     static func profile(_ i: Int) -> LLMSettings {
         let d = UserDefaults.standard
         let temp = d.object(forKey: K.temperature(i)) == nil ? 0.3 : d.double(forKey: K.temperature(i))
+        let baseURL = d.string(forKey: K.baseURL(i)) ?? ""
+        let thinking = d.object(forKey: K.disableThinking(i)) == nil
+            ? defaultDisableThinking(baseURL: baseURL)
+            : d.bool(forKey: K.disableThinking(i))
         return LLMSettings(
-            baseURL: d.string(forKey: K.baseURL(i)) ?? "",
+            baseURL: baseURL,
             apiKey: SecretStore.load(forKey: K.secretKey(i)) ?? "",
             model: d.string(forKey: K.model(i)) ?? "",
-            temperature: temp)
+            temperature: temp,
+            disableThinking: thinking)
     }
 
     /// 渲染用元数据：只读 UserDefaults，不读取 SecretStore。
@@ -184,11 +200,16 @@ public struct LLMSettings {
     static func meta(_ i: Int) -> LLMSettings {
         let d = UserDefaults.standard
         let temp = d.object(forKey: K.temperature(i)) == nil ? 0.3 : d.double(forKey: K.temperature(i))
+        let baseURL = d.string(forKey: K.baseURL(i)) ?? ""
+        let thinking = d.object(forKey: K.disableThinking(i)) == nil
+            ? defaultDisableThinking(baseURL: baseURL)
+            : d.bool(forKey: K.disableThinking(i))
         return LLMSettings(
-            baseURL: d.string(forKey: K.baseURL(i)) ?? "",
+            baseURL: baseURL,
             apiKey: d.bool(forKey: K.keySet(i)) ? "••••••••" : "",
             model: d.string(forKey: K.model(i)) ?? "",
-            temperature: temp)
+            temperature: temp,
+            disableThinking: thinking)
     }
 
     /// 所有非空档按序组成 fallback 链（空档跳过）
@@ -230,6 +251,7 @@ public struct LLMSettings {
         d.set(baseURL, forKey: K.baseURL(i))
         d.set(model, forKey: K.model(i))
         d.set(temperature, forKey: K.temperature(i))
+        d.set(disableThinking, forKey: K.disableThinking(i))
         if apiKey.isEmpty {
             _ = SecretStore.delete(forKey: K.secretKey(i))
             d.set(false, forKey: K.keySet(i))
@@ -252,6 +274,7 @@ public struct LLMSettings {
         let d = UserDefaults.standard
         d.removeObject(forKey: K.baseURL(i))
         d.removeObject(forKey: K.model(i))
+        d.removeObject(forKey: K.disableThinking(i))
         _ = SecretStore.delete(forKey: K.secretKey(i))
         d.set(false, forKey: K.keySet(i))
     }
@@ -282,10 +305,13 @@ public struct LLMSettings {
     static func moveSlot(from: Int, to: Int) {
         let n = slotCount
         guard from >= 0, from < n, to >= 0, to < n, from != to else { return }
-        let snap = (0..<n).map { i -> (String, String, Double, String) in
+        let snap = (0..<n).map { i -> (String, String, Double, Bool, String) in
             (UserDefaults.standard.string(forKey: K.baseURL(i)) ?? "",
              UserDefaults.standard.string(forKey: K.model(i)) ?? "",
              UserDefaults.standard.double(forKey: K.temperature(i)),
+             UserDefaults.standard.object(forKey: K.disableThinking(i)) == nil
+                ? defaultDisableThinking(baseURL: UserDefaults.standard.string(forKey: K.baseURL(i)) ?? "")
+                : UserDefaults.standard.bool(forKey: K.disableThinking(i)),
              SecretStore.load(forKey: K.secretKey(i)) ?? "")
         }
         var arr = Array(snap)
@@ -295,8 +321,9 @@ public struct LLMSettings {
             UserDefaults.standard.set(v.0, forKey: K.baseURL(i))
             UserDefaults.standard.set(v.1, forKey: K.model(i))
             UserDefaults.standard.set(v.2, forKey: K.temperature(i))
-            if v.3.isEmpty { _ = SecretStore.delete(forKey: K.secretKey(i)) }
-            else { _ = SecretStore.save(v.3, forKey: K.secretKey(i)) }
+            UserDefaults.standard.set(v.3, forKey: K.disableThinking(i))
+            if v.4.isEmpty { _ = SecretStore.delete(forKey: K.secretKey(i)) }
+            else { _ = SecretStore.save(v.4, forKey: K.secretKey(i)) }
         }
     }
 

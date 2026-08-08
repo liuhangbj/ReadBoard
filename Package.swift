@@ -6,8 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "ReadBoardCore", targets: ["ReadBoard"]),
-        .executable(name: "ReadBoardMain", targets: ["ReadBoardMain"]),
-        .executable(name: "ReadBoardMaintenance", targets: ["ReadBoardMaintenance"])
+        .executable(name: "ReadBoardMain", targets: ["ReadBoardMain"])
     ],
     targets: [
         .target(
@@ -22,11 +21,6 @@ let package = Package(
             name: "ReadBoardMain",
             dependencies: ["ReadBoard"],
             path: "Sources/ReadBoardMain"
-        ),
-        .executableTarget(
-            name: "ReadBoardMaintenance",
-            dependencies: ["ReadBoard"],
-            path: "Sources/ReadBoardMaintenance"
         ),
         .testTarget(
             name: "ReadBoardTests",

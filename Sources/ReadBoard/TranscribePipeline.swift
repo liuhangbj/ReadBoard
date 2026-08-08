@@ -93,6 +93,7 @@ public final class TranscribePipeline: @unchecked Sendable {
             //    中文：整理断句/标点/段落，不翻译。非中文：整理原文并生成中文对照。
             let resolvedLanguage = ContentLanguage.resolvedAfterTranscription(
                 declared: language, transcript: text)
+            var postProcessError: String?
             if llm.isAvailable {
                 switch Self.llmPostProcessMode(
                     declaredLanguage: language,
@@ -103,11 +104,15 @@ public final class TranscribePipeline: @unchecked Sendable {
                         text = polished
                         fputs("[transcribe] 转录稿已由 LLM 用原语言整理 id=\(contentId)\n", stderr)
                     } else {
-                        fputs("[transcribe] LLM 整理失败，保留 Whisper 原稿 id=\(contentId)\n", stderr)
+                        postProcessError = llm.lastError ?? "LLM 整理失败"
+                        fputs("[transcribe] LLM 整理失败，保留 Whisper 原稿 id=\(contentId) err=\(postProcessError ?? "?")\n", stderr)
                     }
                 case .bilingualTranslation:
                     if let bilingual = await llm.translateBilingual(text) {
                         text = bilingual
+                    } else {
+                        postProcessError = llm.lastError ?? "LLM 双语后处理失败"
+                        fputs("[transcribe] LLM 双语后处理失败，保留 Whisper 原稿 id=\(contentId) err=\(postProcessError ?? "?")\n", stderr)
                     }
                 }
             }
@@ -132,7 +137,11 @@ public final class TranscribePipeline: @unchecked Sendable {
             // 注意：媒体摘要已由合并调用体系负责（以 content_md 字幕稿为源，
             // 走 needsSummary + runLLMStages，带 content_job 退避/死信自愈）。
             // 此处不再用转录稿生成 llm_summary，避免覆盖前者。
-            await markJob(contentId: contentId, ok: ok, err: ok ? nil : "写库失败")
+            // 后处理失败不算整条转录白跑：原稿已落库，但必须记失败让用户可见、可手动重试。
+            await markJob(
+                contentId: contentId,
+                ok: ok && postProcessError == nil,
+                err: ok ? postProcessError.map { "转录完成，LLM 后处理失败（已保留原稿）：\($0)" } : "写库失败")
             return ok
         } catch {
             return await finishAfterFailure(contentId: contentId, error: error)

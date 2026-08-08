@@ -839,6 +839,21 @@ public struct ContentView: View {
         }
     }
 
+    /// 删除单篇转录稿（同时清理转录 job，方便按 auto_transcribe 重新转录）
+    private func deleteTranscriptForItem(item: ContentItem) {
+        guard item.hasTranscript else { return }
+        Database.shared.execute(
+            "DELETE FROM content_job WHERE content_id = ? AND jtype = 'transcribe'",
+            params: [item.id])
+        let ok = Database.shared.execute(
+            "UPDATE content SET llm_transcript_md = NULL WHERE id = ?",
+            params: [item.id])
+        if ok {
+            vm.showToast("已删除转录稿")
+            NotificationCenter.default.post(name: .contentUpdated, object: nil)
+        }
+    }
+
     /// 源级管线开关菜单（打勾状态实时反映）
     @ViewBuilder
     private func pipelineToggleMenu(src: FeedSource) -> some View {
@@ -1377,6 +1392,14 @@ public struct ContentView: View {
                                         runPipelineForItem(item: item, type: "transcribe")
                                     } label: {
                                         Label("AI 转录", systemImage: "waveform")
+                                    }
+                                }
+                                if item.hasTranscript {
+                                    Divider()
+                                    Button {
+                                        deleteTranscriptForItem(item: item)
+                                    } label: {
+                                        Label("删除转录稿", systemImage: "trash")
                                     }
                                 }
                             } label: {

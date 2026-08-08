@@ -523,6 +523,7 @@ public struct LLMModelCard: View {
     @State private var apiKey = ""
     @State private var model = ""
     @State private var temperature: Double = 0.3
+    @State private var disableThinking = true
     @State private var presetId = "deepseek"
     @State private var testing = false
     @State private var testResult: String? = nil
@@ -748,13 +749,24 @@ public struct LLMModelCard: View {
                 }
             }
 
+            // 关闭思考：推理模型（deepseek-v4/kimi-k2 等）会先消耗输出预算思考，
+            // 导致正文为空或超慢；结构化任务建议保持开启关闭。
+            Toggle("关闭模型思考（结构化任务更快更稳）", isOn: $disableThinking)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(.system(size: 12))
+                .foregroundStyle(Color.rbText2)
+                .help("关闭后跳过思考直接输出正文：DeepSeek/Kimi 发 thinking:disabled；OpenAI 推理模型发 reasoning_effort:low。普通模型无需此参数时请关闭本开关")
+
             // 底部一行：测试连接（左） + 清除/保存（右，清除永远在保存左侧）
             HStack(spacing: 8) {
                 Button(testing ? "测试中…" : "测试连接") {
                     testing = true
                     testResult = nil
                     Task {
-                        let s = LLMSettings(baseURL: baseURL, apiKey: resolvedKey(), model: model, temperature: temperature)
+                        let s = LLMSettings(
+                            baseURL: baseURL, apiKey: resolvedKey(), model: model,
+                            temperature: temperature, disableThinking: disableThinking)
                         let (ok, msg) = await LLMClient().testConnection(s)
                         testOK = ok
                         testResult = msg
@@ -777,7 +789,7 @@ public struct LLMModelCard: View {
                     Text(e).font(.caption).foregroundStyle(Color.rbScoreLow).textSelection(.enabled)
                 }
                 Button("清除") {
-                    baseURL = ""; apiKey = ""; model = ""; temperature = 0.3
+                    baseURL = ""; apiKey = ""; model = ""; temperature = 0.3; disableThinking = true
                     modelOptions = []
                     LLMSettings.clear(profile: slotIndex)
                 }
@@ -786,7 +798,9 @@ public struct LLMModelCard: View {
                 .tint(Color.rbScoreLow)
                 .disabled(!filled)
                 Button("保存") {
-                    let ok = LLMSettings(baseURL: baseURL, apiKey: resolvedKey(), model: model, temperature: temperature)
+                    let ok = LLMSettings(
+                        baseURL: baseURL, apiKey: resolvedKey(), model: model,
+                        temperature: temperature, disableThinking: disableThinking)
                         .save(toProfile: slotIndex)
                     if ok {
                         savedHint = true
@@ -823,6 +837,7 @@ public struct LLMModelCard: View {
             apiKey = s.apiKey
             model = s.model
             temperature = s.temperature
+            disableThinking = s.disableThinking
             presetId = LLMSettings.presets.first(where: { $0.baseURL == s.baseURL })?.id ?? "custom"
             // 进入页面立即用「已存的 model 本身」做最小保底选项（防止 Picker 在选项为空时退化/跳选），
             // 随后后台**实时拉取**真实模型列表合并进来。不再使用任何硬编码厂商清单。

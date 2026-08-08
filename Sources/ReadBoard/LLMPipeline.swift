@@ -293,28 +293,31 @@ public final class LLMPipeline: @unchecked Sendable {
 
     /// 把非中文转录稿翻译成原文与目标语言对照 Markdown。
     /// 转录稿是 whisper 碎句，让 LLM 先合并成通顺段落再对照——顺带提升可读性。
-    /// 长文本（>12000 字）分块处理，逐块对照后拼接。
-    /// 块大小/token 权衡：单块 12000 字对照 ~15000 字符 ≈ 5000 token，配 maxTokens 16384
-    /// 不截断（实测 finish=stop 完整）。块调大减少长播客分块数 → 块间语义断裂点更少。
-    /// （曾用 6000 字 + 8192 也完整，但长稿分块多断点多；12000 字 + 16384 更优）
     func translateBilingual(_ text: String) async -> String? {
+        await translateBilingual(text, maxChars: 6000)
+    }
+
+    /// maxChars 可调：单块越大单次调用越慢、越容易超时/空响应；越小调用越多、块间断点越多。
+    /// 实测 6000 字对照单块 15~25s 稳定完成；12000 字在推理模型下曾长时间无输出。
+    func translateBilingual(_ text: String, maxChars: Int) async -> String? {
         guard isAvailable else { return nil }
-        if text.count > 12000 {
-            let chunks = Self.splitByParagraph(text, maxChars: 12000)
-            guard !chunks.isEmpty else { return nil }
-            var parts: [String] = []
-            var anyOK = false
-            for chunk in chunks {
-                guard !Task.isCancelled else { return nil }
-                if let t = await translateBilingualSingle(chunk) {
-                    parts.append(t); anyOK = true
-                } else {
-                    parts.append(chunk)   // 单块失败保留原文，不静默丢
-                }
+        let chunks = Self.splitByParagraph(text, maxChars: maxChars)
+        guard !chunks.isEmpty else { return nil }
+        var parts: [String] = []
+        for (i, chunk) in chunks.enumerated() {
+            guard !Task.isCancelled else { return nil }
+            var translated = await translateBilingualSingle(chunk)
+            // 单块失败重试一次：瞬时空响应/限流占多数，重试能消除大部分偶发失败。
+            if translated == nil, !Task.isCancelled {
+                translated = await translateBilingualSingle(chunk)
             }
-            return anyOK ? parts.joined(separator: "\n\n") : nil
+            guard let translated else {
+                setError("双语后处理失败：第 \(i + 1)/\(chunks.count) 块 \(lastError ?? "未知错误")")
+                return nil
+            }
+            parts.append(translated)
         }
-        return await translateBilingualSingle(text)
+        return parts.joined(separator: "\n\n")
     }
 
     /// 单块中英对照（<=12000 字）。prompt 已实测：英文普通段落 + 中文 `> ` 引用块，格式稳定。
@@ -339,8 +342,14 @@ public final class LLMPipeline: @unchecked Sendable {
                 maxTokens: 16384)
             guard !Task.isCancelled else { return nil }
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
+            if trimmed.isEmpty {
+                setError("双语翻译返回空内容")
+                return nil
+            }
+            setError(nil)
+            return trimmed
         } catch {
+            setError(Self.describeError(error))
             return nil
         }
     }
@@ -351,23 +360,22 @@ public final class LLMPipeline: @unchecked Sendable {
     /// 长稿沿用分块策略；单块失败保留 Whisper 原稿，不让后处理失败拖垮整次转录。
     func polishTranscript(_ text: String) async -> String? {
         guard isAvailable else { return nil }
-        if text.count > 12000 {
-            let chunks = Self.splitByParagraph(text, maxChars: 12000)
-            guard !chunks.isEmpty else { return nil }
-            var parts: [String] = []
-            var anyOK = false
-            for chunk in chunks {
-                guard !Task.isCancelled else { return nil }
-                if let polished = await polishTranscriptSingle(chunk) {
-                    parts.append(polished)
-                    anyOK = true
-                } else {
-                    parts.append(chunk)
-                }
+        let chunks = Self.splitByParagraph(text, maxChars: 6000)
+        guard !chunks.isEmpty else { return nil }
+        var parts: [String] = []
+        for (i, chunk) in chunks.enumerated() {
+            guard !Task.isCancelled else { return nil }
+            var polished = await polishTranscriptSingle(chunk)
+            if polished == nil, !Task.isCancelled {
+                polished = await polishTranscriptSingle(chunk)
             }
-            return anyOK ? parts.joined(separator: "\n\n") : nil
+            guard let polished else {
+                setError("转录稿整理失败：第 \(i + 1)/\(chunks.count) 块 \(lastError ?? "未知错误")")
+                return nil
+            }
+            parts.append(polished)
         }
-        return await polishTranscriptSingle(text)
+        return parts.joined(separator: "\n\n")
     }
 
     private func polishTranscriptSingle(_ text: String) async -> String? {
@@ -391,8 +399,14 @@ public final class LLMPipeline: @unchecked Sendable {
                 maxTokens: 16384)
             guard !Task.isCancelled else { return nil }
             let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
+            if trimmed.isEmpty {
+                setError("转录稿整理返回空内容")
+                return nil
+            }
+            setError(nil)
+            return trimmed
         } catch {
+            setError(Self.describeError(error))
             return nil
         }
     }
