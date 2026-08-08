@@ -77,12 +77,12 @@ final class RemoteAccessController {
         restartServer()
     }
 
-    func beginPairing() async throws -> RemotePairingChallenge {
+    func beginPairing(scopes: [RemoteAccessScope]) async throws -> RemotePairingChallenge {
         let snapshot = await snapshot()
         guard snapshot.state == .running, !snapshot.serviceURLs.isEmpty else {
             throw RemotePairingError.serviceUnavailable
         }
-        return await pairingService.begin(serviceURLs: snapshot.serviceURLs)
+        return await pairingService.begin(serviceURLs: snapshot.serviceURLs, scopes: scopes)
     }
 
     func cancelPairing(challengeID: String) async {
@@ -160,8 +160,8 @@ public final class LocalRemoteAccessGateway: RemoteAccessGateway, @unchecked Sen
         await RemoteAccessController.shared.updateConfiguration(configuration)
     }
 
-    public func beginPairing() async throws -> RemotePairingChallenge {
-        try await RemoteAccessController.shared.beginPairing()
+    public func beginPairing(scopes: [RemoteAccessScope]) async throws -> RemotePairingChallenge {
+        try await RemoteAccessController.shared.beginPairing(scopes: scopes)
     }
 
     public func cancelPairing(challengeID: String) async {

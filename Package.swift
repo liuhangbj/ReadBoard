@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(name: "ReadBoardContract", targets: ["ReadBoardContract"]),
+        .library(name: "ReadBoardRemote", targets: ["ReadBoardRemote"]),
         .library(name: "ReadBoardCore", targets: ["ReadBoard"]),
         .executable(name: "ReadBoardMain", targets: ["ReadBoardMain"])
     ],
@@ -13,6 +14,11 @@ let package = Package(
         .target(
             name: "ReadBoardContract",
             path: "Sources/ReadBoardContract"
+        ),
+        .target(
+            name: "ReadBoardRemote",
+            dependencies: ["ReadBoardContract"],
+            path: "Sources/ReadBoardRemote"
         ),
         .target(
             name: "ReadBoard",

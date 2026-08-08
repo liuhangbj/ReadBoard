@@ -100,4 +100,48 @@ final class RemoteAccessSecurityTests: XCTestCase {
             XCTAssertTrue(stillValid)
         }
     }
+
+    func testReaderPairingCanInspectProfileButCannotManageConfiguration() async throws {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let store = RemoteDeviceStore(fileURL: file)
+        let pairing = RemotePairingService(deviceStore: store)
+        let challenge = await pairing.begin(serviceURLs: ["http://10.0.0.5:7331"],
+                                            scopes: RemoteAccessScope.reader)
+        let credential = try await pairing.redeem(
+            RemotePairingRequest(code: challenge.code, deviceName: "ReadBoard Go"))
+        let router = ReadBoardHTTPRouter(services: .live, deviceStore: store,
+                                         pairingService: pairing)
+        let headers = ["X-ReadBoard-API-Version": ReadBoardAPI.version,
+                       "Authorization": "Bearer \(credential.token)"]
+
+        let profileResponse = await router.handle(ReadBoardHTTPRequest(
+            method: "GET", path: "/api/v1/server/profile", headers: headers))
+        XCTAssertEqual(profileResponse.status, 200)
+        let profile = try JSONDecoder().decode(RemoteServerProfile.self,
+                                               from: profileResponse.body)
+        XCTAssertEqual(profile.grantedScopes, RemoteAccessScope.reader)
+        XCTAssertTrue(profile.capabilities.contains(.sourceManagement))
+
+        let configurationResponse = await router.handle(ReadBoardHTTPRequest(
+            method: "GET", path: "/api/v1/configuration", headers: headers))
+        XCTAssertEqual(configurationResponse.status, 403)
+    }
+
+    func testLegacyDeviceRecordWithoutScopesReceivesFullControl() async throws {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        let token = "legacy-secret"
+        let json = """
+        [{"id":"legacy","name":"旧设备","tokenHash":"\(RemoteDeviceStore.hash(token))",\
+        "createdAt":1}]
+        """
+        try Data(json.utf8).write(to: file)
+        let store = RemoteDeviceStore(fileURL: file)
+
+        let scopes = await store.authorization(token: token)
+        XCTAssertEqual(scopes, RemoteAccessScope.fullControl)
+    }
 }

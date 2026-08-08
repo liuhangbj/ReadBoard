@@ -32,4 +32,12 @@ final class ServiceBoundaryContractTests: XCTestCase {
         XCTAssertFalse(text.contains("tokenHash"))
         XCTAssertFalse(text.contains("token\":"))
     }
+
+    func testRemoteServerProfileJSONRoundTrip() throws {
+        let value = RemoteServerProfile(apiVersion: "1", serverName: "ReadBoard Pro",
+            capabilities: RemoteServiceCapability.allCases,
+            grantedScopes: RemoteAccessScope.reader, transportSecurity: "none")
+        let data = try JSONEncoder().encode(value)
+        XCTAssertEqual(try JSONDecoder().decode(RemoteServerProfile.self, from: data), value)
+    }
 }

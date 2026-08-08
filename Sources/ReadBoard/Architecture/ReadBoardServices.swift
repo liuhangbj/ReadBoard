@@ -16,6 +16,7 @@ public struct ReadBoardServices: Sendable {
     public let authentication: any AuthenticationGateway
     public let maintenance: any MaintenanceGateway
     public let remoteAccess: any RemoteAccessGateway
+    public let remoteCapabilities: [RemoteServiceCapability]
 
     public init(
         library: any LibraryGateway,
@@ -30,7 +31,8 @@ public struct ReadBoardServices: Sendable {
         configuration: any ConfigurationGateway,
         authentication: any AuthenticationGateway,
         maintenance: any MaintenanceGateway,
-        remoteAccess: any RemoteAccessGateway
+        remoteAccess: any RemoteAccessGateway,
+        remoteCapabilities: [RemoteServiceCapability] = RemoteServiceCapability.allCases
     ) {
         self.library = library
         self.contentDetail = contentDetail
@@ -45,6 +47,7 @@ public struct ReadBoardServices: Sendable {
         self.authentication = authentication
         self.maintenance = maintenance
         self.remoteAccess = remoteAccess
+        self.remoteCapabilities = remoteCapabilities
     }
 
     public static var live: ReadBoardServices {

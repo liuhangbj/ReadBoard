@@ -9,9 +9,32 @@ struct StoredRemoteDevice: Codable, Equatable, Sendable {
     let tokenHash: String
     let createdAt: TimeInterval
     var lastSeenAt: TimeInterval?
+    var scopes: [RemoteAccessScope]
 
     var publicValue: PairedRemoteDevice {
-        PairedRemoteDevice(id: id, name: name, createdAt: createdAt, lastSeenAt: lastSeenAt)
+        PairedRemoteDevice(id: id, name: name, createdAt: createdAt,
+                           lastSeenAt: lastSeenAt, scopes: scopes)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, tokenHash, createdAt, lastSeenAt, scopes
+    }
+
+    init(id: String, name: String, tokenHash: String, createdAt: TimeInterval,
+         lastSeenAt: TimeInterval?, scopes: [RemoteAccessScope]) {
+        self.id = id; self.name = name; self.tokenHash = tokenHash
+        self.createdAt = createdAt; self.lastSeenAt = lastSeenAt; self.scopes = scopes
+    }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        tokenHash = try values.decode(String.self, forKey: .tokenHash)
+        createdAt = try values.decode(TimeInterval.self, forKey: .createdAt)
+        lastSeenAt = try values.decodeIfPresent(TimeInterval.self, forKey: .lastSeenAt)
+        scopes = try values.decodeIfPresent([RemoteAccessScope].self, forKey: .scopes)
+            ?? RemoteAccessScope.fullControl
     }
 }
 
@@ -30,32 +53,37 @@ actor RemoteDeviceStore {
         return records.sorted { $0.createdAt > $1.createdAt }.map(\.publicValue)
     }
 
-    func issue(deviceName: String) throws -> RemotePairingCredential {
+    func issue(deviceName: String,
+               scopes: [RemoteAccessScope] = RemoteAccessScope.reader) throws -> RemotePairingCredential {
         loadIfNeeded()
         let token = Self.randomToken()
         let name = Self.sanitizedName(deviceName)
         let record = StoredRemoteDevice(id: UUID().uuidString, name: name,
             tokenHash: Self.hash(token), createdAt: Date().timeIntervalSince1970,
-            lastSeenAt: nil)
+            lastSeenAt: nil, scopes: Self.normalizedScopes(scopes))
         records.append(record)
         try persist()
         return RemotePairingCredential(deviceID: record.id, deviceName: record.name,
-            token: token, apiVersion: ReadBoardAPI.version)
+            token: token, apiVersion: ReadBoardAPI.version, scopes: record.scopes)
     }
 
     func validate(token: String) -> Bool {
+        authorization(token: token) != nil
+    }
+
+    func authorization(token: String) -> [RemoteAccessScope]? {
         loadIfNeeded()
-        guard !token.isEmpty else { return false }
+        guard !token.isEmpty else { return nil }
         let digest = Self.hash(token)
         guard let index = records.firstIndex(where: { Self.constantTimeEqual($0.tokenHash, digest) }) else {
-            return false
+            return nil
         }
         let now = Date().timeIntervalSince1970
         if records[index].lastSeenAt.map({ now - $0 > 60 }) ?? true {
             records[index].lastSeenAt = now
             try? persist()
         }
-        return true
+        return records[index].scopes
     }
 
     func revoke(id: String) throws {
@@ -80,7 +108,8 @@ actor RemoteDeviceStore {
             let previous = records
             records.append(StoredRemoteDevice(id: UUID().uuidString,
                 name: "旧版访问令牌", tokenHash: digest,
-                createdAt: Date().timeIntervalSince1970, lastSeenAt: nil))
+                createdAt: Date().timeIntervalSince1970, lastSeenAt: nil,
+                scopes: RemoteAccessScope.fullControl))
             do {
                 try persist()
             } catch {
@@ -121,6 +150,11 @@ actor RemoteDeviceStore {
             + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 
+    private static func normalizedScopes(_ scopes: [RemoteAccessScope]) -> [RemoteAccessScope] {
+        let values = scopes.isEmpty ? RemoteAccessScope.reader : scopes
+        return RemoteAccessScope.allCases.filter { values.contains($0) }
+    }
+
     static func hash(_ token: String) -> String {
         SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
     }
@@ -138,6 +172,7 @@ actor RemotePairingService {
         let code: String
         let expiresAt: TimeInterval
         var failedAttempts: Int
+        let scopes: [RemoteAccessScope]
     }
 
     private let deviceStore: RemoteDeviceStore
@@ -145,13 +180,18 @@ actor RemotePairingService {
 
     init(deviceStore: RemoteDeviceStore) { self.deviceStore = deviceStore }
 
-    func begin(serviceURLs: [String], lifetime: TimeInterval = 300) -> RemotePairingChallenge {
+    func begin(serviceURLs: [String], scopes: [RemoteAccessScope] = RemoteAccessScope.reader,
+               lifetime: TimeInterval = 300) -> RemotePairingChallenge {
         let id = UUID().uuidString
         let code = Self.randomCode()
         let expiresAt = Date().addingTimeInterval(lifetime).timeIntervalSince1970
-        active = ActiveChallenge(id: id, code: code, expiresAt: expiresAt, failedAttempts: 0)
-        let payload = Self.payload(serviceURLs: serviceURLs, code: code, expiresAt: expiresAt)
-        return RemotePairingChallenge(id: id, code: code, qrPayload: payload, expiresAt: expiresAt)
+        let grantedScopes = RemoteAccessScope.allCases.filter { scopes.contains($0) }
+        active = ActiveChallenge(id: id, code: code, expiresAt: expiresAt,
+                                 failedAttempts: 0, scopes: grantedScopes)
+        let payload = Self.payload(serviceURLs: serviceURLs, code: code,
+                                   expiresAt: expiresAt, scopes: grantedScopes)
+        return RemotePairingChallenge(id: id, code: code, qrPayload: payload,
+                                      expiresAt: expiresAt, scopes: grantedScopes)
     }
 
     func cancel(id: String) {
@@ -174,7 +214,7 @@ actor RemotePairingService {
             throw RemotePairingError.invalidCode
         }
         active = nil
-        return try await deviceStore.issue(deviceName: request.deviceName)
+        return try await deviceStore.issue(deviceName: request.deviceName, scopes: challenge.scopes)
     }
 
     private static func randomCode() -> String {
@@ -187,7 +227,7 @@ actor RemotePairingService {
     }
 
     private static func payload(serviceURLs: [String], code: String,
-                                expiresAt: TimeInterval) -> String {
+                                expiresAt: TimeInterval, scopes: [RemoteAccessScope]) -> String {
         var components = URLComponents()
         components.scheme = "readboard"
         components.host = "pair"
@@ -196,6 +236,7 @@ actor RemotePairingService {
             URLQueryItem(name: "code", value: code),
             URLQueryItem(name: "expires", value: String(Int(expiresAt))),
             URLQueryItem(name: "version", value: ReadBoardAPI.version),
+            URLQueryItem(name: "scopes", value: scopes.map(\.rawValue).joined(separator: ",")),
         ]
         return components.string ?? ""
     }

@@ -24,17 +24,23 @@ public struct ReadBoardHTTPClient: Sendable {
         try await send(method: "POST", path: path, body: try encoder.encode(body), as: type)
     }
 
+    public func profile() async throws -> RemoteServerProfile {
+        try await get("api/v1/server/profile", as: RemoteServerProfile.self)
+    }
+
     private func send<Response: Decodable>(method: String, path: String, body: Data?,
                                             as type: Response.Type) async throws -> Response {
         guard let url = URL(string: path, relativeTo: baseURL) else { throw RemoteClientError.invalidURL }
         var request = URLRequest(url: url)
         request.httpMethod = method; request.httpBody = body; request.timeoutInterval = 20
         request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(ReadBoardAPI.version, forHTTPHeaderField: "X-ReadBoard-API-Version")
+        request.setValue(ReadBoardRemoteAPI.version,
+                         forHTTPHeaderField: ReadBoardRemoteAPI.versionHeader)
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw RemoteClientError.invalidResponse }
-        guard http.value(forHTTPHeaderField: "X-ReadBoard-API-Version") == ReadBoardAPI.version else {
+        guard http.value(forHTTPHeaderField: ReadBoardRemoteAPI.versionHeader)
+                == ReadBoardRemoteAPI.version else {
             throw RemoteClientError.versionMismatch
         }
         guard (200..<300).contains(http.statusCode) else {
@@ -54,13 +60,15 @@ public enum RemotePairingClient {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 15
-        request.setValue(ReadBoardAPI.version, forHTTPHeaderField: "X-ReadBoard-API-Version")
+        request.setValue(ReadBoardRemoteAPI.version,
+                         forHTTPHeaderField: ReadBoardRemoteAPI.versionHeader)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(
             RemotePairingRequest(code: code, deviceName: deviceName))
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw RemoteClientError.invalidResponse }
-        guard http.value(forHTTPHeaderField: "X-ReadBoard-API-Version") == ReadBoardAPI.version else {
+        guard http.value(forHTTPHeaderField: ReadBoardRemoteAPI.versionHeader)
+                == ReadBoardRemoteAPI.version else {
             throw RemoteClientError.versionMismatch
         }
         guard (200..<300).contains(http.statusCode) else {
@@ -116,12 +124,12 @@ public struct RemoteRuntimeStatusGateway: RuntimeStatusGateway {
             body: RemoteRuntimeSnapshotRequest(refreshCounts: refreshCounts),
             as: RuntimeStatusSnapshot.self)) ?? RuntimeStatusSnapshot()
     }
-    public func runProcessingScan() async {}
+    public func runProcessingScan() async {
+        let _: RemoteAcknowledgement? = try? await client.post("api/v1/runtime/scan",
+            body: RemoteAcknowledgement(), as: RemoteAcknowledgement.self)
+    }
 }
 
-private struct RemoteContentStateRequest: Codable { let contentID: Int64; let value: Bool }
-private struct RemoteContentIDRequest: Codable { let contentID: Int64 }
-private struct RemoteRuntimeSnapshotRequest: Codable { let refreshCounts: Bool }
 private struct RemoteErrorBody: Codable { let error: String; let message: String }
 
 public enum RemoteClientError: LocalizedError {

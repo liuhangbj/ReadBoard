@@ -12,6 +12,7 @@ public struct RemoteAccessPane: View {
     @State private var dirty = false
     @State private var busy = false
     @State private var challenge: RemotePairingChallenge?
+    @State private var pairingPreset: RemoteAccessPreset = .reader
     @State private var message = ""
     @State private var messageIsError = false
 
@@ -110,7 +111,13 @@ public struct RemoteAccessPane: View {
                     }
                     .padding(.vertical, 6)
                 } else {
-                    HStack {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Picker("访问权限", selection: $pairingPreset) {
+                            Text("仅阅读").tag(RemoteAccessPreset.reader)
+                            Text("完整控制").tag(RemoteAccessPreset.fullControl)
+                        }
+                        .pickerStyle(.segmented)
+                        HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("添加阅读设备")
                                 .font(.system(size: 13, weight: .semibold))
@@ -121,6 +128,7 @@ public struct RemoteAccessPane: View {
                         Button("生成配对二维码") { beginPairing() }
                             .buttonStyle(.primaryCapsule).controlSize(.small)
                             .disabled(snapshot.state != .running || busy)
+                        }
                     }
                 }
             }
@@ -217,7 +225,7 @@ public struct RemoteAccessPane: View {
         busy = true; message = ""
         Task {
             do {
-                challenge = try await remoteAccess.beginPairing()
+                challenge = try await remoteAccess.beginPairing(scopes: pairingPreset.scopes)
                 messageIsError = false
             } catch {
                 message = error.localizedDescription; messageIsError = true
@@ -262,10 +270,13 @@ public struct RemoteAccessPane: View {
     private func deviceDetail(_ device: PairedRemoteDevice) -> String {
         let created = Date(timeIntervalSince1970: device.createdAt)
             .formatted(date: .abbreviated, time: .shortened)
-        guard let lastSeenAt = device.lastSeenAt else { return "配对于 \(created) · 尚未连接" }
+        let permission = device.scopes == RemoteAccessScope.reader ? "仅阅读" : "完整控制"
+        guard let lastSeenAt = device.lastSeenAt else {
+            return "\(permission) · 配对于 \(created) · 尚未连接"
+        }
         let lastSeen = Date(timeIntervalSince1970: lastSeenAt)
             .formatted(date: .abbreviated, time: .shortened)
-        return "配对于 \(created) · 最近连接 \(lastSeen)"
+        return "\(permission) · 配对于 \(created) · 最近连接 \(lastSeen)"
     }
 
     private func qrImage(_ value: String) -> NSImage? {

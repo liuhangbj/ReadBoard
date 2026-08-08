@@ -3,7 +3,7 @@ import Network
 import ReadBoardContract
 
 public enum ReadBoardAPI {
-    public static let version = "1"
+    public static let version = ReadBoardRemoteAPI.version
     public static let versionHeader = "x-readboard-api-version"
     public static let maximumRequestBytes = 2 * 1_024 * 1_024
 }
@@ -32,21 +32,19 @@ public struct ReadBoardHTTPRequest: Sendable {
 }
 
 private struct APIErrorBody: Codable { let error: String; let message: String }
-private struct ContentStateRequest: Codable { let contentID: Int64; let value: Bool }
-private struct ContentIDRequest: Codable { let contentID: Int64 }
-private struct RuntimeSnapshotRequest: Codable { let refreshCounts: Bool }
-
 /// 与 socket 无关的可测试路由器。所有错误都被转换为稳定 JSON，不把数据库或平台异常堆栈暴露给客户端。
 public struct ReadBoardHTTPRouter: Sendable {
     private let services: ReadBoardServices
-    private let authorizeToken: @Sendable (String) async -> Bool
+    private let authorizeToken: @Sendable (String) async -> [RemoteAccessScope]?
     private let redeemPairing: (@Sendable (RemotePairingRequest) async throws -> RemotePairingCredential)?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
     public init(services: ReadBoardServices, bearerToken: String) {
         self.services = services
-        self.authorizeToken = { token in !bearerToken.isEmpty && token == bearerToken }
+        self.authorizeToken = { token in
+            !bearerToken.isEmpty && token == bearerToken ? RemoteAccessScope.fullControl : nil
+        }
         self.redeemPairing = nil
         encoder.dateEncodingStrategy = .millisecondsSince1970
         decoder.dateDecodingStrategy = .millisecondsSince1970
@@ -55,7 +53,7 @@ public struct ReadBoardHTTPRouter: Sendable {
     init(services: ReadBoardServices, deviceStore: RemoteDeviceStore,
          pairingService: RemotePairingService) {
         self.services = services
-        self.authorizeToken = { token in await deviceStore.validate(token: token) }
+        self.authorizeToken = { token in await deviceStore.authorization(token: token) }
         self.redeemPairing = { request in try await pairingService.redeem(request) }
         encoder.dateEncodingStrategy = .millisecondsSince1970
         decoder.dateDecodingStrategy = .millisecondsSince1970
@@ -96,44 +94,282 @@ public struct ReadBoardHTTPRouter: Sendable {
 
         let authorization = request.headers["authorization"] ?? ""
         let token = authorization.hasPrefix("Bearer ") ? String(authorization.dropFirst(7)) : ""
-        guard await authorizeToken(token) else {
+        guard let grantedScopes = await authorizeToken(token) else {
             return failure(401, "unauthorized", "设备令牌无效或已撤销")
+        }
+        if let requiredScope = requiredScope(for: request), !grantedScopes.contains(requiredScope) {
+            return failure(403, "insufficient_scope", "设备没有执行此操作的权限")
         }
 
         do {
             switch (request.method.uppercased(), request.path) {
+            case ("GET", "/api/v1/server/profile"):
+                let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                    ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
+                    ?? "ReadBoard"
+                return json(RemoteServerProfile(apiVersion: ReadBoardAPI.version,
+                    serverName: name, capabilities: services.remoteCapabilities,
+                    grantedScopes: grantedScopes, transportSecurity: "none"))
             case ("POST", "/api/v1/library/page"):
                 return json(try await services.library.page(try decode(ContentQuery.self, request.body)))
             case ("GET", "/api/v1/library/snapshot"):
                 return json(try await services.library.snapshot())
             case ("POST", "/api/v1/library/read"):
-                let value = try decode(ContentStateRequest.self, request.body)
+                let value = try decode(RemoteContentStateRequest.self, request.body)
                 return json(try await services.library.setRead(contentID: value.contentID, isRead: value.value))
             case ("POST", "/api/v1/library/star"):
-                let value = try decode(ContentStateRequest.self, request.body)
+                let value = try decode(RemoteContentStateRequest.self, request.body)
                 return json(try await services.library.setStarred(contentID: value.contentID, isStarred: value.value))
             case ("POST", "/api/v1/library/mark-read"):
                 return json(try await services.library.markRead(filter: try decode(ContentFilter.self, request.body)))
             case ("POST", "/api/v1/content/detail"):
-                let value = try decode(ContentIDRequest.self, request.body)
+                let value = try decode(RemoteContentIDRequest.self, request.body)
                 return json(try await services.contentDetail.detail(contentID: value.contentID))
+
+            case ("GET", "/api/v1/processing/capabilities"):
+                return json(await services.processing.capabilities())
             case ("GET", "/api/v1/sources/catalog"):
                 return json(try await services.sourceCatalog.snapshot())
             case ("POST", "/api/v1/runtime/snapshot"):
-                let value = try decode(RuntimeSnapshotRequest.self, request.body)
+                let value = try decode(RemoteRuntimeSnapshotRequest.self, request.body)
                 return json(await services.runtimeStatus.snapshot(refreshCounts: value.refreshCounts))
+            case ("POST", "/api/v1/runtime/scan"):
+                await services.runtimeStatus.runProcessingScan()
+                return json(RemoteAcknowledgement())
             case ("POST", "/api/v1/processing/submit"):
                 return json(try await services.processing.submit(try decode(ProcessingCommand.self, request.body)))
+            case ("POST", "/api/v1/processing/status"):
+                let value = try decode(RemoteProcessingStatusRequest.self, request.body)
+                return json(try await services.processing.status(requestID: value.requestID))
+
+            case ("GET", "/api/v1/sources/sync-settings"):
+                return json(await services.sourceManagement.syncSettings())
+            case ("POST", "/api/v1/sources/sync-settings"):
+                try await services.sourceManagement.updateSyncSettings(
+                    try decode(SourceSyncSettings.self, request.body))
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/sources/folder/create"):
+                let value = try decode(RemoteNameRequest.self, request.body)
+                return json(try await services.sourceManagement.createFolder(name: value.name))
+            case ("POST", "/api/v1/sources/sync-all"):
+                return json(try await services.sourceManagement.syncAll())
+            case ("POST", "/api/v1/sources/rename"):
+                let value = try decode(RemoteSourceRenameRequest.self, request.body)
+                return json(try await services.sourceManagement.rename(scope: value.scope, name: value.name))
+            case ("POST", "/api/v1/sources/remove"):
+                return json(try await services.sourceManagement.remove(
+                    scope: try decode(SourceScope.self, request.body)))
+            case ("POST", "/api/v1/sources/assign"):
+                let value = try decode(RemoteSourceAssignmentRequest.self, request.body)
+                try await services.sourceManagement.assignSource(
+                    sourceID: value.sourceID, folderID: value.folderID)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/sources/sync"):
+                return json(try await services.sourceManagement.sync(
+                    scope: try decode(SourceScope.self, request.body)))
+            case ("POST", "/api/v1/sources/policy"):
+                let value = try decode(RemoteSourcePolicyRequest.self, request.body)
+                try await services.sourceManagement.setPolicy(
+                    scope: value.scope, key: value.key, enabled: value.enabled)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/sources/backfill"):
+                let value = try decode(RemoteSourceBackfillRequest.self, request.body)
+                return json(try await services.sourceManagement.backfillProcessing(
+                    scope: value.scope, key: value.key))
+            case ("POST", "/api/v1/sources/fetch-mode"):
+                let value = try decode(RemoteSourceFetchModeRequest.self, request.body)
+                try await services.sourceManagement.setFetchMode(scope: value.scope, mode: value.mode)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/sources/redetect-fetch-mode"):
+                try await services.sourceManagement.redetectFetchMode(
+                    scope: try decode(SourceScope.self, request.body))
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/sources/fetch-interval"):
+                let value = try decode(RemoteSourceIntervalRequest.self, request.body)
+                try await services.sourceManagement.setFetchInterval(
+                    scope: value.scope, minutes: value.minutes)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/sources/enabled"):
+                let value = try decode(RemoteSourceEnabledRequest.self, request.body)
+                try await services.sourceManagement.setEnabled(
+                    sourceID: value.sourceID, enabled: value.enabled)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/sources/retention"):
+                let value = try decode(RemoteSourceRetentionRequest.self, request.body)
+                try await services.sourceManagement.setMaximumRetainedContent(
+                    sourceID: value.sourceID, count: value.count)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/sources/refetch-fulltext"):
+                let value = try decode(RemoteSourceRefetchRequest.self, request.body)
+                return json(try await services.sourceManagement.refetchFulltext(
+                    scope: value.scope, fullHistory: value.fullHistory))
+            case ("POST", "/api/v1/sources/retry-fulltext"):
+                let value = try decode(RemoteContentIDRequest.self, request.body)
+                return json(try await services.sourceManagement.retryFulltext(contentID: value.contentID))
+
+            case ("GET", "/api/v1/onboarding/types"):
+                return json(await services.sourceOnboarding.supportedSourceTypes())
+            case ("POST", "/api/v1/onboarding/discover"):
+                let value = try decode(RemoteSourceDiscoveryRequest.self, request.body)
+                return json(try await services.sourceOnboarding.discover(
+                    identifier: value.identifier, suggestedType: value.suggestedType))
+            case ("POST", "/api/v1/onboarding/create"):
+                return json(try await services.sourceOnboarding.create(
+                    request: try decode(SourceCreationRequest.self, request.body)))
+            case ("POST", "/api/v1/onboarding/import"):
+                let value = try decode(RemoteSourceImportRequest.self, request.body)
+                return json(try await services.sourceOnboarding.importSources(
+                    items: value.items, refreshAfterCreation: value.refreshAfterCreation))
+            case ("POST", "/api/v1/onboarding/subscriptions"):
+                let value = try decode(RemotePlatformRequest.self, request.body)
+                return json(try await services.sourceOnboarding.platformSubscriptions(
+                    platform: value.platformID))
+            case ("GET", "/api/v1/onboarding/export-opml"):
+                return json(RemoteStringValue(await services.sourceOnboarding.exportOPML()))
+
+            case ("GET", "/api/v1/exports/rules"):
+                return json(try await services.export.rules())
+            case ("POST", "/api/v1/exports/save"):
+                return json(try await services.export.save(rule: try decode(ExportRuleDTO.self, request.body)))
+            case ("POST", "/api/v1/exports/delete"):
+                let value = try decode(RemoteExportRuleIDRequest.self, request.body)
+                try await services.export.delete(ruleID: value.ruleID)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/exports/stats"):
+                let value = try decode(RemoteExportRuleIDRequest.self, request.body)
+                return json(try await services.export.stats(ruleID: value.ruleID))
+            case ("POST", "/api/v1/exports/preview"):
+                return json(try await services.export.preview(rule: try decode(ExportRuleDTO.self, request.body)))
+            case ("POST", "/api/v1/exports/run"):
+                let value = try decode(RemoteExportRuleIDRequest.self, request.body)
+                return json(try await services.export.run(ruleID: value.ruleID))
+            case ("POST", "/api/v1/exports/force"):
+                let value = try decode(RemoteContentIDRequest.self, request.body)
+                return json(try await services.export.forceExport(contentID: value.contentID))
+
             case ("GET", "/api/v1/admin/dashboard"):
                 return json(await services.administration.dashboardStatistics())
+            case ("GET", "/api/v1/admin/filter-rules"):
+                return json(await services.administration.filterRules())
+            case ("POST", "/api/v1/admin/filter-rules/create"):
+                return json(RemoteBoolValue(await services.administration.createFilterRule(
+                    try decode(FilterRuleRecord.self, request.body))))
+            case ("POST", "/api/v1/admin/filter-rules/update"):
+                await services.administration.updateFilterRule(
+                    try decode(FilterRuleRecord.self, request.body))
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/admin/filter-rules/delete"):
+                let value = try decode(RemoteFilterRuleIDRequest.self, request.body)
+                await services.administration.deleteFilterRule(id: value.id)
+                return json(RemoteAcknowledgement())
+            case ("GET", "/api/v1/admin/processing-failures"):
+                return json(await services.administration.processingFailures())
+            case ("POST", "/api/v1/admin/processing-failures/retry"):
+                let value = try decode(RemoteInt64IDRequest.self, request.body)
+                return json(RemoteBoolValue(await services.administration.retryProcessingFailure(id: value.id)))
+            case ("POST", "/api/v1/admin/processing-failures/ignore"):
+                let value = try decode(RemoteInt64IDRequest.self, request.body)
+                return json(RemoteBoolValue(await services.administration.ignoreProcessingFailure(id: value.id)))
+            case ("POST", "/api/v1/admin/fulltext-failures"):
+                let value = try decode(RemoteLimitRequest.self, request.body)
+                return json(await services.administration.fullTextFailures(limit: value.limit))
             case ("GET", "/api/v1/admin/problems"):
                 return json(await services.administration.operationalProblemCounts())
+
             case ("GET", "/api/v1/auth/status"):
                 return json(await services.authentication.statuses())
+            case ("POST", "/api/v1/auth/begin"):
+                let value = try decode(RemotePlatformRequest.self, request.body)
+                return json(try await services.authentication.beginAuthentication(
+                    platformID: value.platformID))
+            case ("POST", "/api/v1/auth/poll"):
+                let value = try decode(RemoteAuthenticationPollRequest.self, request.body)
+                return json(try await services.authentication.pollAuthentication(
+                    platformID: value.platformID, challengeID: value.challengeID))
+            case ("POST", "/api/v1/auth/sign-out"):
+                let value = try decode(RemotePlatformRequest.self, request.body)
+                try await services.authentication.signOut(platformID: value.platformID)
+                return json(RemoteAcknowledgement())
+
             case ("GET", "/api/v1/configuration"):
                 return json(await services.configuration.snapshot())
+            case ("POST", "/api/v1/configuration/proxy"):
+                await services.configuration.setProxyURL(
+                    try decode(RemoteStringValue.self, request.body).value)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/configuration/feature-flag"):
+                let value = try decode(RemoteConfigurationFlagRequest.self, request.body)
+                await services.configuration.setFeatureFlag(value.id, enabled: value.enabled)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/configuration/pipeline-flag"):
+                let value = try decode(RemoteConfigurationFlagRequest.self, request.body)
+                await services.configuration.setPipelineFlag(value.id, enabled: value.enabled)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/configuration/service-flag"):
+                let value = try decode(RemoteConfigurationFlagRequest.self, request.body)
+                await services.configuration.setServiceFlag(value.id, enabled: value.enabled)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/configuration/source-type-flag"):
+                let value = try decode(RemoteConfigurationFlagRequest.self, request.body)
+                await services.configuration.setSourceTypeFlag(value.id, enabled: value.enabled)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/configuration/llm/save"):
+                return json(RemoteBoolValue(await services.configuration.saveLLMProfile(
+                    try decode(LLMProfileUpdate.self, request.body))))
+            case ("POST", "/api/v1/configuration/llm/add"):
+                await services.configuration.addLLMProfile()
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/configuration/llm/remove"):
+                let value = try decode(RemoteIntIDRequest.self, request.body)
+                await services.configuration.removeLLMProfile(id: value.id)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/configuration/llm/move"):
+                let value = try decode(RemoteMoveRequest.self, request.body)
+                await services.configuration.moveLLMProfile(from: value.from, to: value.to)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/configuration/llm/test"):
+                return json(await services.configuration.testLLMProfile(
+                    try decode(LLMProfileUpdate.self, request.body)))
+            case ("POST", "/api/v1/configuration/llm/models"):
+                let value = try decode(RemoteLLMModelsRequest.self, request.body)
+                return json(try await services.configuration.fetchLLMModels(
+                    profileID: value.profileID, endpoint: value.endpoint, apiKey: value.apiKey))
+            case ("POST", "/api/v1/configuration/dependency-path"):
+                let value = try decode(RemoteDependencyPathRequest.self, request.body)
+                await services.configuration.setDependencyPath(id: value.id, path: value.path)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/configuration/export-platforms"):
+                await services.configuration.updateExportPlatforms(
+                    try decode(ExportPlatformConfiguration.self, request.body))
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/configuration/ai-prompts"):
+                await services.configuration.updateAIPrompts(
+                    try decode(AIPromptConfiguration.self, request.body))
+                return json(RemoteAcknowledgement())
+
             case ("GET", "/api/v1/maintenance"):
                 return json(await services.maintenance.snapshot())
+            case ("POST", "/api/v1/maintenance/policy"):
+                await services.maintenance.updatePolicy(try decode(CleanupPolicy.self, request.body))
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/maintenance/cleanup"):
+                return json(RemoteStringValue(await services.maintenance.runCleanup()))
+            case ("POST", "/api/v1/maintenance/backup"):
+                return json(await services.maintenance.createBackup())
+            case ("POST", "/api/v1/maintenance/backup/restore"):
+                let value = try decode(RemoteStringIDRequest.self, request.body)
+                try await services.maintenance.restoreBackup(id: value.id)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/maintenance/trash/restore"):
+                let value = try decode(RemoteStringIDRequest.self, request.body)
+                return json(await services.maintenance.restoreTrash(id: value.id))
+            case ("POST", "/api/v1/maintenance/trash/delete"):
+                let value = try decode(RemoteStringIDRequest.self, request.body)
+                await services.maintenance.deleteTrash(id: value.id)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/maintenance/trash/clear"):
+                await services.maintenance.clearTrash()
+                return json(RemoteAcknowledgement())
             default:
                 return failure(404, "not_found", "接口不存在")
             }
@@ -142,6 +378,29 @@ public struct ReadBoardHTTPRouter: Sendable {
         } catch {
             return failure(500, "operation_failed", error.localizedDescription)
         }
+    }
+
+    private func requiredScope(for request: ReadBoardHTTPRequest) -> RemoteAccessScope? {
+        let path = request.path
+        if path == "/api/v1/server/profile" { return nil }
+        if path.hasPrefix("/api/v1/library/") || path.hasPrefix("/api/v1/content/") {
+            return ["/api/v1/library/read", "/api/v1/library/star", "/api/v1/library/mark-read"]
+                .contains(path) ? .updateReadingState : .readLibrary
+        }
+        if path.hasPrefix("/api/v1/processing/") {
+            return path == "/api/v1/processing/capabilities" ? .manageOperations : .runProcessing
+        }
+        if path.hasPrefix("/api/v1/runtime/") || path.hasPrefix("/api/v1/admin/") {
+            return path == "/api/v1/runtime/scan" ? .runProcessing : .manageOperations
+        }
+        if path.hasPrefix("/api/v1/sources/") || path.hasPrefix("/api/v1/onboarding/") {
+            return .manageSources
+        }
+        if path.hasPrefix("/api/v1/auth/") { return .manageAuthentication }
+        if path.hasPrefix("/api/v1/exports/") { return .manageExports }
+        if path.hasPrefix("/api/v1/configuration") { return .manageConfiguration }
+        if path.hasPrefix("/api/v1/maintenance") { return .manageMaintenance }
+        return nil
     }
 
     private func decode<T: Decodable>(_ type: T.Type, _ data: Data) throws -> T {
