@@ -1,59 +1,15 @@
 import SwiftUI
 import WebKit
 import QuartzCore
-
-/// 手动媒体处理统一使用第一个非空音频地址。
-/// 轻量列表项不携带 audioUrl，阅读器打开后或按需查库才能取得真实直链。
-enum MediaAudioURLResolver {
-    nonisolated static func preferred(_ candidates: String?...) -> String? {
-        for candidate in candidates {
-            guard let candidate else { continue }
-            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
-        }
-        return nil
-    }
-}
-
-/// 中栏“重新处理”与 Worker 使用相同的包含关系，避免同一正文重复提交给 LLM。
-enum ManualReprocessStep: Equatable {
-    case translateFull
-    case scoreWithSummary
-    case summarize
-    case transcribe
-}
-
-enum ManualReprocessPlanner {
-    nonisolated static func steps(
-        policy: PipelinePolicy,
-        isMedia: Bool,
-        isChineseMedia: Bool
-    ) -> [ManualReprocessStep] {
-        var result: [ManualReprocessStep] = []
-
-        // 翻译整合调用可按 policy 同时回写评分和摘要；不再另外重复请求。
-        if policy.autoTranslate && !isChineseMedia {
-            result.append(.translateFull)
-        } else if policy.autoScore {
-            // score 的固定 JSON 已包含摘要并会一起写库。
-            result.append(.scoreWithSummary)
-        } else if policy.autoSummarize && !(isMedia && policy.autoTranscribe) {
-            // 媒体转录结束后会基于转录稿生成摘要，不先对简介重复摘要。
-            result.append(.summarize)
-        }
-
-        if policy.autoTranscribe && isMedia {
-            result.append(.transcribe)
-        }
-        return result
-    }
-}
+import ReadBoardContract
 
 public struct ContentView: View {
-    @StateObject private var vm = ContentViewModel()
+    private let services: ReadBoardServices
+    @StateObject private var vm: ContentViewModel
+    @StateObject private var sourceCatalog: SourceCatalogStore
     @EnvironmentObject private var appTab: AppTab
     @Environment(\.openSettings) private var openSettings
-    @StateObject private var issueCenter = IssueCenterStore()
+    @StateObject private var issueCenter: IssueCenterStore
     @State private var showIssueCenter = false
     @FocusState private var listFocused: Bool
     @FocusState private var searchFocused: Bool
@@ -65,6 +21,19 @@ public struct ContentView: View {
     @AppStorage("list.showDate") private var listShowDate: Bool = true
     @AppStorage("list.unreadBold") private var listUnreadBold: Bool = true
     @AppStorage("list.dateFormat") private var listDateFormat: String = "absolute"
+
+    public init(services: ReadBoardServices = .live) {
+        self.services = services
+        _vm = StateObject(wrappedValue: ContentViewModel(library: services.library))
+        _sourceCatalog = StateObject(
+            wrappedValue: SourceCatalogStore(gateway: services.sourceCatalog))
+        _issueCenter = StateObject(wrappedValue: IssueCenterStore(
+            sourceCatalog: services.sourceCatalog,
+            runtimeStatus: services.runtimeStatus,
+            administration: services.administration,
+            authentication: services.authentication,
+            configuration: services.configuration))
+    }
 
     public var body: some View {
         NavigationSplitView {
@@ -103,6 +72,10 @@ public struct ContentView: View {
         .sheet(isPresented: $showIssueCenter) {
             IssueCenterView(
                 store: issueCenter,
+                sourceCatalog: services.sourceCatalog,
+                sourceManagement: services.sourceManagement,
+                runtimeStatus: services.runtimeStatus,
+                administration: services.administration,
                 onOpenSettings: { route in
                     SettingsNavigationStore.shared.request(route)
                     openSettings()
@@ -115,6 +88,7 @@ public struct ContentView: View {
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
             }
         }
+        .task { await sourceCatalog.monitor() }
         .onReceive(NotificationCenter.default.publisher(for: .pipelinePendingUpdated)) { _ in
             Task { await issueCenter.refresh() }
         }
@@ -148,7 +122,6 @@ public struct ContentView: View {
         NSWorkspace.shared.open(url)
     }
     // MARK: 左栏（文件夹→源 两级树，订阅源视角）
-    @StateObject private var sourceStore = SourceStore.shared
     @State private var showAddSource = false
     @State private var showImportSummary = false   // OPML 解析后弹汇总确认页（与订阅管理页同源）
     @State private var importPlan: OPMLImportPlan? = nil
@@ -294,13 +267,25 @@ public struct ContentView: View {
         }
         .background(Color.rbBgSidebar)   // 左栏略灰分出层次（纸墨留白）
         .sheet(isPresented: $showAddSource) {
-            AddSourceSheet(store: sourceStore)
-                .onDisappear { vm.loadAll() }
+            AddSourceSheet(
+                onboarding: services.sourceOnboarding,
+                sourceCatalog: services.sourceCatalog,
+                sourceManagement: services.sourceManagement)
+                .onDisappear {
+                    vm.loadAll()
+                    Task { await sourceCatalog.refresh() }
+                }
         }
         .sheet(isPresented: $showImportSummary) {
             if let plan = importPlan {
-                OPMLImportSummary(store: sourceStore, plan: plan)
-                    .onDisappear { vm.loadAll() }
+                OPMLImportSummary(
+                    plan: plan,
+                    onboarding: services.sourceOnboarding,
+                    sourceCatalog: services.sourceCatalog)
+                    .onDisappear {
+                        vm.loadAll()
+                        Task { await sourceCatalog.refresh() }
+                    }
             }
         }
         .alert("新建文件夹", isPresented: $showAddFolder) {
@@ -308,8 +293,10 @@ public struct ContentView: View {
             Button("创建") {
                 let name = newFolderName.trimmingCharacters(in: .whitespaces)
                 if !name.isEmpty {
-                    sourceStore.addFolder(name: name)
-                    vm.loadAll()
+                    Task {
+                        _ = try? await services.sourceManagement.createFolder(name: name)
+                        vm.loadAll()
+                    }
                 }
                 newFolderName = ""
             }
@@ -326,9 +313,13 @@ public struct ContentView: View {
             Button("保存") {
                 let name = renameInput.trimmingCharacters(in: .whitespaces)
                 if !name.isEmpty, let t = renameTarget {
-                    if t.kind == "source" { sourceStore.renameSource(id: t.id, name: name) }
-                    else { sourceStore.renameFolder(id: t.id, name: name) }
-                    vm.loadAll()
+                    let scope = SourceScope(
+                        kind: t.kind == "source" ? .source : .folder,
+                        id: t.id)
+                    Task {
+                        _ = try? await services.sourceManagement.rename(scope: scope, name: name)
+                        vm.loadAll()
+                    }
                 }
                 renameTarget = nil
             }
@@ -343,11 +334,12 @@ public struct ContentView: View {
                 guard let target = deleteSourceTarget else { return }
                 deleteSourceTarget = nil
                 Task {
-                    let deleted = await sourceStore.removeSource(id: target.id)
+                    let result = try? await services.sourceManagement.remove(
+                        scope: SourceScope(kind: .source, id: target.id))
                     if vm.selectedItem?.feedId == target.id { vm.selectedItem = nil }
                     if vm.selectedFilter == "source_id=\(target.id)" { vm.selectedFilter = nil }
                     vm.loadAll()
-                    vm.showToast("已删除「\(target.name)」及其 \(deleted) 条内容")
+                    vm.showToast("已删除「\(target.name)」及其 \(result?.affectedCount ?? 0) 条内容")
                 }
             }
         } message: {
@@ -362,23 +354,19 @@ public struct ContentView: View {
         )) {
             Button(pendingBackfill?.action == "fulltext" ? "重提所有历史全文" : "处理所有历史内容") {
                 if let p = pendingBackfill {
+                    let scope = SourceScope(
+                        kind: p.kind == "folder" ? .folder : .source,
+                        id: p.id)
                     if p.action == "fulltext" {
-                        // detached 后台跑——fetchAndStore spawn node 进程 + 超时轮询 Thread.sleep，
-                        // 在 MainActor 上会冻结 UI 崩溃/卡死（WeChat 文件夹实测崩过）
-                        if p.kind == "folder" {
-                            Task.detached { await PipelineWorker.shared.refetchFullTextForFolder(folderId: p.id) }
-                        } else {
-                            Task.detached { await PipelineWorker.shared.refetchFullTextForSource(onlySourceId: p.id) }
+                        Task {
+                            _ = try? await services.sourceManagement.refetchFulltext(
+                                scope: scope, fullHistory: false)
                         }
-                    } else {
-                        if let key = p.policyKey {
-                            if p.kind == "folder" {
-                                if sourceStore.setHistoricalItemsEnabled(folderId: p.id, key: key) {
-                                    Task.detached { await PipelineWorker.shared.backfillHistoryForFolder(folderId: p.id) }
-                                }
-                            } else if sourceStore.setHistoricalItemsEnabled(sourceId: p.id, key: key) {
-                                Task.detached { await PipelineWorker.shared.backfillHistory(onlySourceId: p.id) }
-                            }
+                    } else if let rawKey = p.policyKey,
+                              let key = SourcePolicyKey(rawValue: rawKey) {
+                        Task {
+                            _ = try? await services.sourceManagement.backfillProcessing(
+                                scope: scope, key: key)
                         }
                     }
                 }
@@ -403,7 +391,7 @@ public struct ContentView: View {
             }
             Task { await issueCenter.refresh() }
         }
-        .onChange(of: sourceStore.sources) { _, _ in
+        .onChange(of: sourceCatalog.sources) { _, _ in
             Task { await issueCenter.refresh() }
         }
     }
@@ -702,7 +690,7 @@ public struct ContentView: View {
             }
             Divider()
             // 管线开关快速切换
-            if let src = sourceStore.sources.first(where: { $0.id == sid }) {
+            if let src = sourceCatalog.sources.first(where: { $0.id == sid }) {
                 Menu {
                     pipelineToggleMenu(src: src)
                 } label: {
@@ -715,15 +703,28 @@ public struct ContentView: View {
                 }
                 // 重新提取全文（该源全部文章重提）
                 Button {
-                    Task { await FullTextFetcher.shared.refetchSourceFulltext(sourceId: sid) }
+                    Task {
+                        _ = try? await services.sourceManagement.refetchFulltext(
+                            scope: SourceScope(kind: .source, id: sid), fullHistory: true)
+                    }
                 } label: {
                     Label("重新提取全文", systemImage: "arrow.triangle.2.circlepath")
                 }
                 Divider()
                 Menu {
-                    Button("无文件夹") { sourceStore.assignSource(sourceId: sid, folderId: nil); vm.loadAll() }
-                    ForEach(sourceStore.folders) { f in
-                        Button(f.name) { sourceStore.assignSource(sourceId: sid, folderId: f.id); vm.loadAll() }
+                    Button("无文件夹") {
+                        Task {
+                            try? await services.sourceManagement.assignSource(sourceID: sid, folderID: nil)
+                            vm.loadAll()
+                        }
+                    }
+                    ForEach(sourceCatalog.folders) { f in
+                        Button(f.name) {
+                            Task {
+                                try? await services.sourceManagement.assignSource(sourceID: sid, folderID: f.id)
+                                vm.loadAll()
+                            }
+                        }
                     }
                 } label: {
                     Label("移动到文件夹", systemImage: "folder")
@@ -750,7 +751,7 @@ public struct ContentView: View {
                 Label("全部标为已读", systemImage: "checkmark.circle")
             }
             Divider()
-            if let folder = sourceStore.folders.first(where: { $0.id == fid }) {
+            if let folder = sourceCatalog.folders.first(where: { $0.id == fid }) {
                 Menu {
                     folderPipelineMenu(folder: folder)
                 } label: {
@@ -765,12 +766,21 @@ public struct ContentView: View {
             }
             // 重新提取全文（对文件夹内所有源批量重提）
             Button {
-                Task { await FullTextFetcher.shared.refetchFolderFulltext(folderId: fid) }
+                Task {
+                    _ = try? await services.sourceManagement.refetchFulltext(
+                        scope: SourceScope(kind: .folder, id: fid), fullHistory: true)
+                }
             } label: {
                 Label("重新提取全文", systemImage: "arrow.triangle.2.circlepath")
             }
             Divider()
-            Button(role: .destructive) { sourceStore.removeFolder(id: fid); vm.loadAll() } label: {
+            Button(role: .destructive) {
+                Task {
+                    _ = try? await services.sourceManagement.remove(
+                        scope: SourceScope(kind: .folder, id: fid))
+                    vm.loadAll()
+                }
+            } label: {
                 Label("删除文件夹", systemImage: "trash")
             }
         }
@@ -778,199 +788,48 @@ public struct ContentView: View {
 
     /// 重新处理（右键菜单用）：与 Worker 共用 contentId 锁，并按包含关系合并 LLM 调用。
     private func reprocessItem(item: ContentItem) {
-        guard PipelineWorker.shared.tryLockContent(item.id) else {
-            vm.showToast("该篇正在处理中，请稍候")
-            return
-        }
-        ContentProcessingStateStore.shared.enqueue(
-            contentId: item.id, title: item.title, operation: "内容处理")
-        Task {
-            defer { PipelineWorker.shared.unlockContent(item.id) }
-            let contentId = item.id
-            let loaded = await Task.detached(priority: .userInitiated) {
-                Database.shared.fetchContentBody(id: contentId)
-            }.value
-            let body = PipelineWorker.resolveBody(
-                md: loaded?.contentMd ?? item.contentMd,
-                html: loaded?.contentHtml ?? item.contentHtml,
-                excerpt: item.excerpt)
-            let audioUrl = MediaAudioURLResolver.preferred(loaded?.audioUrl, item.audioUrl)
-            let policy = await Task.detached(priority: .utility) {
-                Database.shared.effectivePolicyFor(contentId: contentId)
-            }.value
-            let pipeline = LLMPipeline()
-            let isMedia = item.ctype == "podcast" || item.ctype == "video"
-                || item.ctype == "youtube" || audioUrl != nil
-            let isChineseMedia = isMedia && ContentLanguage.isChinese(
-                declared: item.language, fallbackText: item.title + "\n" + body)
-            let steps = ManualReprocessPlanner.steps(
-                policy: policy, isMedia: isMedia, isChineseMedia: isChineseMedia)
-            var succeeded = false
-
-            for step in steps {
-                guard !Task.isCancelled else { break }
-                let ok: Bool
-                switch step {
-                case .translateFull:
-                    if pipeline.isAvailable {
-                        ok = (try? await PipelineWorker.scheduleManualLLM {
-                            await ContentProcessingStateStore.shared.begin(
-                                contentId: item.id, message: "翻译中…")
-                            return await pipeline.translateFull(
-                                contentId: item.id, title: item.title, body: body, policy: policy)
-                        }) ?? false
-                    } else {
-                        ok = false
-                    }
-                case .scoreWithSummary:
-                    if pipeline.isAvailable {
-                        ok = (try? await PipelineWorker.scheduleManualLLM {
-                            await ContentProcessingStateStore.shared.begin(
-                                contentId: item.id, message: "评分与摘要中…")
-                            return await pipeline.score(
-                                contentId: item.id, title: item.title, body: body)
-                        }) ?? false
-                    } else {
-                        ok = false
-                    }
-                case .summarize:
-                    if pipeline.isAvailable {
-                        ok = (try? await PipelineWorker.scheduleManualLLM {
-                            await ContentProcessingStateStore.shared.begin(
-                                contentId: item.id, message: "摘要中…")
-                            return await pipeline.summarize(
-                                contentId: item.id, title: item.title, body: body)
-                        }) ?? false
-                    } else {
-                        ok = false
-                    }
-                case .transcribe:
-                    let transcriber = TranscribePipeline()
-                    ok = (try? await PipelineWorker.scheduleManualTranscription {
-                        await ContentProcessingStateStore.shared.begin(
-                            contentId: item.id, message: "转录中…")
-                        return await transcriber.transcribe(
-                            contentId: item.id, title: item.title, audioUrl: audioUrl,
-                            pageUrl: item.url, language: item.language)
-                    }) ?? false
-                }
-                succeeded = succeeded || ok
-            }
-
-            ContentProcessingStateStore.shared.finish(
-                contentId: item.id,
-                message: steps.isEmpty ? "无已开启的内容处理项" : (succeeded ? "✅ 内容处理完成" : "❌ 内容处理失败"),
-                succeeded: steps.isEmpty || succeeded)
-            if succeeded {
-                await ExportService.shared.runPending(trigger: "ready", contentId: item.id)
-                NotificationCenter.default.post(name: .contentUpdated, object: nil)
-            }
-        }
+        ProcessingCommandCoordinator.start(
+            gateway: services.processing,
+            contentID: item.id,
+            title: item.title,
+            operation: .allEnabled)
     }
 
     /// 单篇文章跑管线（评分/摘要/翻译/转录）——右键菜单调用
     private func runPipelineForItem(item: ContentItem, type: String) {
-        guard PipelineWorker.shared.tryLockContent(item.id) else {
-            vm.showToast("该篇正在处理中，请稍候")
+        guard let operation = ProcessingOperation(rawValue: type) else {
+            vm.showToast("不支持的处理类型")
             return
         }
-        let operation: String
-        switch type {
-        case "score": operation = "AI 评分"
-        case "summarize": operation = "AI 摘要"
-        case "translate": operation = "AI 翻译"
-        case "transcribe": operation = "AI 转录"
-        default: operation = "手动处理"
-        }
-        ContentProcessingStateStore.shared.enqueue(
-            contentId: item.id, title: item.title, operation: operation)
-        Task {
-            defer { PipelineWorker.shared.unlockContent(item.id) }
-            let pipeline = LLMPipeline()
-            let transcriber = TranscribePipeline()
-            let contentId = item.id
-            let loaded = await Task.detached(priority: .userInitiated) {
-                Database.shared.fetchContentBody(id: contentId)
-            }.value
-            let body = PipelineWorker.resolveBody(
-                md: loaded?.contentMd ?? item.contentMd,
-                html: loaded?.contentHtml ?? item.contentHtml,
-                excerpt: item.excerpt)
-            let audioUrl = MediaAudioURLResolver.preferred(loaded?.audioUrl, item.audioUrl)
-            let ok: Bool
-            switch type {
-            case "score":
-                ok = (try? await PipelineWorker.scheduleManualLLM {
-                    await ContentProcessingStateStore.shared.begin(
-                        contentId: item.id, message: "AI 评分中…")
-                    return await pipeline.score(contentId: item.id, title: item.title, body: body)
-                }) ?? false
-            case "summarize":
-                ok = (try? await PipelineWorker.scheduleManualLLM {
-                    await ContentProcessingStateStore.shared.begin(
-                        contentId: item.id, message: "摘要中…")
-                    return await pipeline.summarize(contentId: item.id, title: item.title, body: body)
-                }) ?? false
-            case "translate":
-                // 媒体项使用简介专用翻译；非媒体项翻译正文。
-                if item.ctype == "podcast" || item.ctype == "video" || item.ctype == "youtube" || audioUrl != nil {
-                    let html = loaded?.contentHtml ?? item.contentHtml ?? item.excerpt ?? body
-                    ok = (try? await PipelineWorker.scheduleManualLLM {
-                        await ContentProcessingStateStore.shared.begin(
-                            contentId: item.id, message: "翻译中…")
-                        return await pipeline.translateExcerpt(
-                            contentId: item.id, title: item.title, contentHtml: html)
-                    }) ?? false
-                } else {
-                    ok = (try? await PipelineWorker.scheduleManualLLM {
-                        await ContentProcessingStateStore.shared.begin(
-                            contentId: item.id, message: "翻译中…")
-                        return await pipeline.translate(contentId: item.id, title: item.title, body: body)
-                    }) ?? false
-                }
-            case "transcribe":
-                ok = (try? await PipelineWorker.scheduleManualTranscription {
-                    await ContentProcessingStateStore.shared.begin(
-                        contentId: item.id, message: "转录中…")
-                    return await transcriber.transcribe(contentId: item.id, title: item.title,
-                                                  audioUrl: audioUrl, pageUrl: item.url,
-                                                  language: item.language)
-                }) ?? false
-            default:
-                ok = false
-            }
-            let failure = pipeline.lastError ?? "未知错误"
-            ContentProcessingStateStore.shared.finish(
-                contentId: item.id,
-                message: ok ? "✅ \(operation)完成" : "❌ \(operation)失败：\(failure)",
-                succeeded: ok)
-            if ok {
-                await ExportService.shared.runPending(trigger: "ready", contentId: item.id)
-                NotificationCenter.default.post(name: .contentUpdated, object: nil)
-            }
-        }
+        ProcessingCommandCoordinator.start(
+            gateway: services.processing,
+            contentID: item.id,
+            title: item.title,
+            operation: operation)
     }
 
     /// 删除单篇转录稿（同时清理转录 job，方便按 auto_transcribe 重新转录）
     private func deleteTranscriptForItem(item: ContentItem) {
         guard item.hasTranscript else { return }
-        Database.shared.execute(
-            "DELETE FROM content_job WHERE content_id = ? AND jtype = 'transcribe'",
-            params: [item.id])
-        let ok = Database.shared.execute(
-            "UPDATE content SET llm_transcript_md = NULL WHERE id = ?",
-            params: [item.id])
-        if ok {
-            vm.showToast("已删除转录稿")
-            NotificationCenter.default.post(name: .contentUpdated, object: nil)
+        ProcessingCommandCoordinator.start(
+            gateway: services.processing,
+            contentID: item.id,
+            title: item.title,
+            operation: .deleteTranscript,
+            trackProgress: false
+        ) { snapshot in
+            vm.showToast(snapshot.message)
         }
     }
 
     /// 源级管线开关菜单（打勾状态实时反映）
     @ViewBuilder
-    private func pipelineToggleMenu(src: FeedSource) -> some View {
+    private func pipelineToggleMenu(src: SourceCatalogItem) -> some View {
         Button {
-            Task { await PipelineWorker.shared.backfillHistory(onlySourceId: src.id) }
+            Task {
+                _ = try? await services.sourceManagement.backfillProcessing(
+                    scope: SourceScope(kind: .source, id: src.id), key: nil)
+            }
         } label: {
             Label("重新处理本源全部", systemImage: "arrow.triangle.2.circlepath")
         }
@@ -983,10 +842,17 @@ public struct ContentView: View {
         }
     }
 
-    private func pipelineMenuItem(_ label: String, key: String, on: Bool, src: FeedSource) -> some View {
+    private func pipelineMenuItem(_ label: String, key: String, on: Bool, src: SourceCatalogItem) -> some View {
         Button {
             let turningOn = !on
-            sourceStore.setPolicy(id: src.id, key: key, value: turningOn)
+            if let policyKey = SourcePolicyKey(rawValue: key) {
+                Task {
+                    try? await services.sourceManagement.setPolicy(
+                        scope: SourceScope(kind: .source, id: src.id),
+                        key: policyKey,
+                        enabled: turningOn)
+                }
+            }
             // 开启时弹「如何处理历史数据」（和订阅源页一致）
             if turningOn {
                 pendingBackfill = ("source", src.id, src.name, label, "pipeline", key)
@@ -999,26 +865,38 @@ public struct ContentView: View {
 
     /// 抓取设置菜单（fetch_mode + 频率）
     @ViewBuilder
-    private func fetchSettingsMenu(src: FeedSource) -> some View {
+    private func fetchSettingsMenu(src: SourceCatalogItem) -> some View {
         Menu("提取全文：\(src.fetchModeAuto ? "自动（\(fulltextDisplayName(for: src))）" : fulltextDisplayName(for: src))") {
             // ── 自动检测 ──
             Button {
-                Task { await sourceStore.setFetchMode(id: src.id, mode: "auto") }
+                Task {
+                    try? await services.sourceManagement.setFetchMode(
+                        scope: SourceScope(kind: .source, id: src.id), mode: .automatic)
+                }
             } label: {
                 HStack {
                     Image(systemName: src.fetchModeAuto ? "checkmark" : "arrow.triangle.2.circlepath")
                     Text("自动（\(fulltextDisplayName(for: src))）")
                 }
             }
-            Button("重新检测") { Task { await sourceStore.redetectFetchMode(id: src.id) } }
+            Button("重新检测") {
+                Task {
+                    try? await services.sourceManagement.redetectFetchMode(
+                        scope: SourceScope(kind: .source, id: src.id))
+                }
+            }
             Divider()
             // ── 五层级手动选择 ──
             ForEach(fetchModes(for: src.stype), id: \.rawValue) { fm in
                 Button {
-                    Task { await sourceStore.setFetchMode(id: src.id, mode: fm.rawValue) }
+                    guard let mode = SourceFetchMode(rawValue: fm.rawValue) else { return }
+                    Task {
+                        try? await services.sourceManagement.setFetchMode(
+                            scope: SourceScope(kind: .source, id: src.id), mode: mode)
+                    }
                 } label: {
                     HStack {
-                        Image(systemName: (!src.fetchModeAuto && src.fetchMode == fm) ? "checkmark" : "")
+                        Image(systemName: (!src.fetchModeAuto && src.localFetchMode == fm) ? "checkmark" : "")
                             .frame(width: 12)
                         Text(fulltextDisplayName(for: src, mode: fm))
                     }
@@ -1027,7 +905,12 @@ public struct ContentView: View {
         }
         Menu("抓取频率：\(src.fetchIntervalMin < 60 ? "\(src.fetchIntervalMin)分钟" : "\(src.fetchIntervalMin/60)小时")") {
             ForEach([5, 15, 30, 60, 120, 360, 720], id: \.self) { m in
-                Button { sourceStore.setFetchInterval(id: src.id, minutes: m) } label: {
+                Button {
+                    Task {
+                        try? await services.sourceManagement.setFetchInterval(
+                            scope: SourceScope(kind: .source, id: src.id), minutes: m)
+                    }
+                } label: {
                     Label(m < 60 ? "\(m) 分钟" : "\(m/60) 小时",
                           systemImage: src.fetchIntervalMin == m ? "checkmark" : "")
                 }
@@ -1035,21 +918,14 @@ public struct ContentView: View {
         }
     }
 
-    private func fulltextDisplayName(for src: FeedSource, mode: FetchMode? = nil) -> String {
-        let actual = mode ?? src.fetchMode
-        guard actual == .externalFulltext,
-              let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype) else {
-            return actual.displayName
-        }
-        return connector.fulltextDisplayName
+    private func fulltextDisplayName(for src: SourceCatalogItem, mode: FetchMode? = nil) -> String {
+        src.localFetchModeDisplayName(mode)
     }
 
     /// 平台源只显示自己的字幕路径与「仅摘要」；普通源不暴露平台专属模式。
     private func fetchModes(for sourceType: String) -> [FetchMode] {
-        let connectorMode = ReadBoardSourceConnectorRegistry.shared
-            .connector(for: sourceType)?.fulltextMode
-        if let platformMode = FetchMode.platformDefault(for: sourceType) ?? connectorMode {
-            return [platformMode, .summary]
+        if let source = sourceCatalog.sources.first(where: { $0.stype == sourceType }) {
+            return source.localAvailableFetchModes
         }
         return FetchMode.allCases.filter(\.isUserSelectable)
     }
@@ -1058,7 +934,7 @@ public struct ContentView: View {
 
     /// 文件夹内所有源的 fetch_interval_min 是否全一致；一致返回该值
     private func folderUniformInterval(_ fid: Int64) -> Int? {
-        let intervals = sourceStore.sources(inFolder: fid).map { $0.fetchIntervalMin }
+        let intervals = sourceCatalog.sources(inFolder: fid).map { $0.fetchIntervalMin }
         guard let first = intervals.first else { return nil }
         return intervals.allSatisfy { $0 == first } ? first : nil
     }
@@ -1066,17 +942,17 @@ public struct ContentView: View {
     /// 文件夹内所有源的「提取全文」状态是否全一致（设置状态 + 实际模式都一致才算）。
     /// 返回 ("auto", 模式) / ("manual", 模式) / ("off", nil) / nil（不一致→「按订阅源设置」）。
     private func folderUniformFetchMode(_ fid: Int64) -> (kind: String, mode: FetchMode?)? {
-        let srcs = sourceStore.sources(inFolder: fid)
+        let srcs = sourceCatalog.sources(inFolder: fid)
         guard !srcs.isEmpty else { return nil }
         // 全部自动（fetchModeAuto=true）→ 还要实际模式全相同才算一致（各源探测结果不同=混合=按订阅源设置）
         if srcs.allSatisfy({ $0.fetchModeAuto }) {
-            let modes = srcs.map { $0.fetchMode }
+            let modes = srcs.map { $0.localFetchMode }
             guard let first = modes.first, modes.allSatisfy({ $0 == first }) else { return nil }
             return ("auto", first)
         }
         // 全部手动（fetchModeAuto=false）+ 模式相同 = 一致的手动模式
         if srcs.allSatisfy({ !$0.fetchModeAuto }) {
-            let modes = srcs.map { $0.fetchMode }
+            let modes = srcs.map { $0.localFetchMode }
             guard let first = modes.first, modes.allSatisfy({ $0 == first }) else { return nil }
             return ("manual", first)
         }
@@ -1097,7 +973,10 @@ public struct ContentView: View {
         Menu("提取全文：\(folderFetchModeLabel(fid, uniform: uniformMode))") {
             // 自动（打钩：全组都是自动）
             Button {
-                Task { await sourceStore.setFolderFetchModeAuto(folderId: fid) }
+                Task {
+                    try? await services.sourceManagement.setFetchMode(
+                        scope: SourceScope(kind: .folder, id: fid), mode: .automatic)
+                }
             } label: {
                 HStack {
                     Image(systemName: uniformMode?.kind == "auto" ? "checkmark" : "arrow.triangle.2.circlepath")
@@ -1105,12 +984,21 @@ public struct ContentView: View {
                 }
             }
             // 重新检测（始终提供，对全组批量探测）
-            Button("重新检测") { Task { await sourceStore.redetectFolderFetchMode(folderId: fid) } }
+            Button("重新检测") {
+                Task {
+                    try? await services.sourceManagement.redetectFetchMode(
+                        scope: SourceScope(kind: .folder, id: fid))
+                }
+            }
             Divider()
             // 五层级手动选择（打钩：全组都是该手动模式）
             ForEach(FetchMode.allCases.filter(\.isUserSelectable), id: \.rawValue) { fm in
                 Button {
-                    sourceStore.setFolderFetchMode(folderId: fid, mode: fm)
+                    guard let mode = SourceFetchMode(rawValue: fm.rawValue) else { return }
+                    Task {
+                        try? await services.sourceManagement.setFetchMode(
+                            scope: SourceScope(kind: .folder, id: fid), mode: mode)
+                    }
                 } label: {
                     HStack {
                         Image(systemName: (uniformMode?.kind == "manual" && uniformMode?.mode == fm) ? "checkmark" : "")
@@ -1130,7 +1018,12 @@ public struct ContentView: View {
         // ── 抓取频率 ──
         Menu("抓取频率：\(uniformInterval != nil ? (uniformInterval! < 60 ? "\(uniformInterval!)分钟" : "\(uniformInterval!/60)小时") : "按订阅源设置")") {
             ForEach([5, 15, 30, 60, 120, 360, 720], id: \.self) { m in
-                Button { sourceStore.setFolderFetchInterval(folderId: fid, minutes: m) } label: {
+                Button {
+                    Task {
+                        try? await services.sourceManagement.setFetchInterval(
+                            scope: SourceScope(kind: .folder, id: fid), minutes: m)
+                    }
+                } label: {
                     Label(m < 60 ? "\(m) 分钟" : "\(m/60) 小时",
                           systemImage: uniformInterval == m ? "checkmark" : "")
                 }
@@ -1157,9 +1050,12 @@ public struct ContentView: View {
 
     /// 文件夹级管线菜单（打钩显示组内一致性：全开=钩，全关=不钩，不一致=「按订阅源设置」不钩）
     @ViewBuilder
-    private func folderPipelineMenu(folder: Folder) -> some View {
+    private func folderPipelineMenu(folder: SourceFolderItem) -> some View {
         Button {
-            Task { await PipelineWorker.shared.backfillHistoryForFolder(folderId: folder.id) }
+            Task {
+                _ = try? await services.sourceManagement.backfillProcessing(
+                    scope: SourceScope(kind: .folder, id: folder.id), key: nil)
+            }
         } label: {
             Label("重新处理本夹全部", systemImage: "arrow.triangle.2.circlepath")
         }
@@ -1172,8 +1068,8 @@ public struct ContentView: View {
 
     /// 文件夹内所有源某管线键的值是否全一致；一致返回该值（true/false），不一致返回 nil
     private func folderUniformPolicy(_ fid: Int64, key: String) -> Bool? {
-        let vals = sourceStore.sources(inFolder: fid).map { src -> Bool in
-            let p = PipelinePolicy.from(configJson: src.config)
+        let vals = sourceCatalog.sources(inFolder: fid).map { src -> Bool in
+            let p = src.policy
             switch key {
             case "auto_score": return p.autoScore
             case "auto_translate": return p.autoTranslate
@@ -1186,7 +1082,7 @@ public struct ContentView: View {
         return vals.allSatisfy { $0 == first } ? first : nil
     }
 
-    private func folderPipelineItem(_ label: String, key: String, folder: Folder) -> some View {
+    private func folderPipelineItem(_ label: String, key: String, folder: SourceFolderItem) -> some View {
         let uniform = folderUniformPolicy(folder.id, key: key)
         // 一致时：值即组内统一值；不一致时：nil（显示「按订阅源设置」不钩）
         let isOn = uniform ?? false
@@ -1194,7 +1090,14 @@ public struct ContentView: View {
         return Button {
             // 切换目标：当前非全开则全设开，当前全开则全设关（不一致时默认全设开）
             let turningOn = !(uniform ?? false)
-            sourceStore.setFolderPolicy(id: folder.id, key: key, value: turningOn)
+            if let policyKey = SourcePolicyKey(rawValue: key) {
+                Task {
+                    try? await services.sourceManagement.setPolicy(
+                        scope: SourceScope(kind: .folder, id: folder.id),
+                        key: policyKey,
+                        enabled: turningOn)
+                }
+            }
             // 开启时弹「如何处理历史数据」（和订阅源页一致）
             if turningOn {
                 pendingBackfill = ("folder", folder.id, folder.name, label, "pipeline", key)
@@ -1212,32 +1115,37 @@ public struct ContentView: View {
     // MARK: 左栏操作辅助
 
     private func refreshSource(_ sid: Int64) async {
-        if let src = sourceStore.sources.first(where: { $0.id == sid }) {
-            _ = try? await sourceStore.syncOne(src)
-            vm.loadAll()
-        }
+        _ = try? await services.sourceManagement.sync(
+            scope: SourceScope(kind: .source, id: sid))
+        vm.loadAll()
     }
 
     private func refreshFolder(_ fid: Int64) async {
-        for src in sourceStore.sources where src.folderId == fid && src.enabled {
-            _ = try? await sourceStore.syncOne(src)
-        }
+        _ = try? await services.sourceManagement.sync(
+            scope: SourceScope(kind: .folder, id: fid))
         vm.loadAll()
     }
 
     private func markSourceRead(_ sid: Int64) {
-        Database.shared.execute(
-            "UPDATE content SET read_at = datetime('now') WHERE source_id = ? AND read_at IS NULL",
-            params: [sid])
-        vm.loadAll()
+        Task {
+            do {
+                _ = try await services.library.markRead(filter: ContentFilter(sourceID: sid))
+                vm.loadAll()
+            } catch {
+                vm.showToast(error.localizedDescription)
+            }
+        }
     }
 
     private func markFolderRead(_ fid: Int64) {
-        Database.shared.execute("""
-            UPDATE content SET read_at = datetime('now')
-            WHERE read_at IS NULL AND source_id IN (SELECT id FROM content_source WHERE folder_id = ?)
-            """, params: [fid])
-        vm.loadAll()
+        Task {
+            do {
+                _ = try await services.library.markRead(filter: ContentFilter(folderID: fid))
+                vm.loadAll()
+            } catch {
+                vm.showToast(error.localizedDescription)
+            }
+        }
     }
 
     // MARK: 中栏
@@ -1418,8 +1326,7 @@ public struct ContentView: View {
                 SectionLabel(text: "\(vm.items.count) 条")
                 Spacer()
                 Button {
-                    let n = vm.markAllRead()
-                    _ = n
+                    vm.markAllRead()
                 } label: {
                     Label("全部已读", systemImage: "checkmark.circle")
                         .font(.system(size: 11))
@@ -1519,14 +1426,14 @@ public struct ContentView: View {
                             }
                             // 重新提取全文（单篇重提）
                             Button {
-                                Task { await FullTextFetcher.shared.refetchSingleFulltext(contentId: item.id) }
+                                runPipelineForItem(item: item, type: "fulltext")
                             } label: {
                                 Label("重新提取全文", systemImage: "arrow.triangle.2.circlepath")
                             }
 
                             // ── 后处理 ──
                             Button {
-                                Task { _ = await ExportService.shared.forceExport(contentId: item.id) }
+                                Task { _ = try? await services.export.forceExport(contentID: item.id) }
                             } label: {
                                 Label("触发导出规则", systemImage: "square.and.arrow.up.on.square")
                             }
@@ -1552,6 +1459,10 @@ public struct ContentView: View {
         Group {
             if let item = vm.selectedItem {
                 ReadingView(item: item, showTranslated: $vm.showTranslated,
+                            library: services.library,
+                            contentDetail: services.contentDetail,
+                            processing: services.processing,
+                            export: services.export,
                             onPrev: { vm.selectPrev() }, onNext: { vm.selectNext() })
                     .id(item.id)   // 切文章重建阅读视图；手动处理状态由 content id 共享 Store 恢复
             } else {
@@ -1849,16 +1760,16 @@ struct ReadingLayout {
 public struct ReadingView: View {
     let item: ContentItem
     @Binding var showTranslated: Bool
+    private let library: any LibraryGateway
+    private let contentDetail: any ContentDetailGateway
+    private let processing: any ProcessingGateway
+    private let export: any ExportGateway
     /// 上一篇/下一篇导航回调（阅读区顶部按钮，键盘 j/k 的图形化对应）
     var onPrev: (() -> Void)? = nil
     var onNext: (() -> Void)? = nil
 
-    @State private var pipeline = LLMPipeline()
     @State private var llmAvailable = false  // 在 onAppear 中赋值，避免 body 渲染时调 isAvailable→SecretStore 递归锁崩溃
-    @State private var transcriber = TranscribePipeline()
     @ObservedObject private var processingStates = ContentProcessingStateStore.shared
-    /// 当前内容的有效管线开关（源 OR 文件夹）
-    @State private var policy = PipelinePolicy()
     /// 媒体项（播客/视频）正文标签：0=原文(简介) / 1=译文(简介翻译) / 2=转录(中英对照)
     /// @AppStorage 持久化——记住上次读的标签，切文章不重置（和 viewMode 同模式）
     @AppStorage("reading.mediaTab") private var mediaTab = 0
@@ -1883,6 +1794,26 @@ public struct ReadingView: View {
     /// 星标/已读状态（本地镜像，操作后即时反馈，不依赖 reload）
     @State private var isStarred = false
     @State private var isRead = false
+
+    init(
+        item: ContentItem,
+        showTranslated: Binding<Bool>,
+        library: any LibraryGateway,
+        contentDetail: any ContentDetailGateway,
+        processing: any ProcessingGateway,
+        export: any ExportGateway,
+        onPrev: (() -> Void)? = nil,
+        onNext: (() -> Void)? = nil
+    ) {
+        self.item = item
+        _showTranslated = showTranslated
+        self.library = library
+        self.contentDetail = contentDetail
+        self.processing = processing
+        self.export = export
+        self.onPrev = onPrev
+        self.onNext = onNext
+    }
 
     /// theme/themeMode/fontChoice 从 raw 键派生（@AppStorage 存 String rawValue）
     private var theme: ReadingTheme {
@@ -2169,7 +2100,9 @@ public struct ReadingView: View {
         .onAppear {
             Trace.i("ReadingView.onAppear id=\(item.id) ctype=\(item.ctype) 已有contentMd=\(item.contentMd != nil) llmTranslatedMd非空=\(item.llmTranslatedMd != nil) mem=\(Trace.mb())MB [\(buildTag)]", category: "read")
             Trace.startMemorySampler(category: "read.mem")
-            llmAvailable = pipeline.isAvailable  // 读取一次缓存，避免 body 渲染时调 SecretStore 递归锁
+            Task {
+                llmAvailable = await processing.capabilities().llmAvailable
+            }
             isStarred = item.starred
             isRead = item.isRead
         }
@@ -2185,7 +2118,7 @@ public struct ReadingView: View {
             Trace.stopMemorySampler(category: "read.mem")
         }
         .sheet(isPresented: $showShareSheet) {
-            ShareSheet(item: item)
+            ShareSheet(item: item, export: export)
         }
     }
 
@@ -2220,34 +2153,32 @@ public struct ReadingView: View {
     // MARK: 快捷操作（本地即时反馈 + 通知列表刷新）
 
     private func toggleStar() {
-        let target = Database.shared.toggleStar(contentId: item.id) { ok, starred in
-            if ok {
-                if starred {
-                    Task { await ExportService.shared.runPending(trigger: "starred", contentId: item.id) }
-                }
+        let target = !isStarred
+        isStarred = target
+        let contentID = item.id
+        Task {
+            do {
+                _ = try await library.setStarred(contentID: contentID, isStarred: target)
                 NotificationCenter.default.post(name: .contentUpdated, object: nil)
-            } else {
-                isStarred.toggle()
+            } catch {
+                // 快速连续点击时，只撤销仍与本次请求目标一致的乐观状态。
+                if isStarred == target { isStarred = !target }
             }
         }
-        isStarred = target
     }
 
     private func toggleRead() {
         let targetRead = !isRead
         isRead = targetRead
-        let completion: @MainActor @Sendable (Bool) -> Void = { ok in
-            if ok {
+        let contentID = item.id
+        Task {
+            do {
+                _ = try await library.setRead(contentID: contentID, isRead: targetRead)
                 // 写入确认后再通知列表刷新，避免 observer 读到旧状态。
                 NotificationCenter.default.post(name: .contentUpdated, object: nil)
-            } else {
-                isRead.toggle()
+            } catch {
+                if isRead == targetRead { isRead = !targetRead }
             }
-        }
-        if targetRead {
-            Database.shared.markRead(contentId: item.id, completion: completion)
-        } else {
-            Database.shared.markUnread(contentId: item.id, completion: completion)
         }
     }
 
@@ -2431,30 +2362,24 @@ public struct ReadingView: View {
     private var effectiveScore: Int? { loadedScore ?? item.llmScore }
     private var effectiveSummary: String? { loadedSummary ?? item.llmSummary }
 
-    private var contentBody: String {
-        if let md = loadedContentMd, !md.isEmpty { return md }
-        if let md = item.contentMd, !md.isEmpty { return md }
-        return item.excerpt ?? ""
-    }
-
     /// 打开时从阅读器专用连接一次加载所有所需字段，不受列表/Worker 长查询占用。
     @MainActor
     private func loadContentMd() async {
         guard !readerPayloadLoaded else { return }
         let t0 = Date()
         let contentId = item.id
-        let payload = await Task.detached(priority: .userInitiated) {
-            Database.shared.fetchReaderPayload(id: contentId)
-        }.value
-        guard !Task.isCancelled else { return }
-        readerPayloadLoaded = true
-        if let payload {
-            apply(payload)
-            let mdKb = (payload.contentMd ?? "").count / 1024
-            let transKb = (payload.llmTranslatedMd ?? "").count / 1024
+        do {
+            let detail = try await contentDetail.detail(contentID: contentId)
+            guard !Task.isCancelled else { return }
+            readerPayloadLoaded = true
+            apply(detail)
+            let mdKb = (detail.contentMarkdown ?? "").count / 1024
+            let transKb = (detail.translatedMarkdown ?? "").count / 1024
             Trace.i("阅读数据加载完成 id=\(item.id) content_md=\(mdKb)KB llm_translated_md=\(transKb)KB 用时=\(Int(t0.timeIntervalSinceNow * -1000))ms mem=\(Trace.mb())MB", category: "read")
-        } else {
-            Trace.w("fetchReaderPayload 返回 nil id=\(item.id)", category: "read")
+        } catch {
+            guard !Task.isCancelled else { return }
+            readerPayloadLoaded = true
+            Trace.w("阅读数据加载失败 id=\(item.id)：\(error.localizedDescription)", category: "read")
         }
     }
 
@@ -2463,269 +2388,62 @@ public struct ReadingView: View {
     private func refreshLoadedBody() {
         let contentId = item.id
         Task { @MainActor in
-            let payload = await Task.detached(priority: .userInitiated) {
-                Database.shared.fetchReaderPayload(id: contentId)
-            }.value
-            guard contentId == item.id, let payload else { return }
-            apply(payload)
+            guard let detail = try? await contentDetail.detail(contentID: contentId),
+                  contentId == item.id else { return }
+            apply(detail)
         }
     }
 
-    private func apply(_ payload: ReaderPayload) {
-        loadedContentMd = payload.contentMd
-        loadedTranslatedMd = payload.llmTranslatedMd
-        loadedTitleTranslated = payload.titleTranslated
-        loadedAudioUrl = payload.audioUrl
-        loadedVideoId = payload.videoId
-        loadedTranscriptMd = payload.llmTranscriptMd
-        loadedScore = payload.score
-        loadedSummary = payload.summary
-        policy = payload.policy
+    private func apply(_ detail: ContentDetail) {
+        loadedContentMd = detail.contentMarkdown
+        loadedTranslatedMd = detail.translatedMarkdown
+        loadedTitleTranslated = detail.translatedTitle
+        loadedAudioUrl = detail.audioURL
+        loadedVideoId = detail.videoID
+        loadedTranscriptMd = detail.transcriptMarkdown
+        loadedScore = detail.score
+        loadedSummary = detail.summary
     }
 
     /// 重新处理：按文章所属源的当前开关，重新跑所有已开启管线（阅读栏用，带状态反馈）
     private func reprocessFromReadingView() {
-        let cid = item.id
-        guard PipelineWorker.shared.tryLockContent(cid) else {
-            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
-            return
-        }
-        let body = loadedContentMd ?? item.contentMd ?? item.excerpt ?? ""
-        let audioUrl = MediaAudioURLResolver.preferred(loadedAudioUrl, item.audioUrl)
-        let skipMediaTranslation = isMediaItem && ContentLanguage.isChinese(
-            declared: item.language, fallbackText: item.title + "\n" + body)
-        processingStates.enqueue(contentId: cid, title: item.title, operation: "内容处理")
-        Task {
-            var results: [String] = []
-            if policy.autoScore, pipeline.isAvailable {
-                let ok = (try? await PipelineWorker.scheduleManualLLM {
-                    await processingStates.begin(contentId: cid, message: "AI 评分中…")
-                    return await pipeline.score(contentId: cid, title: item.title, body: body)
-                }) ?? false
-                results.append(ok ? "评分✅" : "评分❌ \(pipeline.lastError ?? "未知错误")")
-            }
-            if policy.autoTranslate, !skipMediaTranslation, pipeline.isAvailable {
-                let ok = (try? await PipelineWorker.scheduleManualLLM {
-                    await processingStates.begin(contentId: cid, message: "翻译中…")
-                    return await pipeline.translate(contentId: cid, title: item.title, body: body)
-                }) ?? false
-                results.append(ok ? "翻译✅" : "翻译❌ \(pipeline.lastError ?? "未知错误")")
-            }
-            if policy.autoSummarize, pipeline.isAvailable {
-                let ok = (try? await PipelineWorker.scheduleManualLLM {
-                    await processingStates.begin(contentId: cid, message: "摘要中…")
-                    return await pipeline.summarize(contentId: cid, title: item.title, body: body)
-                }) ?? false
-                results.append(ok ? "摘要✅" : "摘要❌ \(pipeline.lastError ?? "未知错误")")
-            }
-            if policy.autoTranscribe, isMediaItem {
-                let ok = (try? await PipelineWorker.scheduleManualTranscription {
-                    await processingStates.begin(contentId: cid, message: "转录中…")
-                    return await transcriber.transcribe(
-                        contentId: cid, title: item.title, audioUrl: audioUrl,
-                        pageUrl: item.url, language: item.language)
-                }) ?? false
-                results.append(ok ? "转录✅" : "转录❌")
-            }
-            await MainActor.run {
-                PipelineWorker.shared.unlockContent(cid)
-                let succeeded = results.contains { $0.contains("✅") }
-                processingStates.finish(
-                    contentId: cid,
-                    message: results.isEmpty ? "无已开启的内容处理项" : results.joined(separator: " "),
-                    succeeded: results.isEmpty || succeeded)
-                refreshLoadedBody()
-                // 重新处理完成后触发导出规则
-                if results.first(where: { $0.hasSuffix("✅") }) != nil {
-                    Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
-                }
-                NotificationCenter.default.post(name: .contentUpdated, object: nil)
-            }
-        }
+        runProcessing(.allEnabled)
     }
 
     private func runFulltext() {
-        let cid = item.id
-        guard PipelineWorker.shared.tryLockContent(cid) else {
-            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
-            return
-        }
-        processingStates.begin(
-            contentId: cid, title: item.title, operation: "提取全文", message: "提取全文中…")
-        Task {
-            // 从源 config 解析 fetch_mode + 获取 feed html（feed_full 模式需要）
-            let row = await Task.detached(priority: .userInitiated) {
-                Database.shared.queryRows("""
-                    SELECT s.config, c.content_html FROM content c
-                    LEFT JOIN content_source s ON c.source_id = s.id WHERE c.id = ?
-                    """, params: [cid]).first
-            }.value
-            let srcConfig = row?["config"] ?? "{}"
-            let feedHtml = row?["content_html"]
-            var mode: FetchMode = .summary
-            if let data = srcConfig.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let raw = obj["fetch_mode"] as? String,
-               let m = FetchMode(rawValue: raw) { mode = m }
-            let ok = await FullTextFetcher.shared.fetchAndStore(
-                contentId: cid, url: item.url, feedHtml: feedHtml, mode: mode)
-            await MainActor.run {
-                PipelineWorker.shared.unlockContent(cid)
-                processingStates.finish(
-                    contentId: cid,
-                    message: ok ? "✅ 全文提取完成" : "❌ 全文提取失败",
-                    succeeded: ok)
-                if ok {
-                    refreshLoadedBody()
-                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
-                }
-            }
-        }
+        runProcessing(.fulltext)
     }
 
     private func runScore() {
-        let cid = item.id
-        // contentId 互斥：worker 正在处理同一篇则不重复触发（防双倍 LLM 计费，修 P1-10）
-        guard PipelineWorker.shared.tryLockContent(cid) else {
-            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
-            return
-        }
-        processingStates.enqueue(contentId: cid, title: item.title, operation: "AI 评分")
-        Task {
-            let body = contentBody
-            let ok = (try? await PipelineWorker.scheduleManualLLM {
-                await processingStates.begin(contentId: cid, message: "AI 评分中…")
-                return await pipeline.score(contentId: cid, title: item.title, body: body)
-            }) ?? false
-            let failure = pipeline.lastError ?? "未知错误"
-            if !ok { Trace.e("手动评分失败 id=\(cid)：\(failure)", category: "llm.manual") }
-            await MainActor.run {
-                PipelineWorker.shared.unlockContent(cid)
-                processingStates.finish(
-                    contentId: cid,
-                    message: ok ? "✅ AI 评分完成" : "❌ AI 评分失败：\(failure)",
-                    succeeded: ok)
-                if ok {
-                    refreshLoadedBody()
-                    Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
-                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
-                }
-            }
-        }
+        runProcessing(.score)
     }
 
     private func runTranslate() {
-        let cid = item.id
-        guard PipelineWorker.shared.tryLockContent(cid) else {
-            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
-            return
-        }
-        processingStates.enqueue(contentId: cid, title: item.title, operation: "AI 翻译")
-        Task {
-            // 媒体项：翻译 defuddle 全文（loadedContentMd）→ llm_translated_md（「译文」标签）；
-            // 兜底走 feed 简介翻译（translateExcerpt），简介空则返回 false 不浪费 LLM 调用。
-            // 非媒体项：翻译正文 → llm_translated_md（译文/原文切换）
-            let ok: Bool
-            if isMediaItem {
-                if let fulltext = loadedContentMd, !fulltext.isEmpty {
-                    ok = (try? await PipelineWorker.scheduleManualLLM {
-                        await processingStates.begin(contentId: cid, message: "翻译中…")
-                        return await pipeline.translate(
-                            contentId: cid, title: item.title, body: fulltext)
-                    }) ?? false
-                } else {
-                    let excerpt = item.excerpt ?? item.contentHtml ?? ""
-                    ok = (try? await PipelineWorker.scheduleManualLLM {
-                        await processingStates.begin(contentId: cid, message: "翻译中…")
-                        return await pipeline.translateExcerpt(
-                            contentId: cid, title: item.title, contentHtml: excerpt)
-                    }) ?? false
-                }
-            } else {
-                let body = contentBody
-                ok = (try? await PipelineWorker.scheduleManualLLM {
-                    await processingStates.begin(contentId: cid, message: "翻译中…")
-                    return await pipeline.translate(contentId: cid, title: item.title, body: body)
-                }) ?? false
-            }
-            let failure = pipeline.lastError ?? "未知错误"
-            if !ok { Trace.e("手动翻译失败 id=\(cid)：\(failure)", category: "llm.manual") }
-            await MainActor.run {
-                PipelineWorker.shared.unlockContent(cid)
-                processingStates.finish(
-                    contentId: cid,
-                    message: ok ? "✅ 翻译完成" : "❌ 翻译失败：\(failure)",
-                    succeeded: ok)
-                if ok {
-                    refreshLoadedBody()
-                    Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
-                    // 非媒体：仅原文→双语对照；媒体：切到「译文」标签立刻看到
-                    if isMediaItem { mediaTab = 1 }
-                    else if viewMode == 1 { viewMode = 0 }
-                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
-                }
-            }
-        }
+        runProcessing(.translate)
     }
 
     private func runSummarize() {
-        let cid = item.id
-        guard PipelineWorker.shared.tryLockContent(cid) else {
-            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
-            return
-        }
-        processingStates.enqueue(contentId: cid, title: item.title, operation: "AI 摘要")
-        Task {
-            let body = contentBody
-            let ok = (try? await PipelineWorker.scheduleManualLLM {
-                await processingStates.begin(contentId: cid, message: "摘要中…")
-                return await pipeline.summarize(contentId: cid, title: item.title, body: body)
-            }) ?? false
-            let failure = pipeline.lastError ?? "未知错误"
-            if !ok { Trace.e("手动摘要失败 id=\(cid)：\(failure)", category: "llm.manual") }
-            await MainActor.run {
-                PipelineWorker.shared.unlockContent(cid)
-                processingStates.finish(
-                    contentId: cid,
-                    message: ok ? "✅ 摘要完成" : "❌ 摘要失败：\(failure)",
-                    succeeded: ok)
-                if ok {
-                    refreshLoadedBody()
-                    Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
-                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
-                }
-            }
-        }
+        runProcessing(.summarize)
     }
 
     private func runTranscribe() {
-        let cid = item.id
-        guard PipelineWorker.shared.tryLockContent(cid) else {
-            processingStates.notice(contentId: cid, message: "⏳ 该篇正在后台处理中，请稍候")
-            return
-        }
-        processingStates.enqueue(contentId: cid, title: item.title, operation: "AI 转录")
-        let audioUrl = MediaAudioURLResolver.preferred(loadedAudioUrl, item.audioUrl)
-        Task {
-            let ok = (try? await PipelineWorker.scheduleManualTranscription {
-                await processingStates.begin(contentId: cid, message: "转录中（下载+识别，较长）…")
-                return await transcriber.transcribe(
-                    contentId: cid, title: item.title, audioUrl: audioUrl,
-                    pageUrl: item.url, language: item.language)
-            }) ?? false
-            await MainActor.run {
-                PipelineWorker.shared.unlockContent(cid)
-                processingStates.finish(
-                    contentId: cid,
-                    message: ok ? "✅ 转录完成" : "❌ 转录失败",
-                    succeeded: ok)
-                if ok {
-                    refreshLoadedBody()
-                    Task { await ExportService.shared.runPending(trigger: "ready", contentId: cid) }
-                    // 翻译完成：若当前是仅原文，切到双语对照让用户立刻看到译文
-                    if viewMode == 1 { viewMode = 0 }
-                    NotificationCenter.default.post(name: .contentUpdated, object: nil)
-                }
+        runProcessing(.transcribe)
+    }
+
+    private func runProcessing(_ operation: ProcessingOperation) {
+        ProcessingCommandCoordinator.start(
+            gateway: processing,
+            contentID: item.id,
+            title: item.title,
+            operation: operation
+        ) { snapshot in
+            guard snapshot.contentChanged else { return }
+            refreshLoadedBody()
+            if operation == .translate {
+                if isMediaItem { mediaTab = 1 }
+                else if viewMode == 1 { viewMode = 0 }
+            } else if operation == .transcribe, viewMode == 1 {
+                viewMode = 0
             }
         }
     }
@@ -2739,8 +2457,14 @@ extension Notification.Name {
 
 public struct ShareSheet: View {
     let item: ContentItem
+    private let export: any ExportGateway
     @Environment(\.dismiss) private var dismiss
     @State private var message = ""
+
+    public init(item: ContentItem, export: any ExportGateway) {
+        self.item = item
+        self.export = export
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -2788,7 +2512,7 @@ public struct ShareSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 shareActionRow("触发导出规则", icon: "square.and.arrow.up.on.square") {
                     Task {
-                        _ = await ExportService.shared.forceExport(contentId: item.id)
+                        _ = try? await export.forceExport(contentID: item.id)
                         message = "✅ 已触发手动导出规则"
                     }
                 }

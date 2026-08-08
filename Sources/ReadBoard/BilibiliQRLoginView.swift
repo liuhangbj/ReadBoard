@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreImage.CIFilterBuiltins
+import ReadBoardContract
 
 /// B站扫码登录弹窗
 /// 流程：生成二维码 → 用户手机扫码 → 轮询确认 → 拿 SESSDATA → 存 SecretStore
@@ -10,8 +11,13 @@ struct BilibiliQRLoginView: View {
     @State private var statusText = "正在生成二维码..."
     @State private var isPolling = false
     @State private var pollTask: Task<Void, Never>? = nil
+    private let authentication: any AuthenticationGateway
 
     let onLoginSuccess: (String) -> Void
+
+    init(authentication: any AuthenticationGateway, onLoginSuccess: @escaping (String) -> Void) {
+        self.authentication = authentication; self.onLoginSuccess = onLoginSuccess
+    }
 
     var body: some View {
         VStack(spacing: 20) {
@@ -68,12 +74,12 @@ struct BilibiliQRLoginView: View {
         statusText = "正在生成二维码..."
         Trace.i("开始生成二维码", category: "bilibili")
         do {
-            let (url, key) = try await BilibiliAuth.generateQRCode()
-            qrcodeKey = key
-            qrImage = generateQRImage(from: url)
+            let challenge = try await authentication.beginAuthentication(platformID: "bilibili")
+            qrcodeKey = challenge.challengeID
+            qrImage = generateQRImage(from: challenge.qrPayload)
             statusText = "请用手机 BiliBili App 扫码"
-            Trace.i("二维码生成成功 qrcode_key=\(key)", category: "bilibili")
-            startPolling(key: key)
+            Trace.i("二维码生成成功", category: "bilibili")
+            startPolling(key: challenge.challengeID)
         } catch {
             statusText = "生成失败：\(error.localizedDescription)"
             Trace.e("二维码生成失败: \(error.localizedDescription)", category: "bilibili")
@@ -88,12 +94,13 @@ struct BilibiliQRLoginView: View {
                 try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 秒轮询
                 guard !Task.isCancelled else { break }
                 do {
-                    if let sessdata = try await BilibiliAuth.pollQRCode(key: key) {
-                        Trace.i("检测到扫码成功，SESSDATA 长度: \(sessdata.count)", category: "bilibili")
-                        await handleLoginSuccess(sessdata: sessdata)
+                    let result = try await authentication.pollAuthentication(
+                        platformID: "bilibili", challengeID: key)
+                    statusText = result.status.message ?? "等待扫码…"
+                    if result.completed {
+                        onLoginSuccess(result.status.accountName ?? "BiliBili 用户")
+                        dismiss()
                         break
-                    } else {
-                        Trace.i("轮询中... 未扫码", category: "bilibili")
                     }
                 } catch {
                     Trace.e("轮询失败: \(error.localizedDescription)", category: "bilibili")
@@ -102,30 +109,6 @@ struct BilibiliQRLoginView: View {
                 }
             }
             isPolling = false
-        }
-    }
-
-    private func handleLoginSuccess(sessdata: String) async {
-        statusText = "登录成功，正在获取用户信息..."
-        Trace.i("handleLoginSuccess 开始", category: "bilibili")
-        do {
-            let (uid, uname) = try await BilibiliAuth.fetchUserInfo(sessdata: sessdata)
-            Trace.i("获取用户信息成功: \(uname) (UID: \(uid))", category: "bilibili")
-            let ok = BilibiliAuth.saveAuth(sessdata: sessdata, uid: uid, uname: uname)
-            if ok {
-                statusText = "登录成功：\(uname)"
-                Trace.i("登录态保存成功，1 秒后关闭弹窗", category: "bilibili")
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                onLoginSuccess(uname)
-                dismiss()
-                Trace.i("弹窗已关闭", category: "bilibili")
-            } else {
-                statusText = "保存登录态失败"
-                Trace.e("登录态保存失败", category: "bilibili")
-            }
-        } catch {
-            statusText = "获取用户信息失败：\(error.localizedDescription)"
-            Trace.e("获取用户信息失败: \(error.localizedDescription)", category: "bilibili")
         }
     }
 

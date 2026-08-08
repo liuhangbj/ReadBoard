@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import ReadBoardContract
 
 // MARK: - 内容管线统一标签（关键词前缀「AI」——翻译/摘要/转录与 AI 评分对齐，全 App 一处定义）
 /// (key, label) 顺序固定：AI 评分 / AI 翻译 / AI 摘要 / AI 转录
@@ -13,18 +14,31 @@ private let PIPELINE_DEFS: [(key: String, label: String)] = [
 // MARK: - 订阅源管理界面
 
 public struct SourcesView: View {
-    // @StateObject 而非 @ObservedObject——SourcesView 在 RootView switch 里反复创建，
-    // @ObservedObject 不持所有权语义错误（虽是单例不泄漏，但 StateObject 才正确）
-    @StateObject private var store = SourceStore.shared
+    @StateObject private var catalog: SourceCatalogStore
     @EnvironmentObject private var appTab: AppTab
     /// 内嵌于设置「多类型源」页时隐藏站点级导航元素（返回阅读 / 大页标题）
     var embeddedInSettings = false
+    private let sourceManagement: any SourceManagementGateway
+    private let sourceOnboarding: any SourceOnboardingGateway
+    private let sourceCatalogGateway: any SourceCatalogGateway
     @State private var showAddSheet = false
     @State private var showAddFolder = false
     @State private var newFolderName = ""
     @State private var opmlMessage = ""
     @State private var showImportSummary = false
     @State private var importPlan: OPMLImportPlan? = nil
+
+    public init(
+        services: ReadBoardServices = .live,
+        embeddedInSettings: Bool = false
+    ) {
+        self.sourceManagement = services.sourceManagement
+        self.sourceOnboarding = services.sourceOnboarding
+        self.sourceCatalogGateway = services.sourceCatalog
+        self.embeddedInSettings = embeddedInSettings
+        _catalog = StateObject(
+            wrappedValue: SourceCatalogStore(gateway: services.sourceCatalog))
+    }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -45,15 +59,15 @@ public struct SourcesView: View {
                         .font(.system(size: RB.F.pageTitle, weight: .semibold))
                         .foregroundStyle(Color.rbText)
                 }
-                Text("\(store.sources.count)")
+                Text("\(catalog.sources.count)")
                     .font(.system(size: 13))
                     .foregroundStyle(Color.rbText3)
                 Spacer()
-                Button { Task { await store.syncAll() } } label: {
+                Button { Task { _ = try? await sourceManagement.syncAll() } } label: {
                     Label("全部刷新", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.quiet)
-                .disabled(store.isSyncing)
+                .disabled(catalog.isSyncing)
                 Button { showAddFolder = true } label: {
                     Label("文件夹", systemImage: "folder.badge.plus")
                 }
@@ -99,35 +113,52 @@ public struct SourcesView: View {
             // 源列表（文件夹 → 源 两级分组；源相对文件夹缩进 20pt）
             List {
                 // 各文件夹分组
-                ForEach(store.folders) { folder in
+                ForEach(catalog.folders) { folder in
                     Section {
                         ForEach(sources(in: folder.id)) { src in
-                            SourceRow(src: src, store: store)
+                            SourceRow(
+                                src: src,
+                                folders: catalog.folders,
+                                sourceManagement: sourceManagement)
                                 .padding(.leading, 20)   // 源相对文件夹缩进
                         }
                     } header: {
-                        FolderHeader(folder: folder, store: store)
+                        FolderHeader(
+                            folder: folder,
+                            sources: catalog.sources(inFolder: folder.id),
+                            sourceManagement: sourceManagement)
                     }
                 }
                 // 未分组
                 let ungrouped = sources(in: nil)
                 if !ungrouped.isEmpty {
-                    Section(store.folders.isEmpty ? "全部源" : "未分组") {
+                    Section(catalog.folders.isEmpty ? "全部源" : "未分组") {
                         ForEach(ungrouped) { src in
-                            SourceRow(src: src, store: store)
+                            SourceRow(
+                                src: src,
+                                folders: catalog.folders,
+                                sourceManagement: sourceManagement)
                         }
                     }
                 }
             }
             .listStyle(.inset)
         }
-        .onAppear { store.reload() }
+        .task { await catalog.monitor() }
         .sheet(isPresented: $showAddSheet) {
-            AddSourceSheet(store: store)
+            AddSourceSheet(
+                onboarding: sourceOnboarding,
+                sourceCatalog: sourceCatalogGateway,
+                sourceManagement: sourceManagement)
+                .onDisappear { Task { await catalog.refresh() } }
         }
         .sheet(isPresented: $showImportSummary) {
             if let plan = importPlan {
-                OPMLImportSummary(store: store, plan: plan)
+                OPMLImportSummary(
+                    plan: plan,
+                    onboarding: sourceOnboarding,
+                    sourceCatalog: sourceCatalogGateway)
+                    .onDisappear { Task { await catalog.refresh() } }
             }
         }
         .alert("新建文件夹", isPresented: $showAddFolder) {
@@ -135,7 +166,8 @@ public struct SourcesView: View {
             Button("取消", role: .cancel) { newFolderName = "" }
             Button("创建") {
                 if !newFolderName.trimmingCharacters(in: .whitespaces).isEmpty {
-                    store.addFolder(name: newFolderName.trimmingCharacters(in: .whitespaces))
+                    let name = newFolderName.trimmingCharacters(in: .whitespaces)
+                    Task { _ = try? await sourceManagement.createFolder(name: name) }
                 }
                 newFolderName = ""
             }
@@ -143,8 +175,8 @@ public struct SourcesView: View {
     }
 
     /// 某文件夹下的源(nil = 未分组)
-    private func sources(in folderId: Int64?) -> [FeedSource] {
-        store.sources.filter { $0.folderId == folderId }
+    private func sources(in folderId: Int64?) -> [SourceCatalogItem] {
+        catalog.sources.filter { $0.folderId == folderId }
     }
 
     // MARK: OPML 导入/导出（NSOpenPanel 挂 mainWindow）
@@ -207,11 +239,11 @@ public struct SourcesView: View {
         }
         panel.beginSheetModal(for: window) { response in
             guard response == .OK, let url = panel.url else { return }
-            let xml = OPMLService.shared.exportOPML()
-            DispatchQueue.main.async {
+            Task {
+                let xml = await sourceOnboarding.exportOPML()
                 do {
                     try xml.write(to: url, atomically: true, encoding: .utf8)
-                    opmlMessage = "已导出 \(store.sources.count) 源到 \(url.lastPathComponent)"
+                    opmlMessage = "已导出 \(catalog.sources.count) 源到 \(url.lastPathComponent)"
                 } catch {
                     opmlMessage = "导出失败：\(error.localizedDescription)"
                 }
@@ -223,8 +255,9 @@ public struct SourcesView: View {
 // MARK: 文件夹分组头（含文件夹级管线总开关）
 
 public struct FolderHeader: View {
-    let folder: Folder
-    @ObservedObject var store: SourceStore
+    let folder: SourceFolderItem
+    let sources: [SourceCatalogItem]
+    let sourceManagement: any SourceManagementGateway
     @State private var showDeleteConfirm = false
     /// 开总开关后弹"处理历史数据"选项
     @State private var pendingBackfillKey: String? = nil
@@ -252,7 +285,12 @@ public struct FolderHeader: View {
         .textCase(nil)
         .alert("删除文件夹「\(folder.name)」？", isPresented: $showDeleteConfirm) {
             Button("取消", role: .cancel) {}
-            Button("删除", role: .destructive) { store.removeFolder(id: folder.id) }
+            Button("删除", role: .destructive) {
+                Task {
+                    _ = try? await sourceManagement.remove(
+                        scope: SourceScope(kind: .folder, id: folder.id))
+                }
+            }
         } message: {
             Text("文件夹内的源不会被删除，只是移出分组（folder_id 置空）。")
         }
@@ -261,9 +299,13 @@ public struct FolderHeader: View {
             set: { if !$0 { pendingBackfillKey = nil } }
         )) {
             Button("处理所有历史内容") {
-                if let key = pendingBackfillKey,
-                   store.setHistoricalItemsEnabled(folderId: folder.id, key: key) {
-                    Task { await PipelineWorker.shared.backfillHistoryForFolder(folderId: folder.id) }
+                if let rawKey = pendingBackfillKey,
+                   let key = SourcePolicyKey(rawValue: rawKey) {
+                    Task {
+                        _ = try? await sourceManagement.backfillProcessing(
+                            scope: SourceScope(kind: .folder, id: folder.id),
+                            key: key)
+                    }
                 }
                 pendingBackfillKey = nil
             }
@@ -275,8 +317,8 @@ public struct FolderHeader: View {
 
     /// 文件夹内所有源某管线键是否全一致；一致返回该值，不一致返回 nil
     private func folderUniformPolicy(_ key: String) -> Bool? {
-        let vals = store.sources(inFolder: folder.id).map { src -> Bool in
-            let p = PipelinePolicy.from(configJson: src.config)
+        let vals = sources.map { src -> Bool in
+            let p = src.policy
             switch key {
             case "auto_score": return p.autoScore
             case "auto_translate": return p.autoTranslate
@@ -295,7 +337,14 @@ public struct FolderHeader: View {
         return Toggle(label, isOn: Binding(
             get: { uniform ?? false },
             set: { newValue in
-                store.setFolderPolicy(id: folder.id, key: key, value: newValue)
+                if let policyKey = SourcePolicyKey(rawValue: key) {
+                    Task {
+                        try? await sourceManagement.setPolicy(
+                            scope: SourceScope(kind: .folder, id: folder.id),
+                            key: policyKey,
+                            enabled: newValue)
+                    }
+                }
                 if newValue { pendingBackfillKey = key }
             }
         ))
@@ -317,8 +366,9 @@ public struct FolderHeader: View {
 // MARK: 单行
 
 public struct SourceRow: View {
-    let src: FeedSource
-    @ObservedObject var store: SourceStore
+    let src: SourceCatalogItem
+    let folders: [SourceFolderItem]
+    let sourceManagement: any SourceManagementGateway
     @State private var showDeleteConfirm = false
     /// 开管线后弹"处理历史数据"选项（key = 刚打开的管线）
     @State private var pendingBackfillKey: String? = nil
@@ -346,8 +396,7 @@ public struct SourceRow: View {
             // ── 中：每个选项固定列宽（条件项用占位保持对齐）──
             // 全文模式（固定列；非 rss 占位保持对齐）——加宽到 88 容纳 defuddle
             Group {
-                if src.stype == "rss"
-                    || ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype) != nil {
+                if !src.availableFetchModes.isEmpty {
                     fetchModeMenu
                 } else {
                     Color.clear.frame(height: 1)
@@ -403,7 +452,12 @@ public struct SourceRow: View {
             HStack(spacing: 10) {
                 Toggle("", isOn: Binding(
                     get: { src.enabled },
-                    set: { store.setEnabled(id: src.id, enabled: $0) }
+                    set: { enabled in
+                        Task {
+                            try? await sourceManagement.setEnabled(
+                                sourceID: src.id, enabled: enabled)
+                        }
+                    }
                 ))
                 .labelsHidden()
                 .tint(Color.rbAccent)
@@ -418,7 +472,10 @@ public struct SourceRow: View {
                 .alert("删除订阅源？", isPresented: $showDeleteConfirm) {
                     Button("取消", role: .cancel) {}
                     Button("永久删除", role: .destructive) {
-                        Task { _ = await store.removeSource(id: src.id) }
+                        Task {
+                            _ = try? await sourceManagement.remove(
+                                scope: SourceScope(kind: .source, id: src.id))
+                        }
                     }
                 } message: {
                     Text("将永久删除「\(src.name)」及其全部文章、AI 处理结果和应用内导出记录。此操作无法撤销；已经写入 Obsidian 的文件不会删除。")
@@ -432,7 +489,11 @@ public struct SourceRow: View {
     private var fetchModeMenu: some View {
         Menu {
             Button {
-                Task { await store.setFetchMode(id: src.id, mode: "auto") }
+                Task {
+                    try? await sourceManagement.setFetchMode(
+                        scope: SourceScope(kind: .source, id: src.id),
+                        mode: .automatic)
+                }
             } label: {
                 if src.fetchModeAuto {
                     HStack { Image(systemName: "checkmark"); Text("自动检测") }
@@ -443,9 +504,13 @@ public struct SourceRow: View {
             Divider()
             ForEach(fetchModesForSource, id: \.rawValue) { fm in
                 Button {
-                    Task { await store.setFetchMode(id: src.id, mode: fm.rawValue) }
+                    guard let mode = SourceFetchMode(rawValue: fm.rawValue) else { return }
+                    Task {
+                        try? await sourceManagement.setFetchMode(
+                            scope: SourceScope(kind: .source, id: src.id), mode: mode)
+                    }
                 } label: {
-                    if !src.fetchModeAuto && src.fetchMode == fm {
+                    if !src.fetchModeAuto && src.localFetchMode == fm {
                         HStack { Image(systemName: "checkmark"); Text(fulltextDisplayName(mode: fm)) }
                     } else {
                         Text(fulltextDisplayName(mode: fm))
@@ -453,7 +518,12 @@ public struct SourceRow: View {
                 }
             }
             Divider()
-            Button("重新检测") { Task { await store.redetectFetchMode(id: src.id) } }
+            Button("重新检测") {
+                Task {
+                    try? await sourceManagement.redetectFetchMode(
+                        scope: SourceScope(kind: .source, id: src.id))
+                }
+            }
         } label: {
             Text(src.fetchModeAuto ? "自动（\(fulltextDisplayName())）" : fulltextDisplayName())
                 .font(.caption)
@@ -475,7 +545,10 @@ public struct SourceRow: View {
         Menu {
             ForEach([5, 15, 30, 60, 360, 720], id: \.self) { m in
                 Button {
-                    store.setFetchInterval(id: src.id, minutes: m)
+                    Task {
+                        try? await sourceManagement.setFetchInterval(
+                            scope: SourceScope(kind: .source, id: src.id), minutes: m)
+                    }
                 } label: {
                     let label = m < 60 ? "\(m) 分钟" : "\(m/60) 小时"
                     if src.fetchIntervalMin == m { Label(label, systemImage: "checkmark") }
@@ -503,9 +576,10 @@ public struct SourceRow: View {
         Menu {
             ForEach([0, 50, 100, 200, 500], id: \.self) { n in
                 Button {
-                    store.setMaxKeep(id: src.id, count: n)
-                    // 设置后立即执行保留策略（超出最旧的软删除）
-                    if n > 0 { _ = store.enforceMaxKeep(sourceId: src.id) }
+                    Task {
+                        try? await sourceManagement.setMaximumRetainedContent(
+                            sourceID: src.id, count: n)
+                    }
                 } label: {
                     let label = n == 0 ? "不限制" : "\(n) 条"
                     if src.maxKeep == n { Label(label, systemImage: "checkmark") }
@@ -531,11 +605,13 @@ public struct SourceRow: View {
     /// 指派到文件夹菜单
     private var folderAssignMenu: some View {
         Menu {
-            Button("未分组") { store.assignSource(sourceId: src.id, folderId: nil) }
+            Button("未分组") {
+                Task { try? await sourceManagement.assignSource(sourceID: src.id, folderID: nil) }
+            }
             Divider()
-            ForEach(store.folders) { f in
+            ForEach(folders) { f in
                 Button {
-                    store.assignSource(sourceId: src.id, folderId: f.id)
+                    Task { try? await sourceManagement.assignSource(sourceID: src.id, folderID: f.id) }
                 } label: {
                     if src.folderId == f.id { Label(f.name, systemImage: "checkmark") }
                     else { Text(f.name) }
@@ -550,10 +626,10 @@ public struct SourceRow: View {
     }
 
     /// 生效策略 = 源自己的设置（管线纯按源处理，文件夹仅作批量设置入口，不影响生效）
-    private var effectivePolicy: PipelinePolicy { src.policy }
+    private var effectivePolicy: SourcePolicySnapshot { src.policy }
 
     /// 已废弃：文件夹不再强制覆盖管线，无「已继承」概念
-    private var fp: PipelinePolicy { PipelinePolicy() }
+    private var fp: SourcePolicySnapshot { SourcePolicySnapshot() }
 
     /// 已废弃：文件夹不再覆盖源级开关
     private func isOverridden(key: String) -> Bool { false }
@@ -564,7 +640,14 @@ public struct SourceRow: View {
         Toggle(label, isOn: Binding(
             get: { on },
             set: { newValue in
-                store.setPolicy(id: src.id, key: key, value: newValue)
+                if let policyKey = SourcePolicyKey(rawValue: key) {
+                    Task {
+                        try? await sourceManagement.setPolicy(
+                            scope: SourceScope(kind: .source, id: src.id),
+                            key: policyKey,
+                            enabled: newValue)
+                    }
+                }
                 // 关→开 才弹（关掉不需要回填）； inherited 已生效的也不弹（本就有效）
                 if newValue && !inherited { pendingBackfillKey = key }
             }
@@ -580,9 +663,11 @@ public struct SourceRow: View {
             set: { if !$0 { pendingBackfillKey = nil } }
         )) {
             Button("处理所有历史内容") {
-                if let key = pendingBackfillKey {
-                    if store.setHistoricalItemsEnabled(sourceId: src.id, key: key) {
-                        Task { await PipelineWorker.shared.backfillHistory(onlySourceId: src.id) }
+                if let rawKey = pendingBackfillKey,
+                   let key = SourcePolicyKey(rawValue: rawKey) {
+                    Task {
+                        _ = try? await sourceManagement.backfillProcessing(
+                            scope: SourceScope(kind: .source, id: src.id), key: key)
                     }
                 }
                 pendingBackfillKey = nil
@@ -597,19 +682,11 @@ public struct SourceRow: View {
     }
 
     private var fetchModesForSource: [FetchMode] {
-        if let connectorMode = ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype)?.fulltextMode {
-            return [connectorMode, .summary]
-        }
-        return FetchMode.allCases.filter(\.isUserSelectable)
+        src.localAvailableFetchModes
     }
 
     private func fulltextDisplayName(mode: FetchMode? = nil) -> String {
-        let actual = mode ?? src.fetchMode
-        guard actual == .externalFulltext,
-              let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype) else {
-            return actual.displayName
-        }
-        return connector.fulltextDisplayName
+        src.localFetchModeDisplayName(mode)
     }
 
     /// 源类型图标（SF Symbol，替代 emoji——纸墨系不用彩色符号）
@@ -624,7 +701,7 @@ public struct SourceRow: View {
     }
 
     private var fetchModeColor: Color {
-        switch src.fetchMode {
+        switch src.localFetchMode {
         case .feedFull: return .rbScoreHigh
         case .defuddle: return .rbAccent
         case .externalFulltext: return .rbScoreHigh
@@ -641,23 +718,13 @@ public struct SourceRow: View {
 // MARK: 添加源
 
 public struct AddSourceSheet: View {
-    @ObservedObject var store: SourceStore
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var catalog: SourceCatalogStore
+    private let onboarding: any SourceOnboardingGateway
+    private let sourceManagement: any SourceManagementGateway
 
     // 类型下拉的合法值与展示
-    private static let builtinStypeOptions: [(value: String, label: String)] = [
-        ("article", "RSS 文章"),
-        ("podcast", "播客"),
-        ("youtube", "YouTube"),
-        ("bilibili", "BiliBili"),
-    ]
-
-    private var stypeOptions: [(value: String, label: String)] {
-        Self.builtinStypeOptions
-            + ReadBoardSourceConnectorRegistry.shared.connectorsSupportingAddSource().map {
-                ($0.sourceType, $0.displayName)
-            }
-    }
+    @State private var sourceTypes: [SourceTypeDescriptor] = []
 
     @State private var name = ""
     @State private var identifier = ""          // 唯一的地址栏
@@ -673,8 +740,19 @@ public struct AddSourceSheet: View {
     @State private var resolvedFeedURL: String? = nil   // 检测成功后定稿的 feed URL（自动发现可能改写）
     @State private var resolvedSourceType: String? = nil // 外部连接器识别出的 stype
     @State private var testedOK = false                  // 检测通过才能添加
-    @State private var detectedMode: FetchMode = .summary   // 检测阶段拿到的全文模式，添加时直接复用，不重复 probe
-    @State private var historyScope: HistoryScope = .recent30d   // B站专属：历史回溯范围
+    @State private var detectedMode: SourceFetchMode = .summary
+    @State private var historyScope: SourceHistoryScope = .recent30Days
+
+    public init(
+        onboarding: any SourceOnboardingGateway,
+        sourceCatalog: any SourceCatalogGateway,
+        sourceManagement: any SourceManagementGateway
+    ) {
+        self.onboarding = onboarding
+        self.sourceManagement = sourceManagement
+        _catalog = StateObject(
+            wrappedValue: SourceCatalogStore(gateway: sourceCatalog))
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -714,8 +792,8 @@ public struct AddSourceSheet: View {
                     .tracking(RB.Track.section)
                     .padding(.top, 4)
                 Picker("", selection: $stype) {
-                    ForEach(stypeOptions, id: \.value) { opt in
-                        Text(opt.label).tag(opt.value)
+                    ForEach(sourceTypes) { option in
+                        Text(option.displayName).tag(option.id)
                     }
                 }
                 .pickerStyle(.menu)
@@ -731,11 +809,11 @@ public struct AddSourceSheet: View {
                     .padding(.top, 4)
                 Menu {
                     Button("未分组") { selectedFolderId = nil }
-                    ForEach(store.folders, id: \.id) { folder in
+                    ForEach(catalog.folders) { folder in
                         Button(folder.name) { selectedFolderId = folder.id }
                     }
                 } label: {
-                    Text(store.folders.first(where: { $0.id == selectedFolderId })?.name
+                    Text(catalog.folders.first(where: { $0.id == selectedFolderId })?.name
                          ?? (selectedFolderId == nil ? "未分组" : "未知"))
                         .frame(minWidth: 80, alignment: .leading)
                 }
@@ -766,7 +844,7 @@ public struct AddSourceSheet: View {
                         .tracking(RB.Track.section)
                         .padding(.top, 4)
                     Picker("", selection: $historyScope) {
-                        ForEach(HistoryScope.allCases, id: \.self) { scope in
+                        ForEach(SourceHistoryScope.allCases, id: \.self) { scope in
                             Text(scope.displayName).tag(scope)
                         }
                     }
@@ -821,60 +899,10 @@ public struct AddSourceSheet: View {
         }
         .padding(24)
         .frame(width: 480)
-    }
-
-    /// 把 FeedKind 映射到 content_source.stype 字段
-    private func stypeFromKind(_ kind: FeedKind) -> String {
-        switch kind {
-        case .article: return "article"
-        case .podcast: return "podcast"
-        case .video:   return "youtube"
+        .task {
+            sourceTypes = await onboarding.supportedSourceTypes()
+            await catalog.refresh()
         }
-    }
-
-    /// B站源在检测阶段的 stype 固定为 bilibili（resolveIdentifier 已分流）
-    private func stypeForBilibili() -> String { "bilibili" }
-
-    /// 解析用户输入为最终 identifier（先按 YouTube/B站特征识别，再下落 discover）
-    private func resolveIdentifier(_ input: String) async throws -> (feedURL: String, feed: ParsedFeed, sourceType: String?) {
-        let id = input.trimmingCharacters(in: .whitespaces)
-        if isWeChatArticleURL(id) {
-            for connector in ReadBoardSourceConnectorRegistry.shared.connectorsSupportingAddSource() {
-                guard let resolved = try await connector.resolveSourceIdentifier(id), !resolved.isEmpty else {
-                    continue
-                }
-                let feed = try await connector.previewSource(identifier: resolved)
-                return (resolved, feed, connector.sourceType)
-            }
-            throw NSError(
-                domain: "AddSource",
-                code: -10,
-                userInfo: [NSLocalizedDescriptionKey: "请升级 Pro 版本支持微信公众号订阅"]
-            )
-        }
-        // YouTube 频道地址 → 解析为 videos.xml（需 async 解析 channel_id）
-        if id.lowercased().contains("youtube.com") || id.lowercased().contains("youtu.be") {
-            let feedURL = try await YouTubeResolver.resolveFeedURL(id)
-            let feed = try await FeedFetcher.fetch(urlString: feedURL)
-            return (feedURL, feed, nil)
-        }
-        // B站 UP 主空间地址 → 提取 UID，走 BilibiliFetcher（JSON API，非 RSS）
-        if id.lowercased().contains("space.bilibili.com") || id.lowercased().contains("bilibili.com") {
-            guard let uid = BilibiliFetcher.extractUID(from: id) else {
-                throw NSError(domain: "AddSource", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法从该地址提取 BiliBili UID"])
-            }
-            // B站不走 RSS，直接构造 ParsedFeed（stype 由 addSource 的 bilibili 分支处理）
-            let feed = try await BilibiliFetcher.fetch(uid: uid, historyScope: .recent30d)
-            return (uid, feed, nil)
-        }
-        // 其余：自动发现（feed URL 或网站主页），feed 内容探测类型
-        let result = try await FeedFetcher.discoverAndFetch(urlString: id)
-        return (result.0, result.1, nil)
-    }
-
-    private func isWeChatArticleURL(_ input: String) -> Bool {
-        guard let url = URL(string: input), let host = url.host?.lowercased() else { return false }
-        return host == "mp.weixin.qq.com"
     }
 
     private func testFeed() {
@@ -885,43 +913,27 @@ public struct AddSourceSheet: View {
         Task {
             do {
                 let input = identifier.trimmingCharacters(in: .whitespaces)
-                let (feedURL, feed, externalType) = try await resolveIdentifier(input)
-                // 平台字幕路径严格由 stype 决定，不能用笼统的 feed.kind.video 代替。
-                let isBilibili = input.lowercased().contains("bilibili.com")
-                let detected = externalType ?? (isBilibili ? "bilibili" : stypeFromKind(feed.kind))
-                let storedType = detected == "article" ? "rss" : detected
-                let mode: FetchMode
-                if let externalType,
-                   let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: externalType) {
-                    mode = connector.fulltextMode
-                } else if let platformMode = FetchMode.platformDefault(for: storedType) {
-                    mode = platformMode
-                } else {
-                    mode = await FullTextFetcher.shared.probeMode(feedUrl: feedURL)
+                let result = try await onboarding.discover(
+                    identifier: input,
+                    suggestedType: stype)
+                let kindLabel = sourceTypes.first(where: { $0.id == result.sourceType })?.displayName
+                    ?? result.sourceType
+                var message = "✓ \(result.suggestedName)：\(result.previewItemCount) 条，识别为 \(kindLabel)，全文 \(result.fetchModeDisplayName)"
+                if result.canonicalIdentifier != input {
+                    message += "\n（已解析为: \(result.canonicalIdentifier)）"
                 }
-                let kindLabel = stypeOptions.first(where: { $0.value == detected })?.label ?? detected
-                let fulltextLabel: String
-                if let externalType,
-                   let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: externalType) {
-                    fulltextLabel = connector.fulltextDisplayName
-                } else {
-                    fulltextLabel = mode.displayName
-                }
-                var msg = "✓ \(feed.title)：\(feed.entries.count) 条，识别为 \(kindLabel)，全文 \(fulltextLabel)"
-                if feedURL != input { msg += "\n（主页自动发现 feed: \(feedURL)）" }
                 await MainActor.run {
-                    if store.existsByIdentifier(feedURL) {
-                        // 已存在于订阅源列表 → 黄色重复提示，阻止重复添加
+                    if result.existingSourceID != nil {
                         testResult = "该源已存在于订阅源列表，无需重复添加"
                         testedOK = false
                     } else {
-                        testResult = msg
-                        resolvedFeedURL = feedURL
-                        resolvedSourceType = storedType
+                        testResult = message
+                        resolvedFeedURL = result.canonicalIdentifier
+                        resolvedSourceType = result.sourceType
                         testedOK = true
-                        stype = detected          // 自动填入类型
-                        detectedMode = mode       // 记下检测到的全文模式，添加时直接复用
-                        if name.isEmpty { name = feed.title }
+                        stype = result.sourceType
+                        detectedMode = result.fetchMode
+                        if name.isEmpty { name = result.suggestedName }
                     }
                     testing = false
                 }
@@ -939,35 +951,35 @@ public struct AddSourceSheet: View {
             testResult = "✗ 请先检测"
             return
         }
-        // stype 下拉用 article/podcast/youtube，addSource 内部 rss 分支按 fetch_mode 处理；
-        // 这里统一映射回 addSource 认识的 stype 约定：article→rss、podcast/youtube 原样
-        let storeStype = resolvedSourceType ?? ((stype == "article") ? "rss" : stype)
+        // 检测结果会预填类型，但用户在下拉中手动修改后应以当前选择为准。
+        let sourceType = stype
         let finalName = name.isEmpty ? identifier : name
         testing = true
         testResult = ""
-        let pipeline = PipelinePolicy(autoScore: autoScore, autoTranslate: autoTranslate,
-                                       autoTranscribe: autoTranscribe, autoSummarize: autoSummarize)
         Task {
-            guard let newId = await store.addSource(stype: storeStype, name: finalName, identifier: url,
-                                                     folderId: selectedFolderId, pipeline: pipeline,
-                                                     fetchMode: detectedMode,
-                                                     historyScope: stype == "bilibili" ? historyScope : nil) else {
+            do {
+                let result = try await onboarding.create(request: SourceCreationRequest(
+                    identifier: url,
+                    name: finalName,
+                    sourceType: sourceType,
+                    folderID: selectedFolderId,
+                    policy: SourcePolicySnapshot(
+                        autoScore: autoScore,
+                        autoTranslate: autoTranslate,
+                        autoTranscribe: autoTranscribe,
+                        autoSummarize: autoSummarize),
+                    fetchMode: detectedMode,
+                    historyScope: sourceType == "bilibili" ? historyScope : nil,
+                    refreshAfterCreation: false))
+                await MainActor.run { dismiss() }
+                if refreshAfterAdd {
+                    _ = try? await sourceManagement.sync(
+                        scope: SourceScope(kind: .source, id: result.sourceID))
+                }
+            } catch {
                 await MainActor.run {
                     testing = false
-                    testResult = "✗ 添加失败（可能已存在相同源）"
-                }
-                return
-            }
-            // 添加成功 → 窗口立即关闭，后续在后台进行
-            await MainActor.run { dismiss() }
-            // 后台刷新首批文章（不阻塞窗口关闭）
-            if refreshAfterAdd,
-               let src = store.sources.first(where: { $0.id == newId }) {
-                do {
-                    let n = try await store.syncOne(src)
-                    Trace.i("添加源后刷新完成: \(src.name) 拉取 \(n) 条", category: "source")
-                } catch {
-                    Trace.w("添加源后刷新失败: \(src.name) \(error.localizedDescription)", category: "source")
+                    testResult = "✗ \(error.localizedDescription)"
                 }
             }
         }
@@ -979,10 +991,10 @@ public struct AddSourceSheet: View {
 /// 用户可单个移除，确认后才落库。与「添加订阅源」同源的检测逻辑。
 
 public struct OPMLImportSummary: View {
-    @ObservedObject var store: SourceStore
     @Environment(\.dismiss) private var dismiss
-
     let plan: OPMLImportPlan
+    private let onboarding: any SourceOnboardingGateway
+    @StateObject private var catalog: SourceCatalogStore
 
     // 类型下拉合法值（article 显示名 RSS 文章，落库映射回 rss）
     private static let stypeOptions: [(value: String, label: String)] = [
@@ -996,6 +1008,17 @@ public struct OPMLImportSummary: View {
     @State private var refreshAfterAdd: Bool = true
     @State private var committing = false
     @State private var committedMsg: String? = nil
+
+    public init(
+        plan: OPMLImportPlan,
+        onboarding: any SourceOnboardingGateway,
+        sourceCatalog: any SourceCatalogGateway
+    ) {
+        self.plan = plan
+        self.onboarding = onboarding
+        _catalog = StateObject(
+            wrappedValue: SourceCatalogStore(gateway: sourceCatalog))
+    }
 
     /// 待添加数 = 非库 且 状态正常(pending) 的项（红/黄已标的不计、不提交）
     private var pendingCount: Int { items.filter { !$0.inLibrary && $0.status == .pending }.count }
@@ -1149,7 +1172,7 @@ public struct OPMLImportSummary: View {
                         .foregroundStyle(Color.rbText3)
                     Menu {
                         Button("未分组") { item.folderName.wrappedValue = nil }
-                        ForEach(store.folders, id: \.id) { folder in
+                        ForEach(catalog.folders) { folder in
                             Button(folder.name) { item.folderName.wrappedValue = folder.name }
                         }
                     } label: {
@@ -1227,9 +1250,10 @@ public struct OPMLImportSummary: View {
     // 后台批量检测：对每条跑一次 discoverAndFetch（同时得出类型 + 全文模式），
     // 与手动添加同源；已存在的项只标记 inLibrary、不检测。
     private func detectAll() async {
+        await catalog.refresh()
         var built: [OPMLImportItem] = []
         for o in plan.outlines {
-            let inLib = store.existsByIdentifier(o.url)
+            let inLib = catalog.sources.contains { $0.identifier == o.url }
             built.append(OPMLImportItem(
                 name: o.title, url: o.url, stype: mapStype(o.stypeGuess),
                 fetchModeRaw: "summary", folderName: o.folderName, inLibrary: inLib,
@@ -1249,14 +1273,17 @@ public struct OPMLImportSummary: View {
                 let url = built[i].url
                 let guess = built[i].stype
                 group.addTask {
-                    let (feed, ok) = await detect(url: url, guess: guess)
+                    let result = try? await onboarding.discover(
+                        identifier: url,
+                        suggestedType: guess)
                     await MainActor.run {
                         if let idx = items.firstIndex(where: { $0.url == url && !$0.inLibrary }) {
-                            if ok {
-                                items[idx].stype = feed.kind == .article ? "article"
-                                    : (feed.kind == .podcast ? "podcast" : "youtube")
-                                items[idx].fetchModeRaw = FullTextFetcher.shared.probeMode(forFeed: feed).rawValue
-                                if items[idx].name.isEmpty { items[idx].name = feed.title }
+                            if let result {
+                                items[idx].url = result.canonicalIdentifier
+                                items[idx].stype = result.sourceType
+                                items[idx].fetchModeRaw = result.fetchMode.rawValue
+                                items[idx].inLibrary = result.existingSourceID != nil
+                                if items[idx].name.isEmpty { items[idx].name = result.suggestedName }
                             } else {
                                 // 地址不通：红色叹号，确认时跳过（不静默落库）
                                 items[idx].status = .unreachable
@@ -1267,20 +1294,13 @@ public struct OPMLImportSummary: View {
                 }
             }
         }
-    }
-
-    /// 检测单条：成功返回 (feed, true)；地址不通返回 (空 feed, false) 并标红。
-    /// 之前地址不通会保底用猜测值并静默添加——现在必须显式标红提示用户。
-    private func detect(url: String, guess: String) async -> (ParsedFeed, Bool) {
-        let input = url.trimmingCharacters(in: .whitespaces)
-        do {
-            if guess == "youtube" {
-                let feedURL = try await YouTubeResolver.resolveFeedURL(input)
-                return (try await FeedFetcher.fetch(urlString: feedURL), true)
+        await MainActor.run {
+            let grouped = Dictionary(grouping: items.indices, by: { items[$0].url })
+            for indices in grouped.values where indices.count > 1 {
+                for index in indices where !items[index].inLibrary {
+                    items[index].status = .duplicate
+                }
             }
-            return (try await FeedFetcher.discoverAndFetch(urlString: input).feed, true)
-        } catch {
-            return (ParsedFeed(title: "", siteURL: nil, entries: []), false)
         }
     }
 
@@ -1299,30 +1319,38 @@ public struct OPMLImportSummary: View {
         let toAdd = items.filter { !$0.inLibrary && $0.status == .pending }
         let skipped = items.filter { !$0.inLibrary && $0.status != .pending }.count
         Task {
-            let ids = store.commitImport(toAdd, policies: policies)
-            if refreshAfterAdd {
-                // 逐个立即抓首批（后台，不阻塞关闭）
-                Task {
-                    for id in ids {
-                        if let src = store.sources.first(where: { $0.id == id }) {
-                            _ = try? await store.syncOne(src)
-                        }
-                    }
-                    await MainActor.run {
-                        committing = false
-                        var msg = "已添加 \(ids.count) 项并完成首次刷新"
-                        if skipped > 0 { msg += "（\(skipped) 项重复/不通已跳过）" }
-                        committedMsg = msg
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { dismiss() }
-                    }
+            do {
+                let requests = toAdd.map { item in
+                    let policy = policies[item.url] ?? PipelinePolicy()
+                    return SourceBatchImportItem(
+                        id: item.id.uuidString,
+                        name: item.name,
+                        identifier: item.url,
+                        sourceType: item.stype,
+                        folderName: item.folderName,
+                        policy: SourcePolicySnapshot(
+                            autoScore: policy.autoScore,
+                            autoTranslate: policy.autoTranslate,
+                            autoTranscribe: policy.autoTranscribe,
+                            autoSummarize: policy.autoSummarize),
+                        fetchMode: SourceFetchMode(rawValue: item.fetchModeRaw) ?? .summary)
                 }
-            } else {
+                let result = try await onboarding.importSources(
+                    items: requests,
+                    refreshAfterCreation: refreshAfterAdd)
                 await MainActor.run {
                     committing = false
-                    var msg = "已添加 \(ids.count) 项"
-                    if skipped > 0 { msg += "（\(skipped) 项重复/不通已跳过）" }
+                    var msg = result.message
+                    let totalSkipped = skipped + result.skippedCount
+                    if totalSkipped > 0 { msg += "（\(totalSkipped) 项重复/不通已跳过）" }
                     committedMsg = msg
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { dismiss() }
+                    DispatchQueue.main.asyncAfter(
+                        deadline: .now() + (refreshAfterAdd ? 1.2 : 1.0)) { dismiss() }
+                }
+            } catch {
+                await MainActor.run {
+                    committing = false
+                    committedMsg = "导入失败：\(error.localizedDescription)"
                 }
             }
         }

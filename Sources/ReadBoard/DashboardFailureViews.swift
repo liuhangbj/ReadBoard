@@ -1,17 +1,28 @@
 import SwiftUI
 import AppKit
+import ReadBoardContract
 
 // MARK: - 源更新问题列表
 
 struct SourceFailureListSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var store = SourceStore.shared
-    @State private var items: [SourceHealth] = []
+    @StateObject private var catalog: SourceCatalogStore
+    private let sourceManagement: any SourceManagementGateway
+    @State private var items: [SourceCatalogItem] = []
     @State private var loading = true
     @State private var retryingSourceID: Int64?
     @State private var retryingAll = false
     @State private var statusMessage = ""
     @State private var statusIsSuccess = true
+
+    init(
+        sourceCatalog: any SourceCatalogGateway,
+        sourceManagement: any SourceManagementGateway
+    ) {
+        _catalog = StateObject(
+            wrappedValue: SourceCatalogStore(gateway: sourceCatalog))
+        self.sourceManagement = sourceManagement
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -67,7 +78,7 @@ struct SourceFailureListSheet: View {
                     }
                 }
                 .buttonStyle(.primaryCapsule)
-                .disabled(items.isEmpty || retryingAll || retryingSourceID != nil || store.isSyncing)
+                .disabled(items.isEmpty || retryingAll || retryingSourceID != nil || catalog.isSyncing)
             }
             .padding(14)
         }
@@ -75,7 +86,7 @@ struct SourceFailureListSheet: View {
         .task { await reload(showLoading: true) }
     }
 
-    private func sourceRow(_ source: SourceHealth) -> some View {
+    private func sourceRow(_ source: SourceCatalogItem) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: source.hasError
                   ? "exclamationmark.triangle.fill"
@@ -119,24 +130,30 @@ struct SourceFailureListSheet: View {
             }
             .buttonStyle(.quiet)
             .controlSize(.small)
-            .disabled(retryingAll || retryingSourceID != nil || store.isSyncing)
+            .disabled(retryingAll || retryingSourceID != nil || catalog.isSyncing)
         }
     }
 
-    private func staleDescription(_ source: SourceHealth) -> String {
+    private func staleDescription(_ source: SourceCatalogItem) -> String {
         if let hours = source.hoursSinceFetch {
             return "上次成功更新于 \(Int(hours)) 小时前 · 已入库 \(source.contentCount) 条"
         }
         return "尚未完成首次更新 · 已入库 \(source.contentCount) 条"
     }
 
-    private func retry(_ source: SourceHealth) {
+    private func retry(_ source: SourceCatalogItem) {
         retryingSourceID = source.id
         statusMessage = ""
         Task {
-            let result = await store.retrySource(id: source.id)
-            statusIsSuccess = result.success
-            statusMessage = result.message
+            do {
+                let result = try await sourceManagement.sync(
+                    scope: SourceScope(kind: .source, id: source.id))
+                statusIsSuccess = true
+                statusMessage = result.message
+            } catch {
+                statusIsSuccess = false
+                statusMessage = error.localizedDescription
+            }
             retryingSourceID = nil
             await reload(showLoading: false)
         }
@@ -151,8 +168,13 @@ struct SourceFailureListSheet: View {
             var failed = 0
             for (index, id) in sourceIDs.enumerated() {
                 statusMessage = "正在重试 \(index + 1)/\(sourceIDs.count)…"
-                let result = await store.retrySource(id: id)
-                if result.success { succeeded += 1 } else { failed += 1 }
+                do {
+                    _ = try await sourceManagement.sync(
+                        scope: SourceScope(kind: .source, id: id))
+                    succeeded += 1
+                } catch {
+                    failed += 1
+                }
             }
             statusIsSuccess = failed == 0
             statusMessage = "重试完成：成功 \(succeeded)，失败 \(failed)"
@@ -164,10 +186,8 @@ struct SourceFailureListSheet: View {
     @MainActor
     private func reload(showLoading: Bool) async {
         if showLoading { loading = true }
-        let report = await Task.detached(priority: .userInitiated) {
-            SourceHealthService.shared.problemSources()
-        }.value
-        items = report
+        await catalog.refresh()
+        items = catalog.sources.filter { $0.enabled && ($0.hasError || $0.isStale) }
         loading = false
     }
 }
@@ -176,13 +196,20 @@ struct SourceFailureListSheet: View {
 
 struct ContentFailureListSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var worker = PipelineWorker.shared
-    @State private var items: [PausedContentFailure] = []
+    private let runtimeStatus: any RuntimeStatusGateway
+    private let administration: any AdministrationGateway
+    @State private var items: [ContentProcessingFailure] = []
     @State private var loading = true
     @State private var retryingJobID: Int64?
     @State private var retryingAll = false
     @State private var statusMessage = ""
     @State private var statusIsSuccess = true
+
+    init(runtimeStatus: any RuntimeStatusGateway,
+         administration: any AdministrationGateway = ReadBoardServices.live.administration) {
+        self.runtimeStatus = runtimeStatus
+        self.administration = administration
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -246,9 +273,9 @@ struct ContentFailureListSheet: View {
         .task { await reload(showLoading: true) }
     }
 
-    private func failureRow(_ failure: PausedContentFailure) -> some View {
+    private func failureRow(_ failure: ContentProcessingFailure) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: taskIcon(failure.jtype))
+            Image(systemName: taskIcon(failure.jobType))
                 .font(.system(size: 14))
                 .foregroundStyle(Color.rbScoreLow)
                 .frame(width: 20, height: 20)
@@ -259,7 +286,7 @@ struct ContentFailureListSheet: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Color.rbText)
                         .lineLimit(1)
-                    FailureTypeBadge(text: taskLabel(failure.jtype))
+                    FailureTypeBadge(text: taskLabel(failure.jobType))
                     Text("连续失败 \(failure.consecutiveFailures) 次")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(Color.rbScoreLow)
@@ -300,24 +327,25 @@ struct ContentFailureListSheet: View {
         }
     }
 
-    private func ignore(_ failure: PausedContentFailure) {
-        statusIsSuccess = FailedJobService.shared.ignore(failure)
-        statusMessage = statusIsSuccess
-            ? "已忽略“\(failure.title)”的\(taskLabel(failure.jtype))目标"
-            : "忽略失败"
-        worker.requestPendingRefresh()
-        Task { await reload(showLoading: false) }
+    private func ignore(_ failure: ContentProcessingFailure) {
+        Task {
+            statusIsSuccess = await administration.ignoreProcessingFailure(id: failure.id)
+            statusMessage = statusIsSuccess
+                ? "已忽略“\(failure.title)”的\(taskLabel(failure.jobType))目标" : "忽略失败"
+            _ = await runtimeStatus.snapshot(refreshCounts: true)
+            await reload(showLoading: false)
+        }
     }
 
-    private func retry(_ failure: PausedContentFailure) {
+    private func retry(_ failure: ContentProcessingFailure) {
         retryingJobID = failure.id
         statusMessage = ""
         Task {
-            let success = await FailedJobService.shared.retry(failure)
+            let success = await administration.retryProcessingFailure(id: failure.id)
             statusIsSuccess = success
             statusMessage = success ? "“\(failure.title)”重试成功" : "“\(failure.title)”重试失败"
             retryingJobID = nil
-            worker.requestPendingRefresh()
+            _ = await runtimeStatus.snapshot(refreshCounts: true)
             await reload(showLoading: false)
         }
     }
@@ -331,7 +359,7 @@ struct ContentFailureListSheet: View {
             var failed = 0
             for (index, failure) in failures.enumerated() {
                 statusMessage = "正在重试 \(index + 1)/\(failures.count)…"
-                if await FailedJobService.shared.retry(failure) {
+                if await administration.retryProcessingFailure(id: failure.id) {
                     succeeded += 1
                 } else {
                     failed += 1
@@ -340,7 +368,7 @@ struct ContentFailureListSheet: View {
             statusIsSuccess = failed == 0
             statusMessage = "重试完成：成功 \(succeeded)，失败 \(failed)"
             retryingAll = false
-            worker.requestPendingRefresh()
+            _ = await runtimeStatus.snapshot(refreshCounts: true)
             await reload(showLoading: false)
         }
     }
@@ -348,10 +376,7 @@ struct ContentFailureListSheet: View {
     @MainActor
     private func reload(showLoading: Bool) async {
         if showLoading { loading = true }
-        let failures = await Task.detached(priority: .userInitiated) {
-            FailedJobService.shared.pausedFailures()
-        }.value
-        items = failures
+        items = await administration.processingFailures()
         loading = false
     }
 
@@ -378,54 +403,22 @@ struct ContentFailureListSheet: View {
 
 // MARK: - 外部平台正文提取失败列表
 
-struct ExternalFullTextFailure: Identifiable, Sendable {
-    let id: Int64
-    let title: String
-    let sourceName: String
-    let sourceType: String
-    let url: String
-    let error: String
-    let updatedAt: String?
-}
-
-private final class ExternalFullTextFailureService: @unchecked Sendable {
-    static let shared = ExternalFullTextFailureService()
-    private init() {}
-
-    func failures(limit: Int = 200) -> [ExternalFullTextFailure] {
-        Database.shared.queryRows("""
-            SELECT c.id, c.title, c.url, c.fetch_error, c.updated_at,
-                   s.name AS source_name, s.stype
-            FROM content c
-            JOIN content_source s ON s.id=c.source_id
-            WHERE c.fetch_status=3
-              AND c.deleted_at IS NULL
-              AND c.is_duplicate=0
-              AND c.fetch_engine LIKE '%_connector'
-            ORDER BY c.updated_at DESC, c.id DESC
-            LIMIT ?;
-            """, params: [limit]).compactMap { row in
-                guard let id = Int64(row["id"] ?? "") else { return nil }
-                return ExternalFullTextFailure(
-                    id: id,
-                    title: row["title"] ?? "(无标题)",
-                    sourceName: row["source_name"] ?? row["stype"] ?? "外部平台",
-                    sourceType: row["stype"] ?? "external",
-                    url: row["url"] ?? "",
-                    error: row["fetch_error"] ?? "平台未返回可用正文",
-                    updatedAt: row["updated_at"])
-            }
-    }
-}
-
 struct ExternalFullTextFailureListSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var items: [ExternalFullTextFailure] = []
+    private let sourceManagement: any SourceManagementGateway
+    private let administration: any AdministrationGateway
+    @State private var items: [FullTextFailure] = []
     @State private var loading = true
     @State private var retryingID: Int64?
     @State private var retryingAll = false
     @State private var statusMessage = ""
     @State private var statusIsSuccess = true
+
+    init(sourceManagement: any SourceManagementGateway,
+         administration: any AdministrationGateway = ReadBoardServices.live.administration) {
+        self.sourceManagement = sourceManagement
+        self.administration = administration
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -477,7 +470,7 @@ struct ExternalFullTextFailureListSheet: View {
         .task { await reload(showLoading: true) }
     }
 
-    private func failureRow(_ failure: ExternalFullTextFailure) -> some View {
+    private func failureRow(_ failure: FullTextFailure) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "doc.text.magnifyingglass")
                 .foregroundStyle(Color.rbScoreMid)
@@ -507,13 +500,18 @@ struct ExternalFullTextFailureListSheet: View {
         }
     }
 
-    private func retry(_ failure: ExternalFullTextFailure) {
+    private func retry(_ failure: FullTextFailure) {
         retryingID = failure.id
         statusMessage = ""
         Task {
-            let success = await SourceStore.shared.retryExternalFulltext(contentId: failure.id)
-            statusIsSuccess = success
-            statusMessage = success ? "“\(failure.title)”正文补抓成功" : "“\(failure.title)”仍无法提取"
+            do {
+                _ = try await sourceManagement.retryFulltext(contentID: failure.id)
+                statusIsSuccess = true
+                statusMessage = "“\(failure.title)”正文补抓成功"
+            } catch {
+                statusIsSuccess = false
+                statusMessage = "“\(failure.title)”仍无法提取"
+            }
             retryingID = nil
             await reload(showLoading: false)
         }
@@ -528,7 +526,7 @@ struct ExternalFullTextFailureListSheet: View {
             var failed = 0
             for (index, failure) in failures.enumerated() {
                 statusMessage = "正在重试 \(index + 1)/\(failures.count)…"
-                if await SourceStore.shared.retryExternalFulltext(contentId: failure.id) {
+                if (try? await sourceManagement.retryFulltext(contentID: failure.id)) != nil {
                     succeeded += 1
                 } else {
                     failed += 1
@@ -544,9 +542,7 @@ struct ExternalFullTextFailureListSheet: View {
     @MainActor
     private func reload(showLoading: Bool) async {
         if showLoading { loading = true }
-        items = await Task.detached(priority: .userInitiated) {
-            ExternalFullTextFailureService.shared.failures()
-        }.value
+        items = await administration.fullTextFailures(limit: 200)
         loading = false
     }
 }

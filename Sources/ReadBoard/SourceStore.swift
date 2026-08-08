@@ -190,6 +190,7 @@ public final class SourceStore: ObservableObject {
     func reload() {
         sources = fetchAllSources()
         folders = fetchAllFolders()
+        NotificationCenter.default.post(name: .sourceCatalogUpdated, object: nil)
     }
 
     /// 外部连接器注册后，把该类型源历史遗留的 summary 配置修成平台全文模式。
@@ -757,6 +758,7 @@ public final class SourceStore: ObservableObject {
         // @MainActor 在 await 时允许重入；isSyncing 必须既是 UI 状态也是入口锁。
         guard !isSyncing else { return }
         isSyncing = true
+        NotificationCenter.default.post(name: .sourceCatalogUpdated, object: nil)
         defer {
             isSyncing = false
             reload()
@@ -807,6 +809,7 @@ public final class SourceStore: ObservableObject {
     private func syncExternalSources(manual: Bool) async {
         guard !isExternalSyncing else { return }
         isExternalSyncing = true
+        NotificationCenter.default.post(name: .sourceCatalogUpdated, object: nil)
         defer {
             isExternalSyncing = false
             reload()
@@ -850,6 +853,7 @@ public final class SourceStore: ObservableObject {
         // 单源刷新、添加源后的首次刷新与 syncAll 共用同一入口锁，避免网络请求重叠。
         guard !isSyncing else { throw SyncError.alreadyRunning }
         isSyncing = true
+        NotificationCenter.default.post(name: .sourceCatalogUpdated, object: nil)
         defer {
             isSyncing = false
             reload()

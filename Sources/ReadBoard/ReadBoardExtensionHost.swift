@@ -1,4 +1,5 @@
 import Foundation
+import ReadBoardContract
 
 public enum ReadBoardConnectorAuthenticationState: Sendable, Equatable {
     case notRequired
@@ -42,6 +43,11 @@ public protocol ReadBoardSourceConnector: Sendable {
     /// 只做轻量本地状态判断，不应为了刷新问题中心频繁访问平台接口。
     func authenticationState() async -> ReadBoardConnectorAuthenticationState
 
+    /// 可选的统一扫码授权入口。适配器内部持有平台临时凭证；中间层只传递不透明 challengeID。
+    func beginAuthentication() async throws -> PlatformAuthenticationChallenge
+    func pollAuthentication(challengeID: String) async throws -> PlatformAuthenticationPoll
+    func signOut() async throws
+
     /// 某错误意味着继续抓同平台其余源只会制造重复失败时，暂停本轮该平台。
     func shouldPauseBatch(after error: Error) -> Bool
 }
@@ -69,7 +75,20 @@ public extension ReadBoardSourceConnector {
     }
 
     func authenticationState() async -> ReadBoardConnectorAuthenticationState { .notRequired }
+    func beginAuthentication() async throws -> PlatformAuthenticationChallenge {
+        throw ReadBoardConnectorError.authenticationNotSupported
+    }
+    func pollAuthentication(challengeID: String) async throws -> PlatformAuthenticationPoll {
+        throw ReadBoardConnectorError.authenticationNotSupported
+    }
+    func signOut() async throws { throw ReadBoardConnectorError.authenticationNotSupported }
     func shouldPauseBatch(after error: Error) -> Bool { false }
+}
+
+public enum ReadBoardConnectorError: LocalizedError {
+    case authenticationNotSupported
+
+    public var errorDescription: String? { "此平台不支持统一授权操作" }
 }
 
 /// 运行期适配器注册表。限制在 MainActor，避免同步任务与模块生命周期之间出现竞态。

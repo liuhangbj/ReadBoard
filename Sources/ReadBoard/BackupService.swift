@@ -45,6 +45,8 @@ public final class BackupService: ObservableObject {
         }
     }
 
+    func stop() { timer?.invalidate(); timer = nil }
+
     /// 距上次备份超过间隔才执行
     func backupIfDue() async {
         let last = UserDefaults.standard.double(forKey: "backup.lastAt")

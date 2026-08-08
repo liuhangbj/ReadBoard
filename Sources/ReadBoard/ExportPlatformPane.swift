@@ -1,15 +1,19 @@
 import SwiftUI
 import AppKit
+import ReadBoardContract
 
 // MARK: - 导出平台配置
 
 public struct ExportPlatformPane: View {
-    @State private var obsidianOn = ExportPlatformConfig.shared.isEnabled("obsidian")
-    @State private var webhookOn = ExportPlatformConfig.shared.isEnabled("webhook")
+    private let configuration: any ConfigurationGateway
+    @State private var obsidianOn = false
+    @State private var webhookOn = false
 
-    @State private var obsidianDir = ExportPlatformConfig.shared.obsidianDir
-    @State private var webhookURL = ExportPlatformConfig.shared.webhookURL
+    @State private var obsidianDir = ""
+    @State private var webhookURL = ""
     @State private var webhookHeaders    = ""
+
+    public init(configuration: any ConfigurationGateway) { self.configuration = configuration }
 
     public var body: some View {
         Form {
@@ -30,8 +34,11 @@ public struct ExportPlatformPane: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            webhookHeaders = ExportPlatformConfig.shared.webhookHeaders
+        .task {
+            let value = await configuration.snapshot().exportPlatforms
+            obsidianOn = value.obsidianEnabled; obsidianDir = value.obsidianDirectory
+            webhookOn = value.webhookEnabled; webhookURL = value.webhookURL
+            webhookHeaders = value.webhookHeaders
                 .map { "\($0.key): \($0.value)" }.joined(separator: "\n")
         }
     }
@@ -42,7 +49,7 @@ public struct ExportPlatformPane: View {
             get: { isOn.wrappedValue },
             set: { v in
                 isOn.wrappedValue = v
-                ExportPlatformConfig.shared.setEnabled(key, v)
+                persist()
             }
         ))
         .tint(Color.rbAccent)
@@ -70,7 +77,7 @@ public struct ExportPlatformPane: View {
             HStack(spacing: 6) {
                 Text("URL").font(.caption).foregroundStyle(Color.rbText3).frame(width: 40, alignment: .leading)
                 TextField("https://…", text: $webhookURL).textFieldStyle(.roundedBorder).font(.caption)
-                    .onChange(of: webhookURL) { _, v in ExportPlatformConfig.shared.webhookURL = v }
+                    .onChange(of: webhookURL) { _, _ in persist() }
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text("自定义 Header（每行 Key: Value）").font(.caption).foregroundStyle(Color.rbText3)
@@ -83,7 +90,7 @@ public struct ExportPlatformPane: View {
                             let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
                             if parts.count == 2 { dict[parts[0]] = parts[1] }
                         }
-                        ExportPlatformConfig.shared.webhookHeaders = dict
+                        persist(headers: dict)
                     }
             }
         }
@@ -96,7 +103,20 @@ public struct ExportPlatformPane: View {
         panel.prompt = "选择"; panel.message = "选择 Obsidian Vault 目录"
         if panel.runModal() == .OK, let url = panel.url {
             obsidianDir = url.path
-            ExportPlatformConfig.shared.obsidianDir = url.path
+            persist()
         }
+    }
+
+    private func persist(headers: [String: String]? = nil) {
+        let parsedHeaders = headers ?? Dictionary(uniqueKeysWithValues: webhookHeaders
+            .split(separator: "\n").compactMap { line -> (String, String)? in
+                let parts = line.split(separator: ":", maxSplits: 1)
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                return parts.count == 2 ? (parts[0], parts[1]) : nil
+            })
+        let value = ExportPlatformConfiguration(obsidianEnabled: obsidianOn,
+            obsidianDirectory: obsidianDir, webhookEnabled: webhookOn,
+            webhookURL: webhookURL, webhookHeaders: parsedHeaders)
+        Task { await configuration.updateExportPlatforms(value) }
     }
 }

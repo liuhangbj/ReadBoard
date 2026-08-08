@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import ReadBoardContract
 
 enum AppIssueCategory: String, CaseIterable, Sendable {
     case sources = "源抓取"
@@ -58,28 +59,27 @@ private struct LocalIssueSnapshot: Sendable {
 
 private final class IssueHealthService: @unchecked Sendable {
     static let shared = IssueHealthService()
-    private let db = Database.shared
     private init() {}
 
-    func snapshot(isSourceRepairing: Bool) -> LocalIssueSnapshot {
-        _ = db.open()
+    func snapshot(
+        sourceCatalog: SourceCatalogSnapshot,
+        runtimeStatus: RuntimeStatusSnapshot,
+        problemCounts: OperationalProblemCounts
+    ) -> LocalIssueSnapshot {
         var issues: [AppIssue] = []
-        let sourceRows = db.queryRows("""
-            SELECT stype, error, last_fetched_at
-            FROM content_source
-            WHERE enabled=1;
-            """)
-        let sourceTypes = Set(sourceRows.compactMap { $0["stype"] })
+        let enabledSources = sourceCatalog.sources.filter(\.enabled)
+        let sourceTypes = Set(enabledSources.map(\.sourceType))
         var sourceFailures: [String: [(error: String, lastFetchedAt: String?)]] = [:]
         var staleWithoutError: [String: Int] = [:]
         let now = Date()
+        let isSourceRepairing = sourceCatalog.isSyncing || sourceCatalog.isExternalSyncing
 
-        for row in sourceRows {
-            let type = row["stype"] ?? "rss"
-            let error = row["error"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        for source in enabledSources {
+            let type = source.sourceType
+            let error = source.error?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !error.isEmpty {
-                sourceFailures[type, default: []].append((error, row["last_fetched_at"]))
-            } else if isStale(row["last_fetched_at"], now: now) {
+                sourceFailures[type, default: []].append((error, source.lastFetchedAt))
+            } else if isStale(source.lastFetchedAt, now: now) {
                 staleWithoutError[type, default: 0] += 1
             }
         }
@@ -132,30 +132,20 @@ private final class IssueHealthService: @unchecked Sendable {
                 action: .sourceFailures))
         }
 
-        let paused = FailedJobService.shared.pausedFailures()
-        if !paused.isEmpty {
+        if runtimeStatus.pausedFailureCount > 0 {
             issues.append(AppIssue(
                 id: "processing.deadletters",
                 category: .processing,
                 severity: .needsAttention,
                 title: "自动内容处理已暂停",
                 detail: "连续失败三次的目标需要重试或永久忽略。",
-                affectedCount: paused.count,
+                affectedCount: runtimeStatus.pausedFailureCount,
                 actionTitle: "查看处理项",
                 action: .contentFailures))
         }
 
-        let externalFulltext = db.queryRows("""
-            SELECT COUNT(*) AS failures,
-                   SUM(CASE WHEN c.updated_at <= datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS persistent
-            FROM content c
-            WHERE c.fetch_status=3
-              AND c.deleted_at IS NULL
-              AND c.is_duplicate=0
-              AND c.fetch_engine LIKE '%_connector';
-            """).first
-        let externalFailures = Int(externalFulltext?["failures"] ?? "0") ?? 0
-        let persistentFailures = Int(externalFulltext?["persistent"] ?? "0") ?? 0
+        let externalFailures = problemCounts.fullTextFailures
+        let persistentFailures = problemCounts.persistentFullTextFailures
         if externalFailures > 0 {
             issues.append(AppIssue(
                 id: "processing.external-fulltext",
@@ -170,14 +160,8 @@ private final class IssueHealthService: @unchecked Sendable {
                 action: .fulltextFailures))
         }
 
-        let exportFailure = db.queryRows("""
-            SELECT COUNT(*) AS failures, COUNT(DISTINCT er.rule_id) AS rules
-            FROM export_record er
-            JOIN export_rule r ON r.id=er.rule_id AND r.revision=er.revision
-            WHERE r.enabled=1 AND er.status='failed';
-            """).first
-        let exportFailures = Int(exportFailure?["failures"] ?? "0") ?? 0
-        let exportRules = Int(exportFailure?["rules"] ?? "0") ?? 0
+        let exportFailures = problemCounts.exportFailures
+        let exportRules = problemCounts.affectedExportRules
         if exportFailures > 0 {
             issues.append(AppIssue(
                 id: "export.failed",
@@ -218,6 +202,25 @@ private final class IssueHealthService: @unchecked Sendable {
 final class IssueCenterStore: ObservableObject {
     @Published private(set) var issues: [AppIssue] = []
     @Published private(set) var isRefreshing = false
+    private let sourceCatalog: any SourceCatalogGateway
+    private let runtimeStatus: any RuntimeStatusGateway
+    private let administration: any AdministrationGateway
+    private let authentication: any AuthenticationGateway
+    private let configuration: any ConfigurationGateway
+
+    init(
+        sourceCatalog: any SourceCatalogGateway = LocalSourceCatalogGateway(),
+        runtimeStatus: any RuntimeStatusGateway = LocalRuntimeStatusGateway(),
+        administration: any AdministrationGateway = LocalAdministrationGateway(),
+        authentication: any AuthenticationGateway = LocalAuthenticationGateway(),
+        configuration: any ConfigurationGateway = LocalConfigurationGateway()
+    ) {
+        self.sourceCatalog = sourceCatalog
+        self.runtimeStatus = runtimeStatus
+        self.administration = administration
+        self.authentication = authentication
+        self.configuration = configuration
+    }
 
     var status: AppHealthStatus {
         if issues.contains(where: { $0.severity == .needsAttention }) { return .needsAttention }
@@ -236,31 +239,42 @@ final class IssueCenterStore: ObservableObject {
     func refresh() async {
         guard !isRefreshing else { return }
         isRefreshing = true
-        let sourceRepairing = SourceStore.shared.isSyncing || SourceStore.shared.isExternalSyncing
+        async let catalogValue = try? sourceCatalog.snapshot()
+        async let runtimeValue = runtimeStatus.snapshot(refreshCounts: false)
+        async let problemValue = administration.operationalProblemCounts()
+        async let authenticationValue = authentication.statuses()
+        async let configurationValue = configuration.snapshot()
+        let catalog = await catalogValue ?? SourceCatalogSnapshot()
+        let runtime = await runtimeValue
+        let problems = await problemValue
+        let authStatuses = await authenticationValue
+        let serviceConfiguration = await configurationValue
         let local = await Task.detached(priority: .utility) {
-            IssueHealthService.shared.snapshot(isSourceRepairing: sourceRepairing)
+            IssueHealthService.shared.snapshot(
+                sourceCatalog: catalog,
+                runtimeStatus: runtime,
+                problemCounts: problems)
         }.value
         var combined = local.issues
 
-        for connector in ReadBoardSourceConnectorRegistry.shared.connectorsSupportingAddSource()
-        where local.sourceTypes.contains(connector.sourceType) {
-            switch await connector.authenticationState() {
+        for status in authStatuses where local.sourceTypes.contains(status.platformID) {
+            switch status.phase {
             case .notRequired:
                 break
             case .authenticated:
                 // 重新扫码或自动续期成功后，库中尚未逐源重抓清掉的旧 499
                 // 不再代表当前授权状态；若下一次请求仍失败，连接器会转为 needsAttention。
-                combined.removeAll { $0.id == "authorization.\(connector.sourceType).499" }
-            case .repairing(let message):
-                combined.removeAll { $0.id == "authorization.\(connector.sourceType).499" }
-                combined.append(authenticationIssue(
-                    connector: connector, severity: .repairing,
-                    title: "正在修复\(connector.displayName)授权", message: message))
-            case .needsAttention(let message):
-                combined.removeAll { $0.id == "authorization.\(connector.sourceType).499" }
-                combined.append(authenticationIssue(
-                    connector: connector, severity: .needsAttention,
-                    title: "\(connector.displayName)需要重新授权", message: message))
+                combined.removeAll { $0.id == "authorization.\(status.platformID).499" }
+            case .repairing:
+                combined.removeAll { $0.id == "authorization.\(status.platformID).499" }
+                combined.append(authenticationIssue(status: status, severity: .repairing,
+                    title: "正在修复\(status.displayName)授权"))
+            case .needsAttention, .signedOut, .expired:
+                combined.removeAll { $0.id == "authorization.\(status.platformID).499" }
+                combined.append(authenticationIssue(status: status, severity: .needsAttention,
+                    title: "\(status.displayName)需要重新授权"))
+            case .waitingForScan, .waitingForConfirmation:
+                break
             }
         }
 
@@ -279,9 +293,9 @@ final class IssueCenterStore: ObservableObject {
                 action: .dashboard))
         }
 
-        let pending = PipelineWorker.shared.pendingBreakdown
+        let pending = runtime.queue
         if pending.score + pending.translate + pending.summarize > 0,
-           !LLMPipeline().isAvailable {
+           !serviceConfiguration.llmProfiles.contains(where: { $0.hasAPIKey && !$0.model.isEmpty }) {
             combined.append(AppIssue(
                 id: "processing.llm.missing",
                 category: .processing,
@@ -292,7 +306,11 @@ final class IssueCenterStore: ObservableObject {
                 actionTitle: "打开 LLM 设置",
                 action: .settings(.page(.llm))))
         }
-        if pending.transcribe > 0, !DependencyChecker.shared.transcribeReady {
+        let transcribeDependencyIDs = Set(["whisperCLI", "ffmpeg", "ytdlp", "whisperModel"])
+        if pending.transcribe > 0,
+           serviceConfiguration.dependencies.contains(where: {
+               transcribeDependencyIDs.contains($0.id) && !$0.installed
+           }) {
             combined.append(AppIssue(
                 id: "processing.transcription.dependencies",
                 category: .processing,
@@ -316,19 +334,18 @@ final class IssueCenterStore: ObservableObject {
     }
 
     private func authenticationIssue(
-        connector: any ReadBoardSourceConnector,
+        status: PlatformAuthenticationStatus,
         severity: AppIssueSeverity,
-        title: String,
-        message: String
+        title: String
     ) -> AppIssue {
-        let route = connector.settingsModuleIdentifier.map { SettingsRoute.module($0) }
+        let route = status.settingsModuleIdentifier.map { SettingsRoute.module($0) }
             ?? .page(.sources)
         return AppIssue(
-            id: "authorization.\(connector.sourceType)",
+            id: "authorization.\(status.platformID)",
             category: .authorization,
             severity: severity,
             title: title,
-            detail: message,
+            detail: status.message ?? "平台授权不可用。",
             affectedCount: 1,
             actionTitle: severity == .needsAttention ? "打开设置" : nil,
             action: severity == .needsAttention ? .settings(route) : nil)
@@ -338,6 +355,10 @@ final class IssueCenterStore: ObservableObject {
 struct IssueCenterView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: IssueCenterStore
+    let sourceCatalog: any SourceCatalogGateway
+    let sourceManagement: any SourceManagementGateway
+    let runtimeStatus: any RuntimeStatusGateway
+    let administration: any AdministrationGateway
     let onOpenSettings: (SettingsRoute) -> Void
     let onOpenDashboard: () -> Void
     @State private var showSourceFailures = false
@@ -388,9 +409,18 @@ struct IssueCenterView: View {
         }
         .frame(width: 760, height: 560)
         .task { await store.refresh() }
-        .sheet(isPresented: $showSourceFailures) { SourceFailureListSheet() }
-        .sheet(isPresented: $showContentFailures) { ContentFailureListSheet() }
-        .sheet(isPresented: $showFulltextFailures) { ExternalFullTextFailureListSheet() }
+        .sheet(isPresented: $showSourceFailures) {
+            SourceFailureListSheet(
+                sourceCatalog: sourceCatalog,
+                sourceManagement: sourceManagement)
+        }
+        .sheet(isPresented: $showContentFailures) {
+            ContentFailureListSheet(runtimeStatus: runtimeStatus, administration: administration)
+        }
+        .sheet(isPresented: $showFulltextFailures) {
+            ExternalFullTextFailureListSheet(sourceManagement: sourceManagement,
+                                             administration: administration)
+        }
     }
 
     private func issueRow(_ issue: AppIssue) -> some View {

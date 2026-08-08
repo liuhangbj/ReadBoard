@@ -1,20 +1,32 @@
 import SwiftUI
+import ReadBoardContract
 
 // MARK: - 数据看板入口
 
 public struct ManageView: View {
+    private let services: ReadBoardServices
+
+    public init(services: ReadBoardServices = .live) {
+        self.services = services
+    }
+
     public var body: some View {
-        DataDashboardView()
+        DataDashboardView(services: services)
     }
 }
 
 // MARK: 统计概览
 
 public struct StatsPane: View {
-    @State private var s = StatsOverview()
-    @State private var jobTypes: [(jtype: String, ok: Int, failed: Int)] = []
-    @State private var topSources: [(name: String, count: Int)] = []
-    @State private var exportRecords: [(platform: String, title: String, status: String, time: String)] = []
+    private let administration: any AdministrationGateway
+    @State private var s = StatisticsOverview()
+    @State private var jobTypes: [JobTypeStatistics] = []
+    @State private var topSources: [RankedSource] = []
+    @State private var exportRecords: [ExportActivity] = []
+
+    public init(administration: any AdministrationGateway = ReadBoardServices.live.administration) {
+        self.administration = administration
+    }
 
     public var body: some View {
         ScrollView {
@@ -29,28 +41,28 @@ public struct StatsPane: View {
                     statCard("全文", "\(s.withFulltext)", "text.alignleft", .rbScoreHigh)
                     statCard("已 AI 评分", "\(s.scored)", "number", .rbAccent)
                     statCard("已翻译", "\(s.translated)", "globe", .rbTranslate)
-                    statCard("DB 大小", String(format: "%.0f MB", s.dbSizeMB), "internaldrive", .rbText2)
+                    statCard("DB 大小", String(format: "%.0f MB", s.databaseSizeMB), "internaldrive", .rbText2)
                 }
 
                 // 管线 job 分布
                 VStack(alignment: .leading, spacing: 10) {
                     SectionLabel(text: "内容处理（成功/失败）")
-                    ForEach(jobTypes, id: \.jtype) { j in
+                    ForEach(jobTypes) { j in
                         HStack(spacing: 10) {
-                            Text(j.jtype)
+                            Text(j.jobType)
                                 .font(.caption)
                                 .foregroundStyle(Color.rbText2)
                                 .frame(width: 90, alignment: .leading)
                             GeometryReader { geo in
-                                let total = max(1, j.ok + j.failed)
+                                let total = max(1, j.succeeded + j.failed)
                                 HStack(spacing: 0) {
-                                    Rectangle().fill(Color.rbScoreHigh).frame(width: geo.size.width * CGFloat(j.ok) / CGFloat(total))
+                                    Rectangle().fill(Color.rbScoreHigh).frame(width: geo.size.width * CGFloat(j.succeeded) / CGFloat(total))
                                     Rectangle().fill(Color.rbScoreLow).frame(width: geo.size.width * CGFloat(j.failed) / CGFloat(total))
                                 }
                                 .clipShape(RoundedRectangle(cornerRadius: RB.Radius.sm))
                             }
                             .frame(height: 10)
-                            Text("\(j.ok)/\(j.failed)")
+                            Text("\(j.succeeded)/\(j.failed)")
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(Color.rbText3)
                                 .frame(width: 56, alignment: .trailing)
@@ -131,13 +143,9 @@ public struct StatsPane: View {
         .onAppear {
             // 统计查询后台跑：全表聚合在 67k 行库上有可见耗时，主线程执行会卡 UI
             Task.detached {
-                let ov = StatsService.shared.overview()
-                let jt = StatsService.shared.jobByType()
-                let ts = StatsService.shared.topSources()
-                let er = StatsService.shared.exportRecords()
-                await MainActor.run {
-                    s = ov; jobTypes = jt; topSources = ts; exportRecords = er
-                }
+                let snapshot = await administration.dashboardStatistics()
+                await MainActor.run { s = snapshot.overview; jobTypes = snapshot.jobs
+                    topSources = snapshot.topSources; exportRecords = snapshot.exports }
             }
         }
     }
@@ -169,7 +177,12 @@ public struct StatsPane: View {
 // MARK: 源健康
 
 public struct SourceHealthPane: View {
-    @State private var problems: [SourceHealth] = []
+    private let sourceCatalog: any SourceCatalogGateway
+    @State private var problems: [SourceCatalogItem] = []
+
+    public init(sourceCatalog: any SourceCatalogGateway = ReadBoardServices.live.sourceCatalog) {
+        self.sourceCatalog = sourceCatalog
+    }
 
     public var body: some View {
         List {
@@ -200,10 +213,8 @@ public struct SourceHealthPane: View {
         }
         // 后台查库——67k 行库主线程同步查询会卡首帧（修 P2-12）
         .task {
-            let r = await Task.detached(priority: .userInitiated) {
-                SourceHealthService.shared.problemSources()
-            }.value
-            problems = r
+            let r = (try? await sourceCatalog.snapshot()) ?? SourceCatalogSnapshot()
+            problems = r.sources.filter { $0.enabled && ($0.hasError || $0.isStale) }
         }
     }
 }
@@ -213,7 +224,8 @@ public struct SourceHealthPane: View {
 // MARK: 过滤规则
 
 public struct FilterRulePane: View {
-    @State private var rules: [FilterRule] = []
+    private let administration: any AdministrationGateway
+    @State private var rules: [FilterRuleRecord] = []
     @State private var showAdd = false
     // 新规则表单
     @State private var rName = ""
@@ -221,6 +233,10 @@ public struct FilterRulePane: View {
     @State private var rMatch = "contains"
     @State private var rPattern = ""
     @State private var rAction = "mark_read"
+
+    public init(administration: any AdministrationGateway = ReadBoardServices.live.administration) {
+        self.administration = administration
+    }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -286,28 +302,27 @@ public struct FilterRulePane: View {
                         Spacer()
                         Toggle("", isOn: Binding(
                             get: { rule.enabled },
-                            set: { var r = rule; r.enabled = $0; FilterService.shared.updateRule(r); reload() }
+                            set: { var r = rule; r.enabled = $0; Task { await administration.updateFilterRule(r); await reload() } }
                         )).labelsHidden().tint(Color.rbAccent)
                         Button(role: .destructive) {
-                            FilterService.shared.removeRule(id: rule.id); reload()
+                            Task { await administration.deleteFilterRule(id: rule.id); await reload() }
                         } label: { Image(systemName: "trash").foregroundStyle(Color.rbText3) }
                         .buttonStyle(.quiet)
                     }
                 }
             }
         }
-        .onAppear { reload() }
+        .task { await reload() }
     }
 
     private func saveRule() {
-        let rule = FilterRule(id: 0, name: rName, field: rField, matchType: rMatch,
-                              pattern: rPattern, action: rAction, sourceId: nil, enabled: true)
-        FilterService.shared.addRule(rule)
+        let rule = FilterRuleRecord(name: rName, field: rField, matchType: rMatch,
+                                    pattern: rPattern, action: rAction)
         rName = ""; rPattern = ""; showAdd = false
-        reload()
+        Task { _ = await administration.createFilterRule(rule); await reload() }
     }
 
-    private func reload() { rules = FilterService.shared.allRules() }
+    @MainActor private func reload() async { rules = await administration.filterRules() }
     private func fieldLabel(_ f: String) -> String {
         ["title": "标题", "content": "正文", "author": "作者", "url": "链接"][f] ?? f
     }

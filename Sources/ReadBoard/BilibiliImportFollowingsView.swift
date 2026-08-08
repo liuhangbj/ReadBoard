@@ -1,17 +1,22 @@
 import SwiftUI
+import ReadBoardContract
 
 /// B站登录成功后导入已关注 UP 主的弹窗
 /// 流程：拉取关注列表 → 用户勾选 → 选历史回溯范围 → 批量 addSource
 struct BilibiliImportFollowingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject var store: SourceStore
+    private let onboarding: any SourceOnboardingGateway
 
-    @State private var followings: [(mid: String, uname: String)] = []
+    @State private var followings: [PlatformSubscriptionCandidate] = []
     @State private var selectedMids: Set<String> = []
-    @State private var historyScope: HistoryScope = .recent30d
+    @State private var historyScope: SourceHistoryScope = .recent30Days
     @State private var isLoading = true
     @State private var errorMessage: String? = nil
     @State private var isImporting = false
+
+    init(onboarding: any SourceOnboardingGateway) {
+        self.onboarding = onboarding
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -49,7 +54,7 @@ struct BilibiliImportFollowingsView: View {
                         .foregroundStyle(Color.rbText3)
                         .tracking(RB.Track.section)
                     Picker("", selection: $historyScope) {
-                        ForEach(HistoryScope.allCases, id: \.self) { scope in
+                        ForEach(SourceHistoryScope.allCases, id: \.self) { scope in
                             Text(scope.displayName).tag(scope)
                         }
                     }
@@ -61,16 +66,17 @@ struct BilibiliImportFollowingsView: View {
                 // 关注列表
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("选择要导入的 UP 主（已选 \(selectedMids.count)/\(followings.count)）")
+                        Text("选择要导入的 UP 主（已选 \(selectedMids.count)/\(followings.filter { !$0.alreadySubscribed }.count)）")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(Color.rbText3)
                             .tracking(RB.Track.section)
                         Spacer()
-                        Button(selectedMids.count == followings.count ? "取消全选" : "全选") {
-                            if selectedMids.count == followings.count {
+                        let availableIDs = Set(followings.filter { !$0.alreadySubscribed }.map(\.id))
+                        Button(selectedMids == availableIDs ? "取消全选" : "全选") {
+                            if selectedMids == availableIDs {
                                 selectedMids.removeAll()
                             } else {
-                                selectedMids = Set(followings.map { $0.mid })
+                                selectedMids = availableIDs
                             }
                         }
                         .font(.caption)
@@ -80,32 +86,38 @@ struct BilibiliImportFollowingsView: View {
 
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(followings, id: \.mid) { item in
+                            ForEach(followings) { item in
                                 HStack(spacing: 8) {
                                     Toggle("", isOn: Binding(
-                                        get: { selectedMids.contains(item.mid) },
+                                        get: { selectedMids.contains(item.id) },
                                         set: { isOn in
-                                            if isOn { selectedMids.insert(item.mid) }
-                                            else { selectedMids.remove(item.mid) }
+                                            if isOn { selectedMids.insert(item.id) }
+                                            else { selectedMids.remove(item.id) }
                                         }
                                     ))
                                     .labelsHidden()
                                     .toggleStyle(.checkbox)
                                     .tint(Color.rbAccent)
+                                    .disabled(item.alreadySubscribed)
 
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(item.uname)
+                                        Text(item.name)
                                             .font(.system(size: 12, weight: .medium))
                                             .foregroundStyle(Color.rbText)
-                                        Text("UID: \(item.mid)")
+                                        Text("UID: \(item.id)")
                                             .font(.caption2)
                                             .foregroundStyle(Color.rbText3)
+                                        if item.alreadySubscribed {
+                                            Text("已订阅")
+                                                .font(.caption2)
+                                                .foregroundStyle(Color.rbScoreMid)
+                                        }
                                     }
                                     Spacer()
                                 }
                                 .padding(.vertical, 4)
                                 .padding(.horizontal, 8)
-                                .background(selectedMids.contains(item.mid) ? Color.rbAccent.opacity(0.08) : Color.clear)
+                                .background(selectedMids.contains(item.id) ? Color.rbAccent.opacity(0.08) : Color.clear)
                                 .cornerRadius(6)
                             }
                         }
@@ -140,14 +152,9 @@ struct BilibiliImportFollowingsView: View {
     }
 
     private func loadFollowings() async {
-        guard let sessdata = BilibiliAuth.sessdata,
-              let uid = BilibiliAuth.uid else {
-            errorMessage = "未登录或登录态失效"
-            isLoading = false
-            return
-        }
         do {
-            followings = try await BilibiliAuth.fetchFollowings(sessdata: sessdata, uid: uid)
+            followings = try await onboarding.platformSubscriptions(platform: "bilibili")
+            selectedMids = Set(followings.filter { !$0.alreadySubscribed }.map(\.id))
             isLoading = false
         } catch {
             errorMessage = "拉取关注列表失败：\(error.localizedDescription)"
@@ -161,16 +168,14 @@ struct BilibiliImportFollowingsView: View {
             var successCount = 0
             var failCount = 0
             for mid in selectedMids {
-                guard let item = followings.first(where: { $0.mid == mid }) else { continue }
-                let identifier = "https://space.bilibili.com/\(mid)"
-                if let _ = await store.addSource(
-                    stype: "bilibili",
-                    name: item.uname,
-                    identifier: identifier,
-                    folderId: nil,
-                    pipeline: PipelinePolicy(),
-                    fetchMode: nil
-                ) {
+                guard let item = followings.first(where: { $0.id == mid }) else { continue }
+                if (try? await onboarding.create(request: SourceCreationRequest(
+                    identifier: item.identifier,
+                    name: item.name,
+                    sourceType: "bilibili",
+                    fetchMode: .bilibiliSubtitle,
+                    historyScope: historyScope,
+                    refreshAfterCreation: false))) != nil {
                     successCount += 1
                 } else {
                     failCount += 1
