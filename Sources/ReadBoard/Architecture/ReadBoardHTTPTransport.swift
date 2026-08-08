@@ -461,25 +461,13 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
     private let router: ReadBoardHTTPRouter
     private let port: NWEndpoint.Port
     private let allowLAN: Bool
-    private let tlsIdentity: RemoteTLSIdentity?
-    private let bonjourServiceName: String?
-    private let bonjourTXTRecord: NWTXTRecord?
+    private let tlsIdentity: RemoteTLSIdentity
+    private let bonjourServiceName: String
+    private let bonjourTXTRecord: NWTXTRecord
     private let stateHandler: @Sendable (ReadBoardHTTPServerState) -> Void
     private let queue = DispatchQueue(label: "readboard.http.server", qos: .utility)
     private var listener: NWListener?
     private let lock = NSLock()
-
-    public init(services: ReadBoardServices, token: String, port: UInt16 = 7331,
-                allowLAN: Bool = true,
-                stateHandler: @escaping @Sendable (ReadBoardHTTPServerState) -> Void = { _ in }) {
-        self.router = ReadBoardHTTPRouter(services: services, bearerToken: token)
-        self.port = NWEndpoint.Port(rawValue: port) ?? 7331
-        self.allowLAN = allowLAN
-        self.tlsIdentity = nil
-        self.bonjourServiceName = nil
-        self.bonjourTXTRecord = nil
-        self.stateHandler = stateHandler
-    }
 
     init(services: ReadBoardServices, deviceStore: RemoteDeviceStore,
          pairingService: RemotePairingService, passwordService: RemotePasswordService,
@@ -504,19 +492,14 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
     public func start() throws {
         lock.lock(); defer { lock.unlock() }
         guard listener == nil else { return }
-        let parameters: NWParameters
-        if let tlsIdentity {
-            let tlsOptions = NWProtocolTLS.Options()
-            sec_protocol_options_set_local_identity(
-                tlsOptions.securityProtocolOptions, tlsIdentity.identity)
-            parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
-        } else {
-            parameters = .tcp
-        }
+        let tlsOptions = NWProtocolTLS.Options()
+        sec_protocol_options_set_local_identity(
+            tlsOptions.securityProtocolOptions, tlsIdentity.identity)
+        let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
         let host: NWEndpoint.Host = allowLAN ? "0.0.0.0" : "127.0.0.1"
         parameters.requiredLocalEndpoint = .hostPort(host: host, port: port)
         let value = try NWListener(using: parameters)
-        if allowLAN, let bonjourServiceName, let bonjourTXTRecord {
+        if allowLAN {
             value.service = NWListener.Service(name: bonjourServiceName,
                 type: "_readboard._tcp", txtRecord: bonjourTXTRecord)
         }
