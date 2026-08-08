@@ -21,6 +21,8 @@ public final class RetentionService: ObservableObject {
         }
     }
 
+    func stop() { timer?.invalidate(); timer = nil }
+
     /// 每日跑一次
     func runIfDue() async {
         let last = UserDefaults.standard.double(forKey: "retention.lastRun")

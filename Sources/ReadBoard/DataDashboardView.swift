@@ -1,8 +1,14 @@
 import SwiftUI
+import ReadBoardContract
 
 /// 数据看板单页：顶部聚合运行状态，底部只保留核心数字概览。
 public struct DataDashboardView: View {
     @EnvironmentObject private var appTab: AppTab
+    private let services: ReadBoardServices
+
+    public init(services: ReadBoardServices = .live) {
+        self.services = services
+    }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -26,14 +32,17 @@ public struct DataDashboardView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack(alignment: .top, spacing: 16) {
-                        SourceUpdateDashboardCard()
+                        SourceUpdateDashboardCard(
+                            sourceCatalog: services.sourceCatalog,
+                            sourceManagement: services.sourceManagement)
                             .frame(maxWidth: .infinity)
-                        AIProcessingDashboardCard()
+                        AIProcessingDashboardCard(runtimeStatus: services.runtimeStatus,
+                                                  administration: services.administration)
                             .frame(maxWidth: .infinity)
                     }
                     .frame(height: 390)
 
-                    DashboardStatsOverview()
+                    DashboardStatsOverview(administration: services.administration)
                 }
                 .padding(20)
             }
@@ -45,13 +54,25 @@ public struct DataDashboardView: View {
 // MARK: - 源更新与健康
 
 private struct SourceUpdateDashboardCard: View {
-    @StateObject private var store = SourceStore.shared
-    @State private var healthReport: [SourceHealth] = []
+    @StateObject private var catalog: SourceCatalogStore
+    private let sourceCatalog: any SourceCatalogGateway
+    private let sourceManagement: any SourceManagementGateway
+    @State private var healthReport: [SourceCatalogItem] = []
     @State private var loadingHealth = true
     @State private var showProblemList = false
 
-    private var enabledHealth: [SourceHealth] { healthReport.filter(\.enabled) }
-    private var problems: [SourceHealth] {
+    init(
+        sourceCatalog: any SourceCatalogGateway,
+        sourceManagement: any SourceManagementGateway
+    ) {
+        _catalog = StateObject(
+            wrappedValue: SourceCatalogStore(gateway: sourceCatalog))
+        self.sourceCatalog = sourceCatalog
+        self.sourceManagement = sourceManagement
+    }
+
+    private var enabledHealth: [SourceCatalogItem] { healthReport.filter(\.enabled) }
+    private var problems: [SourceCatalogItem] {
         enabledHealth.filter { $0.hasError || $0.isStale }
     }
     private var healthyCount: Int { max(0, enabledHealth.count - problems.count) }
@@ -59,7 +80,7 @@ private struct SourceUpdateDashboardCard: View {
     var body: some View {
         DashboardCard(title: "源更新", icon: "arrow.triangle.2.circlepath", tint: .rbAccent) {
             HStack(spacing: 8) {
-                if store.isSyncing {
+                if catalog.isSyncing {
                     ProgressView().controlSize(.small)
                     Text("正在更新订阅源…")
                         .font(.system(size: 12, weight: .medium))
@@ -74,17 +95,17 @@ private struct SourceUpdateDashboardCard: View {
                 }
                 Spacer(minLength: 8)
                 Button {
-                    Task { await store.syncAll() }
+                    Task { _ = try? await sourceManagement.syncAll() }
                 } label: {
                     Label("立即更新", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.quiet)
                 .controlSize(.small)
-                .disabled(store.isSyncing)
+                .disabled(catalog.isSyncing)
             }
 
-            if !store.lastSyncMessage.isEmpty {
-                Text(store.lastSyncMessage)
+            if !catalog.lastSyncMessage.isEmpty {
+                Text(catalog.lastSyncMessage)
                     .font(.caption)
                     .foregroundStyle(Color.rbText3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -152,8 +173,9 @@ private struct SourceUpdateDashboardCard: View {
                 )
             }
         }
+        .task { await catalog.monitor() }
         .task { await reloadHealth() }
-        .onChange(of: store.isSyncing) { wasSyncing, isSyncing in
+        .onChange(of: catalog.isSyncing) { wasSyncing, isSyncing in
             if wasSyncing, !isSyncing {
                 Task { await reloadHealth() }
             }
@@ -161,23 +183,23 @@ private struct SourceUpdateDashboardCard: View {
         .sheet(isPresented: $showProblemList, onDismiss: {
             Task { await reloadHealth() }
         }) {
-            SourceFailureListSheet()
+            SourceFailureListSheet(
+                sourceCatalog: sourceCatalog,
+                sourceManagement: sourceManagement)
         }
     }
 
     @MainActor
     private func reloadHealth() async {
         loadingHealth = true
-        let report = await Task.detached(priority: .userInitiated) {
-            SourceHealthService.shared.report()
-        }.value
-        healthReport = report
+        await catalog.refresh()
+        healthReport = catalog.sources
         loadingHealth = false
     }
 }
 
 private struct SourceHealthDashboardRow: View {
-    let source: SourceHealth
+    let source: SourceCatalogItem
 
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
@@ -217,12 +239,20 @@ private struct SourceHealthDashboardRow: View {
 // MARK: - AI 内容处理
 
 private struct AIProcessingDashboardCard: View {
-    @StateObject private var worker = PipelineWorker.shared
+    @StateObject private var status: RuntimeStatusStore
+    private let runtimeStatus: any RuntimeStatusGateway
+    private let administration: any AdministrationGateway
     @StateObject private var manualTasks = ContentProcessingStateStore.shared
     @State private var showFailureList = false
 
+    init(runtimeStatus: any RuntimeStatusGateway, administration: any AdministrationGateway) {
+        self.runtimeStatus = runtimeStatus
+        self.administration = administration
+        _status = StateObject(wrappedValue: RuntimeStatusStore(gateway: runtimeStatus))
+    }
+
     private var phaseLabel: String {
-        switch worker.phase {
+        switch status.snapshot.phase {
         case .scanning: "内容处理引擎扫描中"
         case .working: "内容处理引擎工作中"
         case .idle: "内容处理引擎空闲"
@@ -232,7 +262,7 @@ private struct AIProcessingDashboardCard: View {
     var body: some View {
         DashboardCard(title: "AI 内容处理", icon: "gearshape.2", tint: .rbTranslate) {
             HStack(spacing: 8) {
-                if worker.isRunning {
+                if status.snapshot.isRunning {
                     ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: "pause.circle")
@@ -244,13 +274,13 @@ private struct AIProcessingDashboardCard: View {
                     .foregroundStyle(Color.rbText2)
                 Spacer(minLength: 8)
                 Button {
-                    Task { await worker.runOnce() }
+                    Task { await status.runOnce() }
                 } label: {
                     Label("立即扫描", systemImage: "play")
                 }
                 .buttonStyle(.quiet)
                 .controlSize(.small)
-                .disabled(worker.isRunning)
+                .disabled(status.snapshot.isRunning)
             }
 
             HStack(alignment: .firstTextBaseline) {
@@ -258,16 +288,16 @@ private struct AIProcessingDashboardCard: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.rbText2)
                 Spacer()
-                Text("\(worker.pendingBreakdown.items)")
+                Text("\(status.snapshot.queue.items)")
                     .font(.system(size: 26, weight: .semibold).monospacedDigit())
                     .foregroundStyle(Color.rbText)
             }
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                DashboardMetricTile(title: "AI 评分", value: worker.pendingBreakdown.score, tint: .rbAccent)
-                DashboardMetricTile(title: "AI 翻译", value: worker.pendingBreakdown.translate, tint: .rbTranslate)
-                DashboardMetricTile(title: "AI 摘要", value: worker.pendingBreakdown.summarize, tint: .rbSummary)
-                DashboardMetricTile(title: "AI 转录", value: worker.pendingBreakdown.transcribe, tint: .rbPodcast)
+                DashboardMetricTile(title: "AI 评分", value: status.snapshot.queue.score, tint: .rbAccent)
+                DashboardMetricTile(title: "AI 翻译", value: status.snapshot.queue.translate, tint: .rbTranslate)
+                DashboardMetricTile(title: "AI 摘要", value: status.snapshot.queue.summarize, tint: .rbSummary)
+                DashboardMetricTile(title: "AI 转录", value: status.snapshot.queue.transcribe, tint: .rbPodcast)
             }
 
             Hairline()
@@ -278,13 +308,13 @@ private struct AIProcessingDashboardCard: View {
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Color.rbText2)
                     Spacer()
-                    if !worker.currentItems.isEmpty {
-                        Text("\(worker.currentItems.count) 项")
+                    if !status.snapshot.activeItems.isEmpty {
+                        Text("\(status.snapshot.activeItems.count) 项")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(Color.rbAccent)
                     }
                 }
-                if worker.currentItems.isEmpty {
+                if status.snapshot.activeItems.isEmpty {
                     HStack(spacing: 7) {
                         Image(systemName: "moon.zzz")
                             .foregroundStyle(Color.rbText3)
@@ -293,7 +323,7 @@ private struct AIProcessingDashboardCard: View {
                             .foregroundStyle(Color.rbText3)
                     }
                 } else {
-                    ForEach(worker.currentItems) { item in
+                    ForEach(status.snapshot.activeItems) { item in
                         HStack(spacing: 7) {
                             ProgressView().controlSize(.mini)
                             Text(item.stage)
@@ -378,28 +408,28 @@ private struct AIProcessingDashboardCard: View {
             )
 
             HStack(spacing: 10) {
-                Image(systemName: worker.deadLetterCount > 0
+                Image(systemName: status.snapshot.pausedFailureCount > 0
                       ? "exclamationmark.triangle.fill"
                       : "checkmark.circle")
-                    .foregroundStyle(worker.deadLetterCount > 0 ? Color.rbScoreLow : Color.rbScoreHigh)
+                    .foregroundStyle(status.snapshot.pausedFailureCount > 0 ? Color.rbScoreLow : Color.rbScoreHigh)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("内容处理失败")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Color.rbText2)
-                    Text(worker.deadLetterCount > 0
+                    Text(status.snapshot.pausedFailureCount > 0
                          ? "连续失败 3 次后暂停的任务"
                          : "当前没有暂停的失败任务")
                         .font(.caption2)
                         .foregroundStyle(Color.rbText3)
                 }
                 Spacer()
-                Text("\(worker.deadLetterCount)")
+                Text("\(status.snapshot.pausedFailureCount)")
                     .font(.system(size: 14, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(worker.deadLetterCount > 0 ? Color.rbScoreLow : Color.rbText3)
+                    .foregroundStyle(status.snapshot.pausedFailureCount > 0 ? Color.rbScoreLow : Color.rbText3)
                 Button("查看") { showFailureList = true }
                     .buttonStyle(.quiet)
                     .controlSize(.small)
-                    .disabled(worker.deadLetterCount == 0)
+                    .disabled(status.snapshot.pausedFailureCount == 0)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -410,10 +440,11 @@ private struct AIProcessingDashboardCard: View {
                     .strokeBorder(Color.rbHairline, lineWidth: RB.Line.hair)
             )
         }
+        .task { await status.monitor() }
         .sheet(isPresented: $showFailureList, onDismiss: {
-            worker.requestPendingRefresh()
+            Task { await status.refresh(recalculate: true) }
         }) {
-            ContentFailureListSheet()
+            ContentFailureListSheet(runtimeStatus: runtimeStatus, administration: administration)
         }
     }
 
@@ -443,7 +474,8 @@ private struct AIProcessingDashboardCard: View {
 // MARK: - 核心数字概览
 
 private struct DashboardStatsOverview: View {
-    @State private var overview = StatsOverview()
+    let administration: any AdministrationGateway
+    @State private var overview = StatisticsOverview()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -460,13 +492,11 @@ private struct DashboardStatsOverview: View {
                 statCard("全文", "\(overview.withFulltext)", "text.alignleft", .rbScoreHigh)
                 statCard("已 AI 评分", "\(overview.scored)", "number", .rbAccent)
                 statCard("已翻译", "\(overview.translated)", "globe", .rbTranslate)
-                statCard("DB 大小", String(format: "%.0f MB", overview.dbSizeMB), "internaldrive", .rbText2)
+                statCard("DB 大小", String(format: "%.0f MB", overview.databaseSizeMB), "internaldrive", .rbText2)
             }
         }
         .task {
-            overview = await Task.detached(priority: .utility) {
-                StatsService.shared.overview()
-            }.value
+            overview = await administration.dashboardStatistics().overview
         }
     }
 

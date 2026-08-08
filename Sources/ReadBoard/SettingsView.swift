@@ -1,15 +1,17 @@
 import SwiftUI
 import AppKit
+import ReadBoardContract
 
 // MARK: - 独立设置窗口（⌘, 打开，手写侧栏+详情分页）
 
 public enum SettingsPage: String, CaseIterable, Identifiable, Sendable {
-    case general, reader, llm, deps, boards, sources, fetch, content, export, pipeline, cleanup
+    case general, remote, reader, llm, deps, boards, sources, fetch, content, export, pipeline, cleanup
     public var id: String { rawValue }
 
     var title: String {
         switch self {
         case .general:  return "通用"
+        case .remote:   return "远程访问"
         case .reader:   return "阅读器"
         case .llm:      return "LLM模型"
         case .deps:     return "依赖"
@@ -26,6 +28,7 @@ public enum SettingsPage: String, CaseIterable, Identifiable, Sendable {
     var icon: String {
         switch self {
         case .general:  return "gearshape"
+        case .remote:   return "network"
         case .reader:   return "doc.text"
         case .llm:      return "brain.head.profile"
         case .deps:     return "shippingbox"
@@ -62,6 +65,11 @@ public struct SettingsView: View {
     @Environment(\.readBoardConfiguration) private var configuration
     @StateObject private var navigation = SettingsNavigationStore.shared
     @State private var selection: SettingsDestination? = .page(.general)
+    private let services: ReadBoardServices
+
+    public init(services: ReadBoardServices = .live) {
+        self.services = services
+    }
 
     public var body: some View {
         // 手动 HStack 布局替代 NavigationSplitView——后者在 Settings 场景下
@@ -92,17 +100,30 @@ public struct SettingsView: View {
                 switch selection ?? .page(.general) {
                 case .page(let page):
                     switch page {
-                    case .general:  GeneralPane()
+                    case .general:  GeneralPane(sourceManagement: services.sourceManagement,
+                                                configuration: services.configuration)
+                    case .remote:   RemoteAccessPane(remoteAccess: services.remoteAccess)
                     case .reader:   ReaderPane()
-                    case .llm:      LLMPane()
+                    case .llm:      LLMPane(configuration: services.configuration)
                     case .deps:     DepsPane()
-                    case .boards:   BoardsPane()
-                    case .sources:  TypeSwitchPane()
-                    case .fetch:    FetchPane()
-                    case .content:  ContentPane()
-                    case .export:   ExportPlatformPane()
-                    case .pipeline: ExportRulePane()
-                    case .cleanup:  CleanupPane()
+                    case .boards:   BoardsPane(configuration: services.configuration)
+                    case .sources:
+                        TypeSwitchPane(
+                            sourceCatalog: services.sourceCatalog,
+                            sourceOnboarding: services.sourceOnboarding,
+                            authentication: services.authentication,
+                            configuration: services.configuration)
+                    case .fetch:    FetchPane(configuration: services.configuration)
+                    case .content:  ContentPane(configuration: services.configuration)
+                    case .export:   ExportPlatformPane(configuration: services.configuration)
+                    case .pipeline:
+                        ExportRulePane(
+                            export: services.export,
+                            sourceCatalog: services.sourceCatalog,
+                            configuration: services.configuration)
+                    case .cleanup:  CleanupPane(runtimeStatus: services.runtimeStatus,
+                                                administration: services.administration,
+                                                maintenance: services.maintenance)
                     }
                 case .module(let identifier):
                     if let module = configuration.modules.first(where: { $0.info.identifier == identifier }),
@@ -157,9 +178,18 @@ private struct SettingsWindowAccessor: NSViewRepresentable {
 // MARK: - 通用
 
 public struct GeneralPane: View {
-    @State private var autoSyncOn: Bool = SourceStore.shared.autoSyncEnabled
-    @State private var proxyEnabled: Bool = FeedFetcher.globalProxy != nil
-    @State private var proxyInput: String = FeedFetcher.globalProxy ?? ""
+    @State private var autoSyncOn = true
+    @State private var syncIntervalMinutes = 60
+    @State private var proxyEnabled = false
+    @State private var proxyInput = ""
+    private let sourceManagement: any SourceManagementGateway
+    private let configuration: any ConfigurationGateway
+
+    public init(sourceManagement: any SourceManagementGateway,
+                configuration: any ConfigurationGateway) {
+        self.sourceManagement = sourceManagement
+        self.configuration = configuration
+    }
 
     public var body: some View {
         Form {
@@ -167,7 +197,7 @@ public struct GeneralPane: View {
                 Toggle("自动周期抓取", isOn: $autoSyncOn.animation())
                     .tint(Color.rbAccent)
                     .onChange(of: autoSyncOn) { _, v in
-                        SourceStore.shared.autoSyncEnabled = v
+                        updateSourceSync(enabled: v, minutes: syncIntervalMinutes)
                     }
                 if autoSyncOn {
                     HStack {
@@ -175,8 +205,11 @@ public struct GeneralPane: View {
                             .foregroundStyle(Color.rbText2)
                         Spacer()
                         Picker("", selection: Binding(
-                            get: { Int(SourceStore.shared.syncInterval / 60) },
-                            set: { SourceStore.shared.setSyncInterval(minutes: $0) }
+                            get: { syncIntervalMinutes },
+                            set: {
+                                syncIntervalMinutes = $0
+                                updateSourceSync(enabled: autoSyncOn, minutes: $0)
+                            }
                         )) {
                             Text("15 分钟").tag(15)
                             Text("30 分钟").tag(30)
@@ -196,7 +229,7 @@ public struct GeneralPane: View {
                     .onChange(of: proxyEnabled) { _, v in
                         if !v {
                             proxyInput = ""
-                            FeedFetcher.globalProxy = nil
+                            Task { await configuration.setProxyURL("") }
                             proxyEnabled = false
                         }
                     }
@@ -210,13 +243,13 @@ public struct GeneralPane: View {
                     }
                     .onSubmit {
                             let v = proxyInput.trimmingCharacters(in: .whitespaces)
-                            FeedFetcher.globalProxy = v.isEmpty ? nil : v
+                            Task { await configuration.setProxyURL(v) }
                         }
                     HStack {
                         Spacer()
                         Button("清除") {
                             proxyInput = ""
-                            FeedFetcher.globalProxy = nil
+                            Task { await configuration.setProxyURL("") }
                             proxyEnabled = false
                         }
                         .controlSize(.small)
@@ -224,7 +257,7 @@ public struct GeneralPane: View {
                         .tint(Color.rbScoreLow)
                         Button("保存") {
                             let v = proxyInput.trimmingCharacters(in: .whitespaces)
-                            FeedFetcher.globalProxy = v.isEmpty ? nil : v
+                            Task { await configuration.setProxyURL(v) }
                         }
                         .controlSize(.small)
                         .buttonStyle(.primaryCapsule)
@@ -233,14 +266,30 @@ public struct GeneralPane: View {
             }
         }
         .formStyle(.grouped)
+        .task {
+            let settings = await sourceManagement.syncSettings()
+            autoSyncOn = settings.enabled
+            syncIntervalMinutes = settings.intervalMinutes
+            proxyInput = await configuration.snapshot().proxyURL
+            proxyEnabled = !proxyInput.isEmpty
+        }
+    }
+
+    private func updateSourceSync(enabled: Bool, minutes: Int) {
+        Task {
+            try? await sourceManagement.updateSyncSettings(
+                SourceSyncSettings(enabled: enabled, intervalMinutes: minutes))
+        }
     }
 }
 
 // MARK: - LLM 模型
 
 public struct LLMPane: View {
-    /// slotCount 是 static 存储值，SwiftUI 不会自动重绘；用本地 @State 镜像以驱动 ForEach 刷新
-    @State private var count: Int = LLMSettings.slotCount
+    private let configuration: any ConfigurationGateway
+    @State private var profiles: [LLMProfileMetadata] = []
+
+    public init(configuration: any ConfigurationGateway) { self.configuration = configuration }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -255,8 +304,7 @@ public struct LLMPane: View {
                 }
                 Spacer()
                 Button {
-                    LLMSettings.addSlot()
-                    count = LLMSettings.slotCount
+                    Task { await configuration.addLLMProfile(); await reload() }
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -270,7 +318,7 @@ public struct LLMPane: View {
 
             Divider()
 
-            if count == 0 {
+            if profiles.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "cpu")
                         .font(.system(size: 28))
@@ -288,13 +336,12 @@ public struct LLMPane: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 14) {
-                        ForEach(0..<count, id: \.self) { i in
-                            LLMModelCard(slotIndex: i, onMove: { from, to in
-                                LLMSettings.moveSlot(from: from, to: to)
-                                count = LLMSettings.slotCount
+                        ForEach(profiles) { profile in
+                            LLMModelCard(slotIndex: profile.id, initialProfile: profile,
+                                         configuration: configuration, onMove: { from, to in
+                                Task { await configuration.moveLLMProfile(from: from, to: to); await reload() }
                             }, onRemove: {
-                                LLMSettings.removeSlot(at: i)
-                                count = LLMSettings.slotCount
+                                Task { await configuration.removeLLMProfile(id: profile.id); await reload() }
                             })
                         }
                     }
@@ -302,19 +349,22 @@ public struct LLMPane: View {
                 }
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
-            // 兜底：外部（迁移等）改了 slotCount 时也同步
-            count = LLMSettings.slotCount
-        }
+        .task { await reload() }
     }
+
+    @MainActor private func reload() async { profiles = await configuration.snapshot().llmProfiles }
 }
 
 // MARK: - 全文提取
 
 public struct FetchPane: View {
-
+    private let configuration: any ConfigurationGateway
+    @State private var enabled = false
+    @State private var dependencies: [DependencyStatus] = []
     @State private var showDefuddleAlert = false
     @State private var defuddleMissing: [String] = []
+
+    public init(configuration: any ConfigurationGateway) { self.configuration = configuration }
 
     public var body: some View {
         Form {
@@ -322,15 +372,15 @@ public struct FetchPane: View {
             Section {
                 HStack {
                     Toggle("启用 defuddle", isOn: Binding(
-                        get: { UserDefaults.standard.bool(forKey: "defuddle.enabled") },
+                        get: { enabled },
                         set: { newValue in
                             if newValue { checkDefuddleDeps() }
-                            else { UserDefaults.standard.set(false, forKey: "defuddle.enabled") }
+                            else { enabled = false; Task { await configuration.setServiceFlag("defuddle", enabled: false) } }
                         }
                     ))
                     .tint(Color.rbAccent)
                     Spacer()
-                    Text(UserDefaults.standard.bool(forKey: "defuddle.enabled") ? "已开启" : "已关闭")
+                    Text(enabled ? "已开启" : "已关闭")
                         .font(.caption).foregroundStyle(Color.rbText3)
                 }
             } footer: {
@@ -342,10 +392,15 @@ public struct FetchPane: View {
         .alert("defuddle 依赖缺失", isPresented: $showDefuddleAlert) {
             Button("重新检测") { checkDefuddleDeps() }
             Button("关闭", role: .cancel) {
-                UserDefaults.standard.set(false, forKey: "defuddle.enabled")
+                enabled = false; Task { await configuration.setServiceFlag("defuddle", enabled: false) }
             }
         } message: {
             Text("缺少：\(defuddleMissing.joined(separator: "、"))\n\ndefuddle 引擎应随 ReadBoard 一同安装；如果重新检测仍然缺失，请重新安装 App。")
+        }
+        .task {
+            let value = await configuration.snapshot()
+            enabled = value.serviceFlags["defuddle"] ?? false
+            dependencies = value.dependencies
         }
     }
 
@@ -353,16 +408,16 @@ public struct FetchPane: View {
     private func checkDefuddleDeps() {
         var missing: [String] = []
         // node
-        if DependencyPaths.resolve(.node) == nil {
+        if dependencies.first(where: { $0.id == "node" })?.installed != true {
             missing.append("node")
         }
         // defuddle 引擎（fetch_engine.js，随 App 打包在 Contents/Resources/engine）
-        if DependencyPaths.resolve(.defuddleEngine) == nil {
+        if dependencies.first(where: { $0.id == "defuddleEngine" })?.installed != true {
             missing.append("defuddle 引擎")
         }
         if missing.isEmpty {
             // 依赖齐全——直接开启
-            UserDefaults.standard.set(true, forKey: "defuddle.enabled")
+            enabled = true; Task { await configuration.setServiceFlag("defuddle", enabled: true) }
         } else {
             defuddleMissing = missing
             showDefuddleAlert = true
@@ -374,17 +429,24 @@ public struct FetchPane: View {
 // MARK: - 内容处理
 
 public struct ContentPane: View {
+    private let configuration: any ConfigurationGateway
+    @State private var flags: [String: Bool] = [:]
+    @State private var prompt = AIPromptConfiguration()
+
+    public init(configuration: any ConfigurationGateway) { self.configuration = configuration }
+
     public var body: some View {
         Form {
             Section("AI 内容处理开关") {
                 ForEach(AIPipeline.allCases) { p in
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle(p.displayName, isOn: Binding(
-                            get: { p.enabled },
-                            set: { AIPipeline.setEnabled(p, $0) }
+                            get: { flags[p.rawValue] ?? true },
+                            set: { value in flags[p.rawValue] = value
+                                Task { await configuration.setPipelineFlag(p.rawValue, enabled: value) } }
                         ))
                         .tint(Color.rbAccent)
-                        AIPromptEditor(pipeline: p)
+                        AIPromptEditor(pipeline: p, configuration: $prompt)
                     }
                     .padding(.vertical, 5)
                 }
@@ -393,30 +455,25 @@ public struct ContentPane: View {
             }
         }
         .formStyle(.grouped)
+        .task {
+            let value = await configuration.snapshot()
+            flags = value.pipelineFlags; prompt = value.aiPrompts
+        }
+        .onChange(of: prompt) { _, value in
+            Task { await configuration.updateAIPrompts(value) }
+        }
     }
 }
 
 private struct AIPromptEditor: View {
     let pipeline: AIPipeline
-    @AppStorage private var modeRaw: String
-    @AppStorage(AIPromptSettings.scoreDepthWeightKey) private var scoreDepthWeight = 40
-    @AppStorage(AIPromptSettings.scoreQualityWeightKey) private var scoreQualityWeight = 35
-    @AppStorage(AIPromptSettings.scoreReadabilityWeightKey) private var scoreReadabilityWeight = 25
-    @AppStorage(AIPromptSettings.summaryLengthKey) private var summaryLength = 150
-    @AppStorage(AIPromptSettings.summaryStyleKey) private var summaryStyle = "concise"
-    @AppStorage(AIPromptSettings.translationStyleKey) private var translationStyle = "natural"
-    @AppStorage(AIPromptSettings.translationLanguageKey) private var translationLanguage = "zh"
-    @AppStorage(AIPromptSettings.translationTermsKey) private var translationTerms = ""
-    @AppStorage(AIPromptSettings.transcriptSpeechStyleKey) private var transcriptSpeechStyle = "standard"
-    @AppStorage(AIPromptSettings.transcriptTranslateKey) private var transcriptTranslate = true
+    @Binding var configuration: AIPromptConfiguration
 
-    init(pipeline: AIPipeline) {
-        self.pipeline = pipeline
-        _modeRaw = AppStorage(wrappedValue: AIPromptMode.default.rawValue,
-                              AIPromptSettings.modeKey(for: pipeline))
-    }
+    private var modeBinding: Binding<String> { Binding(
+        get: { configuration.modes[pipeline.rawValue] ?? AIPromptMode.default.rawValue },
+        set: { configuration.modes[pipeline.rawValue] = $0 }) }
 
-    private var isCustom: Bool { modeRaw == AIPromptMode.custom.rawValue }
+    private var isCustom: Bool { modeBinding.wrappedValue == AIPromptMode.custom.rawValue }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -425,7 +482,7 @@ private struct AIPromptEditor: View {
                     .font(.caption)
                     .foregroundStyle(Color.rbText2)
                 Spacer()
-                Picker("", selection: $modeRaw) {
+                Picker("", selection: modeBinding) {
                     Text("使用默认").tag(AIPromptMode.default.rawValue)
                     Text("使用自定义").tag(AIPromptMode.custom.rawValue)
                 }
@@ -448,19 +505,19 @@ private struct AIPromptEditor: View {
     private var customFields: some View {
         switch pipeline {
         case .score:
-            weightRow("内容深度", value: $scoreDepthWeight)
-            weightRow("信息质量", value: $scoreQualityWeight)
-            weightRow("可读性", value: $scoreReadabilityWeight)
-            let weights = ScoreWeights(normalizingDepth: scoreDepthWeight,
-                                       quality: scoreQualityWeight,
-                                       readability: scoreReadabilityWeight)
+            weightRow("内容深度", value: $configuration.scoreDepthWeight)
+            weightRow("信息质量", value: $configuration.scoreQualityWeight)
+            weightRow("可读性", value: $configuration.scoreReadabilityWeight)
+            let weights = ScoreWeights(normalizingDepth: configuration.scoreDepthWeight,
+                                       quality: configuration.scoreQualityWeight,
+                                       readability: configuration.scoreReadabilityWeight)
             Text("实际权重：\(weights.depth)% / \(weights.quality)% / \(weights.readability)%（自动归一化为 100%）")
                 .font(.caption2).foregroundStyle(Color.rbText3)
         case .summarize:
             HStack {
                 Text("摘要长度").font(.caption).foregroundStyle(Color.rbText2)
                 Spacer()
-                Picker("", selection: $summaryLength) {
+                Picker("", selection: $configuration.summaryLength) {
                     Text("100 字").tag(100)
                     Text("150 字").tag(150)
                     Text("200 字").tag(200)
@@ -471,7 +528,7 @@ private struct AIPromptEditor: View {
             HStack {
                 Text("输出风格").font(.caption).foregroundStyle(Color.rbText2)
                 Spacer()
-                Picker("", selection: $summaryStyle) {
+                Picker("", selection: $configuration.summaryStyle) {
                     Text("精简概括").tag("concise")
                     Text("完整叙述").tag("narrative")
                     Text("要点列表").tag("bullets")
@@ -482,7 +539,7 @@ private struct AIPromptEditor: View {
             HStack {
                 Text("翻译文风").font(.caption).foregroundStyle(Color.rbText2)
                 Spacer()
-                Picker("", selection: $translationStyle) {
+                Picker("", selection: $configuration.translationStyle) {
                     Text("准确忠实").tag("faithful")
                     Text("自然流畅").tag("natural")
                     Text("简洁凝练").tag("concise")
@@ -492,26 +549,26 @@ private struct AIPromptEditor: View {
             HStack {
                 Text("输出语言").font(.caption).foregroundStyle(Color.rbText2)
                 Spacer()
-                Picker("", selection: $translationLanguage) {
+                Picker("", selection: $configuration.translationLanguage) {
                     Text("中文").tag("zh")
                     Text("英文").tag("en")
                     Text("日文").tag("ja")
                 }
                 .labelsHidden().pickerStyle(.menu).frame(width: 120)
             }
-            fieldRow("术语要求", placeholder: "如：公司名保留英文，首次出现补中文", text: $translationTerms)
+            fieldRow("术语要求", placeholder: "如：公司名保留英文，首次出现补中文", text: $configuration.translationTerms)
         case .transcribe:
             HStack {
                 Text("口语程度").font(.caption).foregroundStyle(Color.rbText2)
                 Spacer()
-                Picker("", selection: $transcriptSpeechStyle) {
+                Picker("", selection: $configuration.transcriptSpeechStyle) {
                     Text("保留口语").tag("spoken")
                     Text("适度整理").tag("standard")
                     Text("偏书面化").tag("written")
                 }
                 .labelsHidden().pickerStyle(.menu).frame(width: 110)
             }
-            Toggle("翻译非中文转录稿", isOn: $transcriptTranslate)
+            Toggle("翻译非中文转录稿", isOn: $configuration.transcriptTranslate)
                 .font(.caption)
                 .tint(Color.rbAccent)
         }
@@ -547,6 +604,8 @@ private struct AIPromptEditor: View {
 /// 底部一行 = 测试连接（左）+ 清除/保存（右，清除永远在保存左侧）；预设带 modelListURL 时模型字段改下拉选。
 public struct LLMModelCard: View {
     let slotIndex: Int
+    let initialProfile: LLMProfileMetadata
+    let configuration: any ConfigurationGateway
 
     @State private var baseURL = ""
     @State private var apiKey = ""
@@ -608,11 +667,8 @@ public struct LLMModelCard: View {
     /// 解析真实 Key：展示态占位是 "••••••••"（表示已配置但 UI 不回显）。
     /// 用户未改动该字段 → 回读 SecretStore 还原真实 Key（写库时通常不会清空）。
     /// 用户手动清空/填入 → 直接用输入框的值。
-    private func resolvedKey() -> String {
-        if apiKey == "••••••••" {
-            return SecretStore.load(forKey: "llm.slot\(slotIndex).apiKey") ?? ""
-        }
-        return apiKey
+    private func keyUpdate() -> String? {
+        apiKey == "••••••••" ? nil : apiKey
     }
 
     public var body: some View {
@@ -673,10 +729,6 @@ public struct LLMModelCard: View {
                 }
                 Button {
                     showKey.toggle()
-                    // 进入显示态且当前是占位符 → 回读真实明文填入，方便核对
-                    if showKey && apiKey == "••••••••" {
-                        apiKey = SecretStore.load(forKey: "llm.slot\(slotIndex).apiKey") ?? ""
-                    }
                 } label: {
                     Image(systemName: showKey ? "eye.slash" : "eye")
                         .foregroundStyle(Color.rbAccent)
@@ -793,17 +845,14 @@ public struct LLMModelCard: View {
                     testing = true
                     testResult = nil
                     Task {
-                        let s = LLMSettings(
-                            baseURL: baseURL, apiKey: resolvedKey(), model: model,
-                            temperature: temperature, disableThinking: disableThinking)
-                        let (ok, msg) = await LLMClient().testConnection(s)
-                        testOK = ok
-                        testResult = msg
+                        let result = await configuration.testLLMProfile(profileUpdate())
+                        testOK = result.succeeded
+                        testResult = result.message
                         testing = false
                     }
                 }
                 .controlSize(.small)
-                .disabled(testing || baseURL.isEmpty || model.isEmpty || resolvedKey().isEmpty)
+                .disabled(testing || baseURL.isEmpty || model.isEmpty || (!initialProfile.hasAPIKey && apiKey.isEmpty))
                 if let r = testResult {
                     Text(r)
                         .font(.caption)
@@ -820,30 +869,28 @@ public struct LLMModelCard: View {
                 Button("清除") {
                     baseURL = ""; apiKey = ""; model = ""; temperature = 0.3; disableThinking = true
                     modelOptions = []
-                    LLMSettings.clear(profile: slotIndex)
+                    Task { _ = await configuration.saveLLMProfile(profileUpdate(apiKey: "")) }
                 }
                 .controlSize(.small)
                 .buttonStyle(.quiet)
                 .tint(Color.rbScoreLow)
                 .disabled(!filled)
                 Button("保存") {
-                    let ok = LLMSettings(
-                        baseURL: baseURL, apiKey: resolvedKey(), model: model,
-                        temperature: temperature, disableThinking: disableThinking)
-                        .save(toProfile: slotIndex)
-                    if ok {
-                        savedHint = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { savedHint = false }
-                    } else {
-                        // 写入失败（本地加密存储异常）：明确告知，不假装成功
-                        savedHint = false
-                        saveError = "保存失败：本地密钥存储写入异常（Key 未写入）"
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { saveError = nil }
+                    Task {
+                        let ok = await configuration.saveLLMProfile(profileUpdate())
+                        if ok {
+                            savedHint = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { savedHint = false }
+                        } else {
+                            savedHint = false
+                            saveError = "保存失败：服务端密钥存储写入异常（Key 未写入）"
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { saveError = nil }
+                        }
                     }
                 }
                 .controlSize(.small)
                 .buttonStyle(.primaryCapsule)
-                .disabled(baseURL.isEmpty || model.isEmpty || resolvedKey().isEmpty)
+                .disabled(baseURL.isEmpty || model.isEmpty || (!initialProfile.hasAPIKey && apiKey.isEmpty))
             }
         }
         .padding(14)
@@ -861,9 +908,9 @@ public struct LLMModelCard: View {
             return true
         }
         .onAppear {
-            let s = LLMSettings.meta(slotIndex)
+            let s = initialProfile
             baseURL = s.baseURL
-            apiKey = s.apiKey
+            apiKey = s.hasAPIKey ? "••••••••" : ""
             model = s.model
             temperature = s.temperature
             disableThinking = s.disableThinking
@@ -883,6 +930,12 @@ public struct LLMModelCard: View {
         }
     }
 
+    private func profileUpdate(apiKey explicitKey: String? = nil) -> LLMProfileUpdate {
+        LLMProfileUpdate(id: slotIndex, baseURL: baseURL, model: model,
+            temperature: temperature, disableThinking: disableThinking,
+            apiKey: explicitKey ?? keyUpdate())
+    }
+
     /// 拉取预设提供的模型列表（OpenAI / OpenRouter 的 /models 或 /v1/models，统一 {data:[{id}]} 格式）
     /// ⚠️ 必须用真实 Key：onAppear 阶段 apiKey 是占位符 "••••••••"，须经 resolvedKey() 还原真实值，
     /// 否则拿占位符当 Bearer 发 /models 会 401，已配置 key 的用户回页面下拉仍拉不到。
@@ -890,24 +943,10 @@ public struct LLMModelCard: View {
     /// 成功即合并进下拉；失败(端点未暴露/Key无权限/网络)时保留「已存 model」作最小保底，不退回文本框。
     private func loadModels(from urlStr: String) async {
         await MainActor.run { modelLoadState = .loading }
-        guard let url = URL(string: urlStr) else {
-            await MainActor.run { modelLoadState = .failed("URL 无效") }; return
-        }
-        let key = resolvedKey()   // 占位态回读 SecretStore 真实 Key，未配置则空
         let base = modelOptions   // 最小保底（onAppear/applyPreset 已填入已存 model）
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 12
-        if !key.isEmpty { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let arr = json["data"] as? [[String: Any]] else {
-                // 返回的不是 {data:[...]}（可能是 {error:{...}} 或 401）
-                await MainActor.run { modelLoadState = .failed("HTTP \(status)：端点未返回模型列表（多半 Key 无效或该端点不暴露）") }
-                return
-            }
-            let ids = arr.compactMap { $0["id"] as? String }.filter { !$0.isEmpty }
+            let ids = try await configuration.fetchLLMModels(
+                profileID: slotIndex, endpoint: urlStr, apiKey: keyUpdate())
             await MainActor.run {
                 mergeModelOptions(ids, base: base)   // 合并实时 + 已存 model 保底
                 modelLoadState = .ok(ids.count)
@@ -1277,7 +1316,10 @@ public struct DepsPane: View {
 // MARK: - 功能板块
 
 public struct BoardsPane: View {
+    private let configuration: any ConfigurationGateway
     @State private var states: [String: Bool] = [:]
+
+    public init(configuration: any ConfigurationGateway) { self.configuration = configuration }
 
     public var body: some View {
         Form {
@@ -1297,8 +1339,11 @@ public struct BoardsPane: View {
                         }
                         Spacer()
                         Toggle("", isOn: Binding(
-                            get: { states[board.rawValue] ?? board.enabled },
-                            set: { states[board.rawValue] = $0; FeatureBoard.setEnabled(board, $0) }
+                            get: { states[board.rawValue] ?? true },
+                            set: { value in
+                                states[board.rawValue] = value
+                                Task { await configuration.setFeatureFlag(board.rawValue, enabled: value) }
+                            }
                         ))
                         .labelsHidden()
                         .tint(Color.rbAccent)
@@ -1313,8 +1358,8 @@ public struct BoardsPane: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            for b in FeatureBoard.allCases { states[b.rawValue] = b.enabled }
+        .task {
+            states = await configuration.snapshot().featureFlags
         }
     }
 }
@@ -1322,7 +1367,10 @@ public struct BoardsPane: View {
 // MARK: - 缓存清理
 
 public struct CleanupPane: View {
-    @ObservedObject private var cleanup = CacheCleanupService.shared
+    private let maintenance: any MaintenanceGateway
+    private let administration: any AdministrationGateway
+    @State private var snapshot = MaintenanceSnapshot(
+        policy: CleanupPolicy(), usage: StorageUsage(), backups: [], trash: [])
     @State private var deleteDays = 90
     @State private var keepCount = 5
     @State private var deleteEnabled = true
@@ -1330,6 +1378,15 @@ public struct CleanupPane: View {
     @State private var cleanHtml = true
     @State private var cleanHtmlDays = 7
     @State private var showCleanConfirm = false
+    private let runtimeStatus: any RuntimeStatusGateway
+
+    public init(runtimeStatus: any RuntimeStatusGateway,
+                administration: any AdministrationGateway,
+                maintenance: any MaintenanceGateway) {
+        self.runtimeStatus = runtimeStatus
+        self.administration = administration
+        self.maintenance = maintenance
+    }
 
     /// 清理策略行：开关（可关闭）+ 天数自填（关闭时天数输入禁用）
     private func cleanupDayRow(title: String, unit: String,
@@ -1363,28 +1420,28 @@ public struct CleanupPane: View {
                     HStack {
                         Text("数据库").foregroundStyle(Color.rbText3)
                         Spacer()
-                        Text(CacheCleanupService.humanBytes(cleanup.dbBytes))
+                        Text(humanBytes(snapshot.usage.databaseBytes))
                             .monospacedDigit()
                             .foregroundStyle(Color.rbText)
                     }
                     HStack {
-                        Text("本地备份（\(cleanup.backupCount) 份）").foregroundStyle(Color.rbText3)
+                        Text("本地备份（\(snapshot.usage.backupCount) 份）").foregroundStyle(Color.rbText3)
                         Spacer()
-                        Text(CacheCleanupService.humanBytes(cleanup.backupBytes))
+                        Text(humanBytes(snapshot.usage.backupBytes))
                             .monospacedDigit()
                             .foregroundStyle(Color.rbText)
                     }
                     HStack {
-                        Text("临时文件（\(cleanup.tempCount) 项）").foregroundStyle(Color.rbText3)
+                        Text("临时文件（\(snapshot.usage.temporaryCount) 项）").foregroundStyle(Color.rbText3)
                         Spacer()
-                        Text(CacheCleanupService.humanBytes(cleanup.tempBytes))
+                        Text(humanBytes(snapshot.usage.temporaryBytes))
                             .monospacedDigit()
                             .foregroundStyle(Color.rbText)
                     }
                     HStack {
                         Text("可清理全文 HTML").foregroundStyle(Color.rbText3)
                         Spacer()
-                        Text("\(cleanup.contentHtmlCount) 条")
+                        Text("\(snapshot.usage.cleanableHTMLCount) 条")
                             .monospacedDigit()
                             .foregroundStyle(Color.rbText)
                     }
@@ -1392,7 +1449,7 @@ public struct CleanupPane: View {
                 .font(.callout)
                 HStack {
                     Spacer()
-                    Button(action: { cleanup.refreshStats() }) {
+                    Button(action: { Task { await reloadMaintenance() } }) {
                         Text("刷新占用")
                     }
                     .controlSize(.small)
@@ -1404,41 +1461,36 @@ public struct CleanupPane: View {
                 cleanupDayRow(
                     title: "已读自动删除", unit: "天后删除",
                     enabled: $deleteEnabled, days: $deleteDays,
-                    onEnable: { cleanup.deleteEnabled = $0 },
-                    onDays: { cleanup.deleteAfterDays = $0 }
+                    onEnable: { _ in persistPolicy() }, onDays: { _ in persistPolicy() }
                 )
                 cleanupDayRow(
                     title: "备份滚动保留", unit: "份",
                     enabled: $backupKeepEnabled, days: $keepCount,
-                    onEnable: { cleanup.backupKeepEnabled = $0 },
-                    onDays: { cleanup.backupKeepCount = $0 }
+                    onEnable: { _ in persistPolicy() }, onDays: { _ in persistPolicy() }
                 )
                 cleanupDayRow(
                     title: "清理已提取内容的全文 HTML", unit: "天后清理",
                     enabled: $cleanHtml, days: $cleanHtmlDays,
-                    onEnable: { cleanup.cleanContentHtml = $0 },
-                    onDays: { cleanup.cleanHtmlAfterDays = $0 }
+                    onEnable: { _ in persistPolicy() }, onDays: { _ in persistPolicy() }
                 )
             }
 
             Section {
                 HStack {
                     Spacer()
-                    Button(cleanup.isRunning ? "清理中…" : "立即清理") {
+                    Button("立即清理") {
                         showCleanConfirm = true
                     }
                     .buttonStyle(.primaryCapsule)
-                    .disabled(cleanup.isRunning)
-                    if cleanup.isRunning { ProgressView().controlSize(.small) }
                 }
                 .alert("立即清理？", isPresented: $showCleanConfirm) {
                     Button("取消", role: .cancel) {}
-                    Button("开始清理") { Task { await cleanup.runAll() } }
+                    Button("开始清理") { Task { _ = await maintenance.runCleanup(); await reloadMaintenance() } }
                 } message: {
                     Text("将按上方策略删除超期已读内容，并清理 HTML 和临时文件。\n星标和带标签的内容不会自动删除。")
                 }
-                if !cleanup.lastRunSummary.isEmpty {
-                    Text(cleanup.lastRunSummary)
+                if !snapshot.lastCleanupSummary.isEmpty {
+                    Text(snapshot.lastCleanupSummary)
                         .font(.caption).foregroundStyle(Color.rbScoreHigh)
                 }
                 Text("自动删除会先写入 JSONL 回收站，再清除数据库中的正文和 AI 结果；仅保留防重复抓取所需的最小元数据。备份失败时不会删除。星标和带标签的内容不动。")
@@ -1446,38 +1498,52 @@ public struct CleanupPane: View {
             }
 
             Section("数据库备份 / 恢复") {
-                BackupRestoreView()
+                BackupRestoreView(maintenance: maintenance)
             }
 
             Section("回收站（删除的内容备份）") {
-                TrashRestoreView()
+                TrashRestoreView(maintenance: maintenance)
             }
 
             Section("内容处理失败任务") {
-                FailedTaskView()
+                FailedTaskView(runtimeStatus: runtimeStatus, administration: administration)
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            deleteDays = cleanup.deleteAfterDays
-            keepCount = cleanup.backupKeepCount
-            deleteEnabled = cleanup.deleteEnabled
-            backupKeepEnabled = cleanup.backupKeepEnabled
-            cleanHtml = cleanup.cleanContentHtml
-            cleanHtmlDays = cleanup.cleanHtmlAfterDays
-            cleanup.refreshStats()
-        }
+        .task { await reloadMaintenance() }
+    }
+
+    private func persistPolicy() {
+        let value = CleanupPolicy(deleteReadEnabled: deleteEnabled, deleteReadAfterDays: deleteDays,
+            backupRetentionEnabled: backupKeepEnabled, backupKeepCount: keepCount,
+            cleanHTML: cleanHtml, cleanHTMLAfterDays: cleanHtmlDays)
+        Task { await maintenance.updatePolicy(value) }
+    }
+
+    @MainActor private func reloadMaintenance() async {
+        snapshot = await maintenance.snapshot()
+        let p = snapshot.policy
+        deleteDays = p.deleteReadAfterDays; keepCount = p.backupKeepCount
+        deleteEnabled = p.deleteReadEnabled; backupKeepEnabled = p.backupRetentionEnabled
+        cleanHtml = p.cleanHTML; cleanHtmlDays = p.cleanHTMLAfterDays
+    }
+
+    private func humanBytes(_ value: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: value, countStyle: .file)
     }
 }
 
 // MARK: - 备份/恢复（嵌进缓存清理页底部）
 
 public struct BackupRestoreView: View {
-    @State private var backups: [BackupInfo] = []
-    @State private var selectedBackup: BackupInfo? = nil
+    private let maintenance: any MaintenanceGateway
+    @State private var backups: [BackupRecord] = []
+    @State private var selectedBackup: BackupRecord? = nil
     @State private var showRestoreConfirm = false
     @State private var message: String = ""
     @State private var busy = false
+
+    public init(maintenance: any MaintenanceGateway) { self.maintenance = maintenance }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1486,13 +1552,13 @@ public struct BackupRestoreView: View {
                     busy = true
                     message = ""
                     Task {
-                        await BackupService.shared.backupNow()
+                        let value = await maintenance.createBackup()
                         await MainActor.run {
-                            message = BackupService.shared.lastBackupError == nil
-                                ? "✅ 已备份：\(BackupService.shared.lastBackupAt ?? "")"
-                                : "❌ 备份失败：\(BackupService.shared.lastBackupError ?? "")"
+                            message = value.lastBackupError == nil
+                                ? "✅ 已备份：\(value.lastBackupAt ?? "")"
+                                : "❌ 备份失败：\(value.lastBackupError ?? "")"
                             busy = false
-                            reload()
+                            backups = value.backups
                         }
                     }
                 }
@@ -1506,9 +1572,9 @@ public struct BackupRestoreView: View {
                     .font(.caption).foregroundStyle(Color.rbText3)
             } else {
                 Picker("选择备份", selection: $selectedBackup) {
-                    Text("未选择").tag(nil as BackupInfo?)
+                    Text("未选择").tag(nil as BackupRecord?)
                     ForEach(backups) { b in
-                        Text(b.displayName).tag(b as BackupInfo?)
+                        Text(b.displayName).tag(b as BackupRecord?)
                     }
                 }
                 .labelsHidden()
@@ -1530,17 +1596,18 @@ public struct BackupRestoreView: View {
             Text("恢复前会自动给当前库做一次安全备份。恢复完成后需重启 App。")
                 .font(.caption2).foregroundStyle(Color.rbText3)
         }
-        .onAppear(perform: reload)
+        .task { await reload() }
         .alert("确认恢复？", isPresented: $showRestoreConfirm) {
             Button("取消", role: .cancel) {}
             Button("恢复并退出 App", role: .destructive) {
                 guard let b = selectedBackup else { return }
-                do {
-                    try BackupService.shared.restore(from: b.path)
-                    // 恢复后连接句柄已失效，直接退出让用户重开
-                    NSApp.terminate(nil)
-                } catch {
-                    message = "❌ 恢复失败：\(error.localizedDescription)"
+                Task {
+                    do {
+                        try await maintenance.restoreBackup(id: b.id)
+                        NSApp.terminate(nil)
+                    } catch {
+                        message = "❌ 恢复失败：\(error.localizedDescription)"
+                    }
                 }
             }
         } message: {
@@ -1548,17 +1615,20 @@ public struct BackupRestoreView: View {
         }
     }
 
-    private func reload() {
-        backups = BackupService.shared.listBackups()
+    @MainActor private func reload() async {
+        backups = await maintenance.snapshot().backups
     }
 }
 
 // MARK: - 回收站恢复（清理删除的内容可找回）
 
 public struct TrashRestoreView: View {
-    @State private var batches: [CacheCleanupService.TrashBatch] = []
+    private let maintenance: any MaintenanceGateway
+    @State private var batches: [TrashBatchRecord] = []
     @State private var message = ""
     @State private var showClearConfirm = false
+
+    public init(maintenance: any MaintenanceGateway) { self.maintenance = maintenance }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1572,23 +1642,20 @@ public struct TrashRestoreView: View {
                             Text("\(b.date) · \(b.itemCount) 条")
                                 .font(.callout)
                                 .foregroundStyle(Color.rbText)
-                            Text(CacheCleanupService.humanBytes(b.sizeBytes))
+                            Text(ByteCountFormatter.string(fromByteCount: b.sizeBytes, countStyle: .file))
                                 .font(.caption2).foregroundStyle(Color.rbText3)
                         }
                         Spacer()
                         Button("恢复") {
-                            let r = CacheCleanupService.shared.restoreTrash(batch: b)
-                            // 全部条目都已在库里（恢复成功 + 本就存在）→ 备份文件已无价值，删掉防残留
-                            if r.restored + r.skipped > 0 {
-                                CacheCleanupService.shared.deleteTrash(batch: b)
+                            Task {
+                                let r = await maintenance.restoreTrash(id: b.id)
+                                message = "✅ 恢复 \(r.restored) 条（跳过已存在 \(r.skipped)），已放回文章列表，备份文件已清理"
+                                await reload()
                             }
-                            message = "✅ 恢复 \(r.restored) 条（跳过已存在 \(r.skipped)），已放回文章列表，备份文件已清理"
-                            reload()
                         }
                         .controlSize(.small)
                         Button(role: .destructive) {
-                            CacheCleanupService.shared.deleteTrash(batch: b)
-                            reload()
+                            Task { await maintenance.deleteTrash(id: b.id); await reload() }
                         } label: { Image(systemName: "trash") }
                         .buttonStyle(.quiet)
                         .controlSize(.small)
@@ -1606,38 +1673,45 @@ public struct TrashRestoreView: View {
             Text("恢复后内容会重新出现在普通文章列表中。")
                 .font(.caption2).foregroundStyle(Color.rbText3)
         }
-        .onAppear(perform: reload)
+        .task { await reload() }
         .alert("清空回收站？", isPresented: $showClearConfirm) {
             Button("取消", role: .cancel) {}
             Button("全部删除", role: .destructive) {
-                CacheCleanupService.shared.clearAllTrash()
-                reload()
+                Task { await maintenance.clearTrash(); await reload() }
             }
         } message: {
             Text("回收站里 \(batches.reduce(0) { $0 + $1.itemCount }) 条备份将永久删除，不可找回。")
         }
     }
 
-    private func reload() {
-        batches = CacheCleanupService.shared.listTrash()
+    @MainActor private func reload() async {
+        batches = await maintenance.snapshot().trash
     }
 }
 
 // MARK: - 失败任务管理（连续失败 >=3 后暂停处理）
 
 public struct FailedTaskView: View {
-    @StateObject private var worker = PipelineWorker.shared
+    @StateObject private var status: RuntimeStatusStore
     @State private var showFailureList = false
+    private let runtimeStatus: any RuntimeStatusGateway
+    private let administration: any AdministrationGateway
+
+    public init(runtimeStatus: any RuntimeStatusGateway, administration: any AdministrationGateway) {
+        self.runtimeStatus = runtimeStatus
+        self.administration = administration
+        _status = StateObject(wrappedValue: RuntimeStatusStore(gateway: runtimeStatus))
+    }
 
     public var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: worker.deadLetterCount > 0
+            Image(systemName: status.snapshot.pausedFailureCount > 0
                   ? "exclamationmark.triangle.fill"
                   : "checkmark.circle.fill")
-                .foregroundStyle(worker.deadLetterCount > 0 ? Color.rbScoreLow : Color.rbScoreHigh)
+                .foregroundStyle(status.snapshot.pausedFailureCount > 0 ? Color.rbScoreLow : Color.rbScoreHigh)
             VStack(alignment: .leading, spacing: 2) {
-                Text(worker.deadLetterCount > 0
-                     ? "\(worker.deadLetterCount) 个失败任务已暂停"
+                Text(status.snapshot.pausedFailureCount > 0
+                     ? "\(status.snapshot.pausedFailureCount) 个失败任务已暂停"
                      : "没有失败任务")
                     .font(.callout)
                     .foregroundStyle(Color.rbText)
@@ -1648,13 +1722,13 @@ public struct FailedTaskView: View {
             Spacer()
             Button("查看失败任务") { showFailureList = true }
                 .controlSize(.small)
-                .disabled(worker.deadLetterCount == 0)
+                .disabled(status.snapshot.pausedFailureCount == 0)
         }
-        .onAppear { worker.requestPendingRefresh() }
+        .task { await status.monitor() }
         .sheet(isPresented: $showFailureList, onDismiss: {
-            worker.requestPendingRefresh()
+            Task { await status.refresh(recalculate: true) }
         }) {
-            ContentFailureListSheet()
+            ContentFailureListSheet(runtimeStatus: runtimeStatus, administration: administration)
         }
     }
 }
@@ -1793,12 +1867,28 @@ public struct ReaderPane: View {
 /// 设置「多类型源」页：四大内容类型的总开关（文章/RSS、播客、视频、微信）。
 /// 当前仅 UI 与计数，开关持久化于 UserDefaults；拦截接入见下方 footer 说明。
 public struct TypeSwitchPane: View {
-    @State private var counts: [ContentType: Int] = [:]
+    @StateObject private var catalog: SourceCatalogStore
     @State private var enabled: [ContentType: Bool] = [:]
     @State private var bilibiliLoggedIn = false
     @State private var bilibiliUname: String? = nil
     @State private var showBilibiliQR = false
     @State private var showBilibiliImport = false
+    private let sourceOnboarding: any SourceOnboardingGateway
+    private let authentication: any AuthenticationGateway
+    private let configuration: any ConfigurationGateway
+
+    public init(
+        sourceCatalog: any SourceCatalogGateway,
+        sourceOnboarding: any SourceOnboardingGateway,
+        authentication: any AuthenticationGateway,
+        configuration: any ConfigurationGateway
+    ) {
+        self.sourceOnboarding = sourceOnboarding
+        self.authentication = authentication
+        self.configuration = configuration
+        _catalog = StateObject(
+            wrappedValue: SourceCatalogStore(gateway: sourceCatalog))
+    }
 
     public var body: some View {
         Form {
@@ -1817,14 +1907,15 @@ public struct TypeSwitchPane: View {
                                 Text(t.subtitle)
                                     .font(.caption)
                                     .foregroundStyle(Color.rbText2)
-                                Text("当前 \(counts[t] ?? 0) 个源")
+                                Text("当前 \(catalog.sources.filter { $0.stype == t.sourceStype }.count) 个源")
                                     .font(.caption2)
                                     .foregroundStyle(Color.rbText3)
                             }
                             Spacer()
                             Toggle("", isOn: Binding(
                                 get: { enabled[t] ?? true },
-                                set: { enabled[t] = $0; ContentType.setEnabled(t, $0) }
+                                set: { value in enabled[t] = value
+                                    Task { await configuration.setSourceTypeFlag(t.rawValue, enabled: value) } }
                             ))
                             .labelsHidden()
                             .tint(Color.rbAccent)
@@ -1842,9 +1933,10 @@ public struct TypeSwitchPane: View {
                                         .foregroundStyle(Color.rbText2)
                                     Spacer()
                                     Button("退出登录") {
-                                        BilibiliAuth.clearAuth()
-                                        bilibiliLoggedIn = false
-                                        bilibiliUname = nil
+                                        Task {
+                                            try? await authentication.signOut(platformID: "bilibili")
+                                            bilibiliLoggedIn = false; bilibiliUname = nil
+                                        }
                                     }
                                     .font(.caption)
                                     .buttonStyle(.plain)
@@ -1877,17 +1969,16 @@ public struct TypeSwitchPane: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            let srcs = SourceStore.shared.sources
-            for t in ContentType.allCases where t != .wechat {
-                enabled[t] = t.enabled
-                counts[t] = srcs.filter { $0.stype == t.sourceStype }.count
-            }
-            bilibiliLoggedIn = BilibiliAuth.isLoggedIn
-            bilibiliUname = BilibiliAuth.uname
+        .task {
+            let configured = await configuration.snapshot().sourceTypeFlags
+            for t in ContentType.allCases where t != .wechat { enabled[t] = configured[t.rawValue] ?? true }
+            let status = await authentication.statuses().first { $0.platformID == "bilibili" }
+            bilibiliLoggedIn = status?.phase == .authenticated
+            bilibiliUname = status?.accountName
         }
+        .task { await catalog.monitor() }
         .sheet(isPresented: $showBilibiliQR) {
-            BilibiliQRLoginView(onLoginSuccess: { uname in
+            BilibiliQRLoginView(authentication: authentication, onLoginSuccess: { uname in
                 bilibiliLoggedIn = true
                 bilibiliUname = uname
                 // 登录成功后询问是否导入已关注 UP 主
@@ -1895,7 +1986,7 @@ public struct TypeSwitchPane: View {
             })
         }
         .sheet(isPresented: $showBilibiliImport) {
-            BilibiliImportFollowingsView(store: SourceStore.shared)
+            BilibiliImportFollowingsView(onboarding: sourceOnboarding)
         }
     }
 }

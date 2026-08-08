@@ -169,12 +169,17 @@ struct ReaderPayload: Sendable {
     let videoId: String?
     let score: Int?
     let summary: String?
-    let policy: PipelinePolicy
 }
 
 // MARK: - SQLite 只读访问
 
 public final class Database: @unchecked Sendable {
+    /// sqlite 绑定参数只允许 bindParams 支持的不可变标量。用受控盒跨写队列传递，
+    /// 避免把开放的 `[Any?]` 直接捕获进 @Sendable closure。
+    private struct SQLParameters: @unchecked Sendable {
+        let values: [Any?]
+    }
+
     static let shared = Database()
     /// 读连接：供 UI 查询（fetchContents/fetchSourceGroups/queryRows 等）
     private var db: OpaquePointer?
@@ -512,8 +517,9 @@ public final class Database: @unchecked Sendable {
             }
             return
         }
+        let captured = SQLParameters(values: params)
         writeQueue.async {
-            let ok = self.executeInner(sql, params: params)
+            let ok = self.executeInner(sql, params: captured.values)
             if let completion {
                 DispatchQueue.main.async { completion(ok) }
             }
@@ -898,9 +904,8 @@ public final class Database: @unchecked Sendable {
         guard open(), let handle = readerDB else { return nil }
         let sql = """
         SELECT c.content_md, c.llm_translated_md, c.meta, c.llm_title_translated,
-               c.llm_transcript_md, c.llm_score, c.llm_summary, s.config
+               c.llm_transcript_md, c.llm_score, c.llm_summary
         FROM content c
-        LEFT JOIN content_source s ON s.id = c.source_id
         WHERE c.id = ?;
         """
         var stmt: OpaquePointer?
@@ -924,8 +929,7 @@ public final class Database: @unchecked Sendable {
         return ReaderPayload(
             contentMd: text(0), llmTranslatedMd: text(1), audioUrl: audioUrl,
             titleTranslated: text(3), llmTranscriptMd: text(4), videoId: videoId,
-            score: score, summary: text(6),
-            policy: PipelinePolicy.from(configJson: text(7) ?? "{}"))
+            score: score, summary: text(6))
     }
 
     /// 按需取单篇正文 + 大字段（点开阅读时调用）。返回 (contentMd, llmTranslatedMd, audioUrl, contentHtml, titleTranslated, llmTranscriptMd, videoId)
@@ -1030,6 +1034,26 @@ public final class Database: @unchecked Sendable {
                      params: [contentId], completion: completion)
     }
 
+    /// 幂等设置星标状态。应用契约和远程 API 必须表达目标状态，不能使用 toggle；
+    /// 否则请求重试可能把状态再次翻转。
+    func setStarred(contentId: Int64, starred: Bool,
+                    completion: (@MainActor @Sendable (_ ok: Bool, _ changed: Bool) -> Void)? = nil) {
+        let update: @Sendable () -> Void = { [self] in
+            let ok = executeInner(
+                "UPDATE content SET starred = ? WHERE id = ? AND starred <> ?",
+                params: [starred ? 1 : 0, contentId, starred ? 1 : 0])
+            let changed = ok && writeChanges() > 0
+            if let completion {
+                DispatchQueue.main.async { completion(ok, changed) }
+            }
+        }
+        if onWriteQueue {
+            update()
+        } else {
+            writeQueue.async(execute: update)
+        }
+    }
+
     /// 切换星标，返回新状态。返回值在写前已确定（读当前状态取反），
     /// 写入 executeAsync 不阻塞主线程——读（scalarInt）走读连接不排队，快。
     @discardableResult
@@ -1050,6 +1074,7 @@ public final class Database: @unchecked Sendable {
                      minScore: Int? = nil, maxScore: Int? = nil,
                      includeUnscored: Bool = false,
                      keyword: String? = nil, starredOnly: Bool = false,
+                     exportedOnly: Bool = false,
                      tagId: Int64? = nil,
                      processedFilters: [String: Int] = [:],
                      contentCategory: String? = nil,
@@ -1068,6 +1093,9 @@ public final class Database: @unchecked Sendable {
             conds.append(includeUnscored ? "((\(range)) OR llm_score IS NULL)" : "(\(range))")
         }
         if starredOnly { conds.append("starred = 1") }
+        if exportedOnly {
+            conds.append("id IN (SELECT content_id FROM export_record WHERE status='delivered')")
+        }
         if let category = contentCategory {
             switch category {
             case "podcast": conds.append("ctype='podcast'")

@@ -4,16 +4,29 @@ import AppKit
 // 入口在 Sources/ReadBoardMain/main.swift（独立 mini-target，库本身无 @main 以便测试链接）
 public struct ReadBoardApp: App {
     private let configuration: ReadBoardConfiguration
+    private let services: ReadBoardServices
+    private let runtime: ServiceRuntime
 
     public init() {
-        self.init(configuration: .community)
+        self.init(configuration: .community, services: .live)
     }
 
     public init(configuration: ReadBoardConfiguration) {
+        self.init(configuration: configuration, services: .live)
+    }
+
+    public init(
+        configuration: ReadBoardConfiguration,
+        services: @autoclosure () -> ReadBoardServices
+    ) {
         self.configuration = configuration
         ReadBoardRuntime.configure(
             applicationSupportDirectoryName: configuration.applicationSupportDirectoryName
         )
+        // 必须先配置运行目录，再创建 live services。LocalReaderGateway 会首次访问
+        // Database.shared；若顺序相反，Pro 会把数据库静态路径锁定到社区版目录。
+        self.services = services()
+        self.runtime = ServiceRuntime(configuration: configuration, services: self.services)
         // SIGPIPE：URLSession 在受限网络环境（沙箱/VPN/proxy）下写已断开的 socket 会触发，
         // 默认信号处理直接杀进程。设为 SIG_IGN 让系统调用返回 EPIPE 错误码而非崩溃。
         signal(SIGPIPE, SIG_IGN)
@@ -23,27 +36,12 @@ public struct ReadBoardApp: App {
         fputs("[trace] 日志文件：\(Trace.logFileURL.path)  级别=\(lvl)（改 UserDefaults readboard.trace 可即时调级别）\n", stderr)
         Trace.i("═══ ReadBoard 启动 ═══ 版本跟踪日志就绪，日志路径见上", category: "app")
         // 启动后台管线 worker（周期扫描未处理内容，按开关补跑 AI 评分/翻译/摘要/转录）
-        PipelineWorker.shared.start()
-        // 启动 DB 自动备份（每日热备到 Application Support/ReadBoard/backups，保留最近5份）
-        BackupService.shared.start()
-        // 启动数据保留策略（已读超期软删除，每日）
-        RetentionService.shared.start()
-        // 启动定时导出规则扫描；重复调用有内部防重保护。
-        ExportService.shared.startScheduler()
-        configuration.modules.forEach { $0.start() }
-        // feed 自动抓取调度：延迟到主 runloop 就绪后启动。
-        // 直接在 init 调 startAutoSync()——Timer.scheduledTimer 此时注册的 runloop
-        // 还没跑，Task 也可能被 SwiftUI 生命周期取消（实测重启后 CPU 0%、无网络、0 抓取）。
-        // Task + 1s 延迟让 runloop 起来后再注册 Timer。
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            SourceStore.shared.startAutoSync()
-        }
+        runtime.start()
     }
 
     public var body: some Scene {
         WindowGroup {
-            RootView(configuration: configuration)
+            RootView(configuration: configuration, services: services, onTerminate: { runtime.stop() })
                 .environment(\.readBoardConfiguration, configuration)
                 .frame(minWidth: 900, minHeight: 600)
         }
@@ -52,7 +50,7 @@ public struct ReadBoardApp: App {
 
         // 独立设置窗口（⌘, 打开）
         Settings {
-            SettingsView()
+            SettingsView(services: services)
                 .environment(\.readBoardConfiguration, configuration)
         }
     }
@@ -62,9 +60,17 @@ public struct ReadBoardApp: App {
 public struct RootView: View {
     @StateObject private var tab = AppTab()
     private let configuration: ReadBoardConfiguration
+    private let services: ReadBoardServices
+    private let onTerminate: () -> Void
 
-    public init(configuration: ReadBoardConfiguration = .community) {
+    public init(
+        configuration: ReadBoardConfiguration = .community,
+        services: ReadBoardServices = .live,
+        onTerminate: @escaping () -> Void = {}
+    ) {
         self.configuration = configuration
+        self.services = services
+        self.onTerminate = onTerminate
     }
 
     public var body: some View {
@@ -73,18 +79,17 @@ public struct RootView: View {
         Group {
             switch tab.selection {
             case 1:
-                SourcesView()
+                SourcesView(services: services)
             case 3:
-                ManageView()
+                ManageView(services: services)
             default:
-                ContentView()
+                ContentView(services: services)
             }
         }
         .environmentObject(tab)
         .frame(minWidth: 900, minHeight: 600)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            configuration.modules.forEach { $0.stop() }
-            ExportService.shared.stopScheduler()
+            onTerminate()
         }
     }
 }
