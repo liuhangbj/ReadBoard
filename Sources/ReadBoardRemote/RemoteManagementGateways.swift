@@ -217,3 +217,28 @@ public struct RemoteMaintenanceGateway: MaintenanceGateway {
             body: RemoteAcknowledgement(), as: RemoteAcknowledgement.self)
     }
 }
+
+public struct RemoteDependencyManagementGateway: DependencyManagementGateway {
+    private let client: ReadBoardHTTPClient
+    public init(client: ReadBoardHTTPClient) { self.client = client }
+
+    public func snapshot() async -> DependencyManagementSnapshot {
+        (try? await client.get(
+            "api/v1/dependencies",
+            as: DependencyManagementSnapshot.self)) ?? DependencyManagementSnapshot()
+    }
+
+    public func submit(_ request: DependencyTaskRequest) async throws -> DependencyTaskSnapshot {
+        try await client.post(
+            "api/v1/dependencies/submit",
+            body: request,
+            as: DependencyTaskSnapshot.self)
+    }
+
+    public func cancel(taskID: String) async {
+        let _: RemoteAcknowledgement? = try? await client.post(
+            "api/v1/dependencies/cancel",
+            body: RemoteStringIDRequest(id: taskID),
+            as: RemoteAcknowledgement.self)
+    }
+}

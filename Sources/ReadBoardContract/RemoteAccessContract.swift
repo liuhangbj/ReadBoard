@@ -32,6 +32,7 @@ public enum RemoteAccessPreset: String, Codable, CaseIterable, Sendable {
 
 public enum RemoteServiceCapability: String, Codable, CaseIterable, Hashable, Sendable {
     case library
+    case mediaPlayback
     case processing
     case sourceManagement
     case sourceOnboarding
@@ -39,7 +40,34 @@ public enum RemoteServiceCapability: String, Codable, CaseIterable, Hashable, Se
     case export
     case administration
     case configuration
+    case dependencyManagement
     case maintenance
+}
+
+/// 客户端可见功能的唯一权限快照。
+/// capability 表示服务端实现了什么，scope 表示当前设备获准做什么；两者必须同时满足。
+public struct ReadBoardPermissionSet: Equatable, Sendable {
+    public let capabilities: Set<RemoteServiceCapability>
+    public let scopes: Set<RemoteAccessScope>
+
+    public init(
+        capabilities: some Sequence<RemoteServiceCapability>,
+        scopes: some Sequence<RemoteAccessScope>
+    ) {
+        self.capabilities = Set(capabilities)
+        self.scopes = Set(scopes)
+    }
+
+    public func allows(
+        _ scope: RemoteAccessScope,
+        capability: RemoteServiceCapability? = nil
+    ) -> Bool {
+        scopes.contains(scope) && capability.map(capabilities.contains) != false
+    }
+
+    public static let localFullControl = ReadBoardPermissionSet(
+        capabilities: RemoteServiceCapability.allCases,
+        scopes: RemoteAccessScope.fullControl)
 }
 
 public struct RemoteServerProfile: Codable, Equatable, Sendable {

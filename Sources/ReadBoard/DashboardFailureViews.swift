@@ -223,23 +223,16 @@ struct ContentFailureListSheet: View {
 
             Hairline()
 
-            Group {
+            List(items) { failure in
+                failureRow(failure)
+                    .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
+            }
+            .listStyle(.inset)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay {
                 if loading {
                     ProgressView("正在读取失败任务…")
                         .controlSize(.small)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if items.isEmpty {
-                    ContentUnavailableView(
-                        "没有失败任务",
-                        systemImage: "checkmark.circle",
-                        description: Text("内容处理引擎运行正常")
-                    )
-                } else {
-                    List(items) { failure in
-                        failureRow(failure)
-                            .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
-                    }
-                    .listStyle(.inset)
                 }
             }
 

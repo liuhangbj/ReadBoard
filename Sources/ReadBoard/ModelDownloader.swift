@@ -50,7 +50,7 @@ public final class ModelDownloader: ObservableObject {
     private init() {}
 
     /// 下载指定模型
-    func download(modelName: String = "medium") async {
+    func download(modelName: String = "medium", replacingExisting: Bool = false) async {
         guard !isDownloading else { return }
         guard let url = Self.modelURL(for: modelName) else {
             errorMessage = "未知模型：\(modelName)"
@@ -58,7 +58,7 @@ public final class ModelDownloader: ObservableObject {
         }
         let targetPath = Self.modelPath(for: modelName)
 
-        if FileManager.default.fileExists(atPath: targetPath) {
+        if FileManager.default.fileExists(atPath: targetPath), !replacingExisting {
             statusText = "模型已存在"
             return
         }
@@ -120,7 +120,20 @@ public final class ModelDownloader: ObservableObject {
                 try? FileManager.default.removeItem(atPath: tmpPath)
                 throw DownloadError.sizeMismatch(expected: total, got: finalSize)
             }
-            try FileManager.default.moveItem(atPath: tmpPath, toPath: targetPath)
+            if FileManager.default.fileExists(atPath: targetPath) {
+                let backupPath = targetPath + ".previous"
+                try? FileManager.default.removeItem(atPath: backupPath)
+                try FileManager.default.moveItem(atPath: targetPath, toPath: backupPath)
+                do {
+                    try FileManager.default.moveItem(atPath: tmpPath, toPath: targetPath)
+                    try? FileManager.default.removeItem(atPath: backupPath)
+                } catch {
+                    try? FileManager.default.moveItem(atPath: backupPath, toPath: targetPath)
+                    throw error
+                }
+            } else {
+                try FileManager.default.moveItem(atPath: tmpPath, toPath: targetPath)
+            }
             progress = 1
             statusText = "下载完成"
         } catch {

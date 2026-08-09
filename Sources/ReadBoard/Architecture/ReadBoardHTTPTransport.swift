@@ -149,6 +149,9 @@ public struct ReadBoardHTTPRouter: Sendable {
             case ("POST", "/api/v1/content/detail"):
                 let value = try decode(RemoteContentIDRequest.self, request.body)
                 return json(try await services.contentDetail.detail(contentID: value.contentID))
+            case ("POST", "/api/v1/media/youtube/stream"):
+                let value = try decode(MediaPlaybackRequest.self, request.body)
+                return json(try await services.mediaPlayback.youtubeStream(videoID: value.videoID))
 
             case ("GET", "/api/v1/processing/capabilities"):
                 return json(await services.processing.capabilities())
@@ -371,6 +374,25 @@ public struct ReadBoardHTTPRouter: Sendable {
                     try decode(AIPromptConfiguration.self, request.body))
                 return json(RemoteAcknowledgement())
 
+            case ("GET", "/api/v1/dependencies"):
+                guard let gateway = services.dependencyManagement else {
+                    return failure(501, "capability_unavailable", "服务端未启用依赖任务管理")
+                }
+                return json(await gateway.snapshot())
+            case ("POST", "/api/v1/dependencies/submit"):
+                guard let gateway = services.dependencyManagement else {
+                    return failure(501, "capability_unavailable", "服务端未启用依赖任务管理")
+                }
+                return json(try await gateway.submit(
+                    try decode(DependencyTaskRequest.self, request.body)), status: 202)
+            case ("POST", "/api/v1/dependencies/cancel"):
+                guard let gateway = services.dependencyManagement else {
+                    return failure(501, "capability_unavailable", "服务端未启用依赖任务管理")
+                }
+                let value = try decode(RemoteStringIDRequest.self, request.body)
+                await gateway.cancel(taskID: value.id)
+                return json(RemoteAcknowledgement())
+
             case ("GET", "/api/v1/maintenance"):
                 return json(await services.maintenance.snapshot())
             case ("POST", "/api/v1/maintenance/policy"):
@@ -411,6 +433,7 @@ public struct ReadBoardHTTPRouter: Sendable {
             return ["/api/v1/library/read", "/api/v1/library/star", "/api/v1/library/mark-read"]
                 .contains(path) ? .updateReadingState : .readLibrary
         }
+        if path.hasPrefix("/api/v1/media/") { return .readLibrary }
         if path.hasPrefix("/api/v1/processing/") {
             return path == "/api/v1/processing/capabilities" ? .manageOperations : .runProcessing
         }
@@ -423,6 +446,7 @@ public struct ReadBoardHTTPRouter: Sendable {
         if path.hasPrefix("/api/v1/auth/") { return .manageAuthentication }
         if path.hasPrefix("/api/v1/exports/") { return .manageExports }
         if path.hasPrefix("/api/v1/configuration") { return .manageConfiguration }
+        if path.hasPrefix("/api/v1/dependencies") { return .manageConfiguration }
         if path.hasPrefix("/api/v1/maintenance") { return .manageMaintenance }
         return nil
     }
@@ -465,7 +489,10 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
     private let bonjourServiceName: String
     private let bonjourTXTRecord: NWTXTRecord
     private let stateHandler: @Sendable (ReadBoardHTTPServerState) -> Void
-    private let queue = DispatchQueue(label: "readboard.http.server", qos: .utility)
+    // TLS handshakes and HTTP reads must not share one serial lane: a slow or
+    // abandoned client would otherwise prevent every other device from connecting.
+    private let queue = DispatchQueue(
+        label: "readboard.http.server", qos: .utility, attributes: .concurrent)
     private var listener: NWListener?
     private let lock = NSLock()
 
@@ -495,6 +522,15 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
         let tlsOptions = NWProtocolTLS.Options()
         sec_protocol_options_set_local_identity(
             tlsOptions.securityProtocolOptions, tlsIdentity.identity)
+        // Persisted identities are RSA certificates imported into a process-local
+        // keychain.  TLS 1.3 asks the legacy keychain provider for RSA-PSS and can
+        // leave the handshake waiting forever with CSSMERR_CSP_INVALID_KEYATTR_MASK.
+        // TLS 1.2 keeps the same certificate/fingerprint and uses the verified
+        // PKCS#1 signing path, so existing Go clients remain paired without prompts.
+        sec_protocol_options_set_min_tls_protocol_version(
+            tlsOptions.securityProtocolOptions, .TLSv12)
+        sec_protocol_options_set_max_tls_protocol_version(
+            tlsOptions.securityProtocolOptions, .TLSv12)
         let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
         let host: NWEndpoint.Host = allowLAN ? "0.0.0.0" : "127.0.0.1"
         parameters.requiredLocalEndpoint = .hostPort(host: host, port: port)

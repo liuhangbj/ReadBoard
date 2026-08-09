@@ -1,70 +1,17 @@
 import SwiftUI
 import AppKit
 import ReadBoardContract
+import ReadBoardFeatures
 
 // MARK: - 独立设置窗口（⌘, 打开，手写侧栏+详情分页）
 
-public enum SettingsPage: String, CaseIterable, Identifiable, Sendable {
-    case general, remote, reader, llm, deps, boards, sources, fetch, content, export, pipeline, cleanup
-    public var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .general:  return "通用"
-        case .remote:   return "远程访问"
-        case .reader:   return "阅读器"
-        case .llm:      return "LLM模型"
-        case .deps:     return "依赖"
-        case .boards:   return "功能开关"
-        case .sources:  return "多平台订阅"
-        case .fetch:    return "全文提取"
-        case .content:  return "AI内容处理"
-        case .export:   return "导出平台"
-        case .pipeline: return "导出规则"
-        case .cleanup:  return "缓存清理"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .general:  return "gearshape"
-        case .remote:   return "network"
-        case .reader:   return "doc.text"
-        case .llm:      return "brain.head.profile"
-        case .deps:     return "shippingbox"
-        case .boards:   return "square.grid.2x2"
-        case .sources:  return "antenna.radiowaves.left.and.right"
-        case .fetch:    return "doc.viewfinder"
-        case .content:  return "text.badge.plus"
-        case .export:   return "square.and.arrow.up"
-        case .pipeline: return "arrow.triangle.branch"
-        case .cleanup:  return "trash"
-        }
-    }
-}
-
-public enum SettingsRoute: Equatable, Sendable {
-    case page(SettingsPage)
-    case module(String)
-}
-
-/// 主窗口可先写入目标，再调用 openSettings；设置窗口创建后会消费并定位。
-@MainActor
-public final class SettingsNavigationStore: ObservableObject {
-    public static let shared = SettingsNavigationStore()
-    @Published private(set) var route: SettingsRoute?
-
-    private init() {}
-
-    public func request(_ route: SettingsRoute) {
-        self.route = route
-    }
-}
+public typealias SettingsPage = ReadBoardSettingsPage
+public typealias SettingsRoute = ReadBoardSettingsRoute
+public typealias SettingsNavigationStore = ReadBoardSettingsNavigationStore
 
 public struct SettingsView: View {
     @Environment(\.readBoardConfiguration) private var configuration
     @StateObject private var navigation = SettingsNavigationStore.shared
-    @State private var selection: SettingsDestination? = .page(.general)
     private let services: ReadBoardServices
 
     public init(services: ReadBoardServices = .live) {
@@ -72,107 +19,56 @@ public struct SettingsView: View {
     }
 
     public var body: some View {
-        // 手动 HStack 布局替代 NavigationSplitView——后者在 Settings 场景下
-        // 会硬塞一个「收起左栏」切换按钮，且 .toolbar(removing:.sidebarToggle) 对它无效。
-        // 改手写侧栏+详情，按钮从源头不存在。
-        HStack(spacing: 0) {
-            List(selection: $selection) {
-                ForEach(SettingsPage.allCases) { page in
-                    Label(page.title, systemImage: page.icon)
-                        .tag(SettingsDestination.page(page))
-                }
-                if !configuration.modules.isEmpty {
-                    Section("Pro 功能") {
-                        ForEach(configuration.modules, id: \.info.identifier) { module in
-                            Label(module.info.displayName, systemImage: "bubble.left.and.bubble.right.fill")
-                                .tag(SettingsDestination.module(module.info.identifier))
-                        }
-                    }
-                }
+        ReadBoardSettingsShell(
+            modules: configuration.modules.map {
+                ReadBoardSettingsModuleDescriptor(
+                    id: $0.info.identifier,
+                    title: $0.info.displayName)
+            },
+            route: navigation.route,
+            content: content)
+        .tint(Color.rbAccent)
+    }
+
+    private func content(_ destination: ReadBoardSettingsDestination) -> AnyView {
+        switch destination {
+        case .page(let page):
+            return switch page {
+            case .general: AnyView(GeneralPane(sourceManagement: services.sourceManagement,
+                                               configuration: services.configuration))
+            case .remote:
+                services.remoteAccess.map { AnyView(RemoteAccessPane(remoteAccess: $0)) }
+                    ?? AnyView(ContentUnavailableView(
+                        "仅能在服务端设置远程访问", systemImage: "server.rack"))
+            case .reader: AnyView(ReaderPane())
+            case .llm: AnyView(LLMPane(configuration: services.configuration))
+            case .deps: AnyView(DepsPane())
+            case .boards: AnyView(BoardsPane(configuration: services.configuration))
+            case .sources: AnyView(TypeSwitchPane(
+                sourceCatalog: services.sourceCatalog,
+                sourceOnboarding: services.sourceOnboarding,
+                authentication: services.authentication,
+                configuration: services.configuration))
+            case .fetch: AnyView(FetchPane(configuration: services.configuration))
+            case .content: AnyView(ContentPane(configuration: services.configuration))
+            case .export: AnyView(ExportPlatformPane(configuration: services.configuration))
+            case .pipeline: AnyView(ExportRulePane(
+                export: services.export,
+                sourceCatalog: services.sourceCatalog,
+                configuration: services.configuration))
+            case .cleanup: AnyView(CleanupPane(runtimeStatus: services.runtimeStatus,
+                                               administration: services.administration,
+                                               maintenance: services.maintenance))
             }
-            .listStyle(.sidebar)
-            .tint(Color.rbAccent)   // 选中项墨蓝 tint（统一纸墨留白）
-            .frame(width: 180)
-
-            Divider()
-
-            Group {
-                switch selection ?? .page(.general) {
-                case .page(let page):
-                    switch page {
-                    case .general:  GeneralPane(sourceManagement: services.sourceManagement,
-                                                configuration: services.configuration)
-                    case .remote:   RemoteAccessPane(remoteAccess: services.remoteAccess)
-                    case .reader:   ReaderPane()
-                    case .llm:      LLMPane(configuration: services.configuration)
-                    case .deps:     DepsPane()
-                    case .boards:   BoardsPane(configuration: services.configuration)
-                    case .sources:
-                        TypeSwitchPane(
-                            sourceCatalog: services.sourceCatalog,
-                            sourceOnboarding: services.sourceOnboarding,
-                            authentication: services.authentication,
-                            configuration: services.configuration)
-                    case .fetch:    FetchPane(configuration: services.configuration)
-                    case .content:  ContentPane(configuration: services.configuration)
-                    case .export:   ExportPlatformPane(configuration: services.configuration)
-                    case .pipeline:
-                        ExportRulePane(
-                            export: services.export,
-                            sourceCatalog: services.sourceCatalog,
-                            configuration: services.configuration)
-                    case .cleanup:  CleanupPane(runtimeStatus: services.runtimeStatus,
-                                                administration: services.administration,
-                                                maintenance: services.maintenance)
-                    }
-                case .module(let identifier):
-                    if let module = configuration.modules.first(where: { $0.info.identifier == identifier }),
-                       let view = module.makeSettingsView() {
-                        view
-                    } else {
-                        ContentUnavailableView("模块不可用", systemImage: "exclamationmark.triangle")
-                    }
-                }
+        case .module(let identifier):
+            if let module = configuration.modules.first(where: { $0.info.identifier == identifier }),
+               let view = module.makeSettingsView() {
+                return view
+            } else {
+                return AnyView(ContentUnavailableView("模块不可用", systemImage: "exclamationmark.triangle"))
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding()
-        }
-        .frame(minWidth: 720, minHeight: 500)
-        // 把 Settings 窗口标题栏设为透明 + 隐藏标题文字，消除场景默认大标题栏留白
-        // （系统「设置」风格：保留红绿灯/关闭按钮，内容贴顶）。各 pane 的
-        // .toolbar(placement: .principal) 标题会显示在透明栏里，不再空一大截。
-        .overlay(SettingsWindowAccessor().frame(width: 0, height: 0))
-        .onAppear { apply(navigation.route) }
-        .onChange(of: navigation.route) { _, route in apply(route) }
-    }
-
-    private func apply(_ route: SettingsRoute?) {
-        switch route {
-        case .page(let page): selection = .page(page)
-        case .module(let identifier): selection = .module(identifier)
-        case nil: break
         }
     }
-}
-
-private enum SettingsDestination: Hashable {
-    case page(SettingsPage)
-    case module(String)
-}
-
-/// 零尺寸 overlay，仅用于在视图加入窗口后拿到 Settings 窗口句柄，
-/// 将其标题栏设为透明 + 隐藏标题文字（不碰红绿灯按钮）。
-private struct SettingsWindowAccessor: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        DispatchQueue.main.async {
-            guard let win = v.window else { return }
-            win.titleVisibility = .hidden
-            win.titlebarAppearsTransparent = true
-        }
-        return v
-    }
-    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 // MARK: - 通用

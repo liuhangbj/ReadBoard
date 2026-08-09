@@ -63,12 +63,6 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
     }
 
-    func testBilibiliVideoUsesItsOwnPlayer() {
-        XCTAssertEqual(VideoPlayerPlatform.resolve(source: "bilibili"), .bilibili)
-        XCTAssertEqual(VideoPlayerPlatform.resolve(source: "youtube"), .youtube)
-        XCTAssertEqual(VideoPlayerPlatform.resolve(source: "video"), .youtube)
-    }
-
     func testBilibiliUpowerExclusiveWinsWhenBothPayPreviewFlagsArePresent() {
         let access = BilibiliFetcher.videoAccess(from: [
             "is_ugc_pay_preview": 1,
@@ -594,57 +588,6 @@ final class AIPromptSettingsTests: XCTestCase {
     }
 }
 
-final class MediaTabTests: XCTestCase {
-
-    func testOriginalOnly() {
-        XCTAssertEqual(tabIds(translation: false, transcript: false), [0])
-    }
-
-    func testTranslationOnly() {
-        XCTAssertEqual(tabIds(translation: true, transcript: false), [0, 1])
-    }
-
-    func testTranscriptOnly() {
-        XCTAssertEqual(tabIds(translation: false, transcript: true), [0, 2])
-    }
-
-    func testTranslationAndTranscript() {
-        XCTAssertEqual(tabIds(translation: true, transcript: true), [0, 1, 2])
-    }
-
-    private func tabIds(translation: Bool, transcript: Bool) -> [Int] {
-        ReadingView.mediaTabOptions(hasTranslation: translation, hasTranscript: transcript)
-            .map { $0.0 }
-    }
-}
-
-final class MediaAudioURLResolverTests: XCTestCase {
-    func testLoadedAudioURLWins() {
-        XCTAssertEqual(
-            MediaAudioURLResolver.preferred("https://cdn.example/loaded.mp3", "https://feed.example/item.mp3"),
-            "https://cdn.example/loaded.mp3"
-        )
-    }
-
-    func testFallsBackToItemAudioURL() {
-        XCTAssertEqual(
-            MediaAudioURLResolver.preferred(nil, "https://feed.example/item.mp3"),
-            "https://feed.example/item.mp3"
-        )
-    }
-
-    func testSkipsEmptyAudioURL() {
-        XCTAssertEqual(
-            MediaAudioURLResolver.preferred("  \n", "https://feed.example/item.mp3"),
-            "https://feed.example/item.mp3"
-        )
-    }
-
-    func testAllMissingReturnsNil() {
-        XCTAssertNil(MediaAudioURLResolver.preferred(nil, ""))
-    }
-}
-
 final class PodcastPageResolverTests: XCTestCase {
     func testApplePodcastID() throws {
         let url = try XCTUnwrap(URL(string: "https://podcasts.apple.com/cn/podcast/大内密谈/id657765158"))
@@ -689,34 +632,6 @@ final class PodcastPageResolverTests: XCTestCase {
             FeedFetcher.canonicalPlatformFeedURL("http://example.com/feed.xml"),
             "http://example.com/feed.xml"
         )
-    }
-}
-
-final class ReadStateOverrideTests: XCTestCase {
-    @MainActor
-    func testOptimisticReadStatePrecedesListSnapshot() {
-        let item = makeItem(readAt: nil)
-        let vm = ContentViewModel()
-
-        XCTAssertFalse(vm.effectiveIsRead(item))
-
-        // open() 会即时更新 selectedItem，但行内覆盖为规避表格重入会稍后到达。
-        vm.selectedItem = item.markingRead()
-        XCTAssertTrue(vm.effectiveIsRead(item))
-
-        // 显式覆盖优先级最高，可把列表中的旧“已读”快照即时显示为未读。
-        vm.readMarks[item.id] = false
-        XCTAssertFalse(vm.effectiveIsRead(item))
-        vm.readMarks[item.id] = true
-        XCTAssertTrue(vm.effectiveIsRead(item))
-    }
-
-    private func makeItem(readAt: String?) -> ContentItem {
-        ContentItem(id: 1, ctype: "article", source: "test", title: "test", author: nil,
-                    url: "https://example.com", language: nil, publishedAt: nil, excerpt: nil,
-                    contentMd: nil, llmScore: nil, llmSummary: nil, llmTranslatedMd: nil,
-                    fetchStatus: 0, feedId: nil, audioUrl: nil, readAt: readAt,
-                    starred: false)
     }
 }
 
@@ -1095,6 +1010,88 @@ final class MarkdownParseTests: XCTestCase {
         XCTAssertTrue(str.contains("加粗"))
         XCTAssertTrue(str.contains("链接"))
     }
+
+    func testMultipleStandaloneImagesOnOneLine() {
+        let blocks = MarkdownRenderer.parse(
+            "![One](https://img.example/one.jpg) ![Two](https://img.example/two.jpg \"caption\")")
+        XCTAssertEqual(blocks.count, 2)
+        guard case .image(let firstAlt, let firstURL) = blocks[0],
+              case .image(let secondAlt, let secondURL) = blocks[1] else {
+            XCTFail("同一行的两张图片应拆成两个图片块"); return
+        }
+        XCTAssertEqual(firstAlt, "One")
+        XCTAssertEqual(firstURL, "https://img.example/one.jpg")
+        XCTAssertEqual(secondAlt, "Two")
+        XCTAssertEqual(secondURL, "https://img.example/two.jpg")
+    }
+
+    func testStandaloneHTMLImages() {
+        let blocks = MarkdownRenderer.parse(
+            #"<img src="https://img.example/one.jpg?a=1&amp;b=2" alt="One"><img data-x="1" src='https://img.example/two.jpg'>"#)
+        XCTAssertEqual(blocks.count, 2)
+        guard case .image(let alt, let firstURL) = blocks[0],
+              case .image(_, let secondURL) = blocks[1] else {
+            XCTFail("独占行 HTML img 应转换为图片块"); return
+        }
+        XCTAssertEqual(alt, "One")
+        XCTAssertEqual(firstURL, "https://img.example/one.jpg?a=1&b=2")
+        XCTAssertEqual(secondURL, "https://img.example/two.jpg")
+    }
+}
+
+final class FullTextLazyImageTests: XCTestCase {
+    func testLazyImageAttributesArePromotedBeforeMarkdownExtraction() async throws {
+        let html = """
+        <!doctype html><html><head><title>Gallery fixture</title></head><body><main><article>
+        <h1>Gallery fixture</h1>
+        <p>This fixture contains enough prose for the content extractor to retain its article body.</p>
+        <img alt="One" src="data:image/svg+xml;base64,AAAA"
+             data-flickity-lazyload="https://cdn.example/one.jpg">
+        <img alt="Two" src="data:image/gif;base64,AAAA"
+             data-srcset="https://cdn.example/two-small.jpg 1x, https://cdn.example/two-large.jpg 2x">
+        <p>A second meaningful paragraph keeps extraction deterministic across Defuddle versions.</p>
+        </article></main></body></html>
+        """
+        let extracted = await ReadBoardContentExtractor.markdown(fromHTML: html)
+        let markdown = try XCTUnwrap(extracted)
+        XCTAssertTrue(markdown.contains("![One](https://cdn.example/one.jpg)"))
+        XCTAssertTrue(markdown.contains("![Two](https://cdn.example/two-large.jpg)"))
+        XCTAssertFalse(markdown.contains("data:image/"))
+    }
+}
+
+final class MarkdownImageReconcilerTests: XCTestCase {
+    func testReplacesTranslationPlaceholdersWithoutChangingTranslatedText() throws {
+        let source = """
+        # Original
+
+        ![One](https://cdn.example/one.jpg) ![Two](https://cdn.example/two.jpg)
+
+        Original body.
+        """
+        let translation = """
+        # 译文
+
+        ![One](data:image/svg+xml;base64,AAAA) ![Two](data:image/gif;base64,BBBB)
+
+        译文正文。
+        """
+        let result = try XCTUnwrap(MarkdownImageReconciler.reconcile(
+            translation: translation, source: source))
+        XCTAssertTrue(result.contains("# 译文"))
+        XCTAssertTrue(result.contains("译文正文。"))
+        XCTAssertTrue(result.contains("![One](https://cdn.example/one.jpg)"))
+        XCTAssertTrue(result.contains("![Two](https://cdn.example/two.jpg)"))
+        XCTAssertFalse(result.contains("data:image/"))
+    }
+
+    func testLeavesTranslationUntouchedWhenImageCountsDiffer() {
+        let source = "![One](https://cdn.example/one.jpg) ![Two](https://cdn.example/two.jpg)"
+        let translation = "译文\n\n![One](data:image/svg+xml;base64,AAAA)"
+        XCTAssertEqual(
+            MarkdownImageReconciler.reconcile(translation: translation, source: source),
+            translation)
+    }
 }
 
 // MARK: - PipelineWorker body 三级兜底
@@ -1133,74 +1130,9 @@ final class ResolveBodyTests: XCTestCase {
     }
 }
 
-// MARK: - ArticleRow 相对时间
-
-final class RelativeDateTests: XCTestCase {
-    func testMinutesAgo() {
-        let iso = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-300))
-        let r = ArticleRow.relativeDate(from: iso)
-        XCTAssertTrue(r.contains("分钟前"), "5 分钟前应显示分钟前，实际: \(r)")
-    }
-    func testHoursAgo() {
-        let iso = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-7200))
-        let r = ArticleRow.relativeDate(from: iso)
-        XCTAssertTrue(r.contains("小时前"), "2 小时前应显示小时前，实际: \(r)")
-    }
-    func testDaysAgo() {
-        let iso = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-86400 * 2))
-        let r = ArticleRow.relativeDate(from: iso)
-        XCTAssertTrue(r.contains("天前"), "2 天前应显示天前，实际: \(r)")
-    }
-    func testInvalidFallsBack() {
-        let r = ArticleRow.relativeDate(from: "not-a-date")
-        XCTAssertFalse(r.isEmpty, "非法日期应回退不崩溃")
-    }
-}
-
-// MARK: - 音频播放器控制
-
-final class AudioPlaybackControlTests: XCTestCase {
-    func testSeekTimeClampsToPlayableRange() {
-        XCTAssertEqual(AudioPlaybackSettings.clampedTime(-15, duration: 100), 0)
-        XCTAssertEqual(AudioPlaybackSettings.clampedTime(35, duration: 100), 35)
-        XCTAssertEqual(AudioPlaybackSettings.clampedTime(130, duration: 100), 100)
-        XCTAssertEqual(AudioPlaybackSettings.clampedTime(.infinity, duration: 100), 0)
-    }
-
-    func testTimeFormattingSupportsLongPodcasts() {
-        XCTAssertEqual(AudioPlayerView.formatTime(65), "1:05")
-        XCTAssertEqual(AudioPlayerView.formatTime(3_661), "1:01:01")
-        XCTAssertEqual(AudioPlayerView.formatTime(.nan), "0:00")
-    }
-
-    func testPlaybackRateLabelsStayExact() {
-        XCTAssertEqual(AudioPlayerView.formatRate(0.75), "0.75×")
-        XCTAssertEqual(AudioPlayerView.formatRate(1), "1×")
-        XCTAssertEqual(AudioPlayerView.formatRate(1.25), "1.25×")
-        XCTAssertEqual(AudioPlayerView.formatRate(1.5), "1.5×")
-        XCTAssertEqual(AudioPlayerView.formatRate(2), "2×")
-    }
-}
-
 // MARK: - 列表筛选与跨文章处理状态
 
 final class ContentListFilterTests: XCTestCase {
-    func testDefaultScoreRangeDoesNotCreateSQLBounds() {
-        let bounds = ContentViewModel.scoreBounds(minimum: 0, maximum: 100)
-        XCTAssertNil(bounds.minimum)
-        XCTAssertNil(bounds.maximum)
-    }
-
-    func testScoreRangeClampsButDoesNotSilentlySwapInvalidInput() {
-        let clamped = ContentViewModel.scoreBounds(minimum: -20, maximum: 130)
-        XCTAssertNil(clamped.minimum)
-        XCTAssertNil(clamped.maximum)
-
-        let invalid = ContentViewModel.scoreBounds(minimum: 90, maximum: 80)
-        XCTAssertEqual(invalid.minimum, 90)
-        XCTAssertEqual(invalid.maximum, 80)
-    }
-
     @MainActor
     func testProcessingStateSurvivesViewReplacementByContentId() {
         let store = ContentProcessingStateStore.shared

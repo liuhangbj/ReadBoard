@@ -14,10 +14,13 @@ public final class LocalContentDetailGateway: ContentDetailGateway, @unchecked S
             guard let payload = db.fetchReaderPayload(id: contentID) else {
                 throw ContentDetailGatewayError.contentNotFound(contentID)
             }
+            let translatedMarkdown = MarkdownImageReconciler.reconcile(
+                translation: payload.llmTranslatedMd,
+                source: payload.contentMd)
             return ContentDetail(
                 id: contentID,
                 contentMarkdown: payload.contentMd,
-                translatedMarkdown: payload.llmTranslatedMd,
+                translatedMarkdown: translatedMarkdown,
                 transcriptMarkdown: payload.llmTranscriptMd,
                 translatedTitle: payload.titleTranslated,
                 audioURL: payload.audioUrl,

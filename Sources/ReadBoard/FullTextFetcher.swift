@@ -291,7 +291,18 @@ public final class FullTextFetcher: @unchecked Sendable {
             """,
             params: [md, engine, contentId]
         )
-        // 全文提取完成——发通知刷新 ArticleRow 全文 badge（绿/红）
+        // 旧译文可能仍引用上一次全文中的透明占位图。图片数量一致时只同步图片标记，
+        // 不重跑翻译、不改译文文字；导出与远程 Reader 也能立即得到修复后的版本。
+        if let translation = db.scalarString(
+            "SELECT llm_translated_md FROM content WHERE id = ?", params: [contentId]),
+           let reconciled = MarkdownImageReconciler.reconcile(
+               translation: translation, source: md),
+           reconciled != translation {
+            db.execute(
+                "UPDATE content SET llm_translated_md = ? WHERE id = ?",
+                params: [reconciled, contentId])
+        }
+        // 全文提取完成——通知共享资料库刷新全文状态标签。
         NotificationCenter.default.post(name: .contentUpdated, object: nil)
     }
 
