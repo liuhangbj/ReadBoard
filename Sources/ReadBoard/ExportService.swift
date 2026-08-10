@@ -68,9 +68,62 @@ public struct ExportRulePreview: Sendable {
     public let matchingCount: Int; public let samples: [Sample]
 }
 
+/// 同一导出规则只能串行写入，但繁忙时到达的触发不能丢弃。全量请求会覆盖尚未
+/// 执行的单篇请求；单篇请求则按 content id 去重后依次补跑。
+private actor ExportRuleRunGate {
+    enum NextRequest {
+        case run(contentID: Int64?)
+        case finished
+    }
+
+    private struct State {
+        var fullScanPending = false
+        var contentIDs: Set<Int64> = []
+    }
+
+    private var states: [Int64: State] = [:]
+
+    func begin(ruleID: Int64, contentID: Int64?) -> Bool {
+        guard states[ruleID] != nil else {
+            states[ruleID] = State()
+            return true
+        }
+        if let contentID {
+            if states[ruleID]?.fullScanPending != true {
+                states[ruleID]?.contentIDs.insert(contentID)
+            }
+        } else {
+            states[ruleID]?.fullScanPending = true
+            states[ruleID]?.contentIDs.removeAll()
+        }
+        return false
+    }
+
+    func next(ruleID: Int64) -> NextRequest {
+        guard var state = states[ruleID] else { return .finished }
+        if state.fullScanPending {
+            state.fullScanPending = false
+            states[ruleID] = state
+            return .run(contentID: nil)
+        }
+        if let contentID = state.contentIDs.first {
+            state.contentIDs.remove(contentID)
+            states[ruleID] = state
+            return .run(contentID: contentID)
+        }
+        states.removeValue(forKey: ruleID)
+        return .finished
+    }
+
+    func finish(ruleID: Int64) {
+        states.removeValue(forKey: ruleID)
+    }
+}
+
 public final class ExportService: @unchecked Sendable {
     static let shared = ExportService(); private let db = Database.shared
-    private let sLock=NSLock(); private var sTask: Task<Void,Never>?; private let rLock=NSLock(); private var rIds=Set<Int64>()
+    private let sLock=NSLock(); private var sTask: Task<Void,Never>?
+    private let runGate = ExportRuleRunGate()
     private let webhookSessionLock = NSLock(); private var webhookSession = URLSession.shared
     private init() {}
 
@@ -181,8 +234,25 @@ public final class ExportService: @unchecked Sendable {
     private func run(rule: ExportRule, contentId: Int64?) async {
         // 平台总开关用于暂停整个平台；暂停不记失败，也不更新规则执行时间。
         guard platformIsEnabled(rule.target) else { return }
-        guard beginRR(rule.id) else { return }
-        defer { endRR(rule.id) }
+        guard await runGate.begin(ruleID: rule.id, contentID: contentId) else { return }
+
+        var pendingContentID = contentId
+        while true {
+            await execute(rule: rule, contentId: pendingContentID)
+            if Task.isCancelled {
+                await runGate.finish(ruleID: rule.id)
+                return
+            }
+            switch await runGate.next(ruleID: rule.id) {
+            case .run(let contentID):
+                pendingContentID = contentID
+            case .finished:
+                return
+            }
+        }
+    }
+
+    private func execute(rule: ExportRule, contentId: Int64?) async {
 
         var beforeId: Int64?
         exportPages: while !Task.isCancelled {
@@ -490,8 +560,6 @@ public final class ExportService: @unchecked Sendable {
         return webhookSession
     }
     private func deliveryFP(_ rule: ExportRule) -> String { let cfg=(try? JSONSerialization.data(withJSONObject:rule.targetConfig,options:[.sortedKeys])).flatMap{String(data:$0,encoding:.utf8)} ?? "{}"; return[rule.criteria.toJSON(),ExportRule.normalizedTrigger(rule.triggerOn),rule.target,cfg,rule.effectiveArtifact,rule.missingPolicy,rule.outputFormat,rule.effectiveSubfolderTemplate,rule.titleTemplate,rule.effectiveWritePolicy,rule.historyScope,Self.encodeSA(rule.frontmatterFields ?? Self.dfFields),rule.attachmentsPolicy].joined(separator:"\u{1f}") }
-    private func beginRR(_ id:Int64)->Bool{guard id>0 else{return true};rLock.lock();defer{rLock.unlock()};return rIds.insert(id).inserted}
-    private func endRR(_ id:Int64){guard id>0 else{return};rLock.lock();rIds.remove(id);rLock.unlock()}
     private func isDue(_ rule: ExportRule)->Bool{guard let last=rule.lastRunAt,!last.isEmpty else{return true};let f=DateFormatter();f.dateFormat="yyyy-MM-dd HH:mm:ss";f.timeZone=TimeZone(secondsFromGMT:0);guard let d=f.date(from:last) else{return true};let freq=rule.targetConfig["schedule_interval"] as? String ?? "daily";let interval:TimeInterval=freq=="hourly" ? 3600 : freq=="weekly" ? 604800 : 86400;return Date().timeIntervalSince(d) >= interval}
     private static func sha256(_ t:String)->String{SHA256.hash(data:Data(t.utf8)).map{String(format:"%02x",$0)}.joined()}
 }

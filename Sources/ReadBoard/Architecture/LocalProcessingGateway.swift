@@ -337,9 +337,30 @@ public final class LocalProcessingGateway: ProcessingGateway, @unchecked Sendabl
             mode: input.fetchMode)
         return Outcome(
             state: ok ? .succeeded : .failed,
-            message: ok ? "✅ 全文提取完成" : "❌ 全文提取失败",
+            message: ok ? fulltextSuccessMessage(for: input.fetchMode) : fulltextFailureMessage(input),
             contentChanged: ok,
-            shouldExport: false)
+            // 手动补齐正文也可能使原文导出规则第一次达到交付条件。
+            shouldExport: ok)
+    }
+
+    private func fulltextSuccessMessage(for mode: FetchMode) -> String {
+        switch mode {
+        case .externalFulltext: "✅ 平台正文已就绪"
+        case .summary: "✅ 摘要正文已保存"
+        default: "✅ 全文提取完成"
+        }
+    }
+
+    private func fulltextFailureMessage(_ input: Input) -> String {
+        if input.fetchMode == .externalFulltext {
+            let detail = db.scalarString(
+                "SELECT fetch_error FROM content WHERE id = ?", params: [input.contentID])?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail?.isEmpty == false
+                ? "❌ \(detail!)"
+                : "❌ 平台正文尚未取得，请在源管理中重试同步"
+        }
+        return "❌ 全文提取失败"
     }
 
     private func runScore(_ input: Input) async -> Outcome {

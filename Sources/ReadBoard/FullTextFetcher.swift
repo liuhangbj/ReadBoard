@@ -130,7 +130,8 @@ public final class FullTextFetcher: @unchecked Sendable {
     /// 按 mode 抓全文并写入 content_md / fetch_status / fetch_engine。
     /// 失败时自动降级到下一级模式（defuddle→summary）。
     /// 降级成功后更新源的 fetch_mode——下次直接用降级后的模式，不再重复失败。
-    /// 返回是否成功拿到全文。
+    /// 返回是否拿到可供阅读和后续处理的正文。对于平台连接器模式，已有平台正文
+    /// 也算成功；summary 模式只有实际落下可读正文时才算成功。
     @discardableResult
     func fetchAndStore(contentId: Int64, url: String, feedHtml: String?, mode: FetchMode) async -> Bool {
         // 从给定模式开始，逐级降级尝试
@@ -219,9 +220,9 @@ public final class FullTextFetcher: @unchecked Sendable {
 
         case .externalFulltext:
             // 外部连接器应在条目入库前已经提供正文；这个模式只表示
-            // “平台自带全文链路”，不要再按普通 RSS 走 defuddle/summary。
-            markFetched(contentId: contentId, ok: true, engine: mode.rawValue)
-            return false
+            // “平台自带全文链路”，不要再按普通 RSS 走 defuddle/summary。手动点击时
+            // 若正文已经存在应报告成功，也不能把连接器写下的 fetch_status=2 降成 4。
+            return hasStoredMarkdown(contentId: contentId)
 
         case .summary:
             markFetched(contentId: contentId, ok: true, engine: mode.rawValue)
@@ -232,7 +233,7 @@ public final class FullTextFetcher: @unchecked Sendable {
             // 故此处走「剥离 HTML 当纯文本」的降级写法（参照 backfillExcerptIfEmpty 的剥标签口径），
             // 把可读正文直接落 content_md，实现「所有提取模式都能落盘 content_md」。
             writeBackFeedHtmlAsMd(contentId: contentId, feedHtml: feedHtml)
-            return false
+            return hasStoredMarkdown(contentId: contentId)
 
         case .youtubeSubtitle, .bilibiliSubtitle:
             // 两个字幕路径包含异步网络/进程操作，由 fetchAndStore 处理。
@@ -345,6 +346,12 @@ public final class FullTextFetcher: @unchecked Sendable {
         guard !text.isEmpty else { return }
         db.execute("UPDATE content SET content_md = ?, fetch_status = 2, fetch_engine = ? WHERE id = ?",
                    params: [text, FetchMode.summary.rawValue, contentId])
+    }
+
+    private func hasStoredMarkdown(contentId: Int64) -> Bool {
+        (db.scalarInt(
+            "SELECT LENGTH(TRIM(COALESCE(content_md,''))) FROM content WHERE id = ?",
+            params: [contentId]) ?? 0) > 0
     }
 
     private func markFetched(contentId: Int64, ok: Bool, engine: String) {
