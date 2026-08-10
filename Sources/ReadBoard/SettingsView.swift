@@ -34,31 +34,40 @@ public struct SettingsView: View {
         switch destination {
         case .page(let page):
             return switch page {
-            case .general: AnyView(GeneralPane(sourceManagement: services.sourceManagement,
-                                               configuration: services.configuration))
+            case .general: AnyView(ReadBoardGeneralSettingsPane(
+                sourceManagement: services.sourceManagement,
+                configuration: services.configuration))
             case .remote:
                 services.remoteAccess.map { AnyView(RemoteAccessPane(remoteAccess: $0)) }
                     ?? AnyView(ContentUnavailableView(
                         "仅能在服务端设置远程访问", systemImage: "server.rack"))
-            case .reader: AnyView(ReaderPane())
-            case .llm: AnyView(LLMPane(configuration: services.configuration))
-            case .deps: AnyView(DepsPane())
-            case .boards: AnyView(BoardsPane(configuration: services.configuration))
-            case .sources: AnyView(TypeSwitchPane(
-                sourceCatalog: services.sourceCatalog,
-                sourceOnboarding: services.sourceOnboarding,
-                authentication: services.authentication,
+            case .reader: AnyView(ReadBoardReaderSettingsPane())
+            case .llm: AnyView(ReadBoardLLMSettingsPane(
                 configuration: services.configuration))
-            case .fetch: AnyView(FetchPane(configuration: services.configuration))
-            case .content: AnyView(ContentPane(configuration: services.configuration))
-            case .export: AnyView(ExportPlatformPane(configuration: services.configuration))
-            case .pipeline: AnyView(ExportRulePane(
+            case .deps: AnyView(ReadBoardDependencySettingsPane(
+                configuration: services.configuration,
+                dependencyManagement: services.dependencyManagement,
+                allowsServerPathEditing: services.remoteAccess != nil))
+            case .boards: AnyView(ReadBoardFeatureBoardSettingsPane(
+                configuration: services.configuration))
+            case .sources: AnyView(ReadBoardPlatformSettingsPane(
+                sourceCatalog: services.sourceCatalog,
+                authentication: services.authentication,
+                configuration: services.configuration,
+                permissions: services.permissions))
+            case .fetch: AnyView(ReadBoardFulltextSettingsPane(
+                configuration: services.configuration))
+            case .content: AnyView(ReadBoardAIContentSettingsPane(
+                configuration: services.configuration))
+            case .export: AnyView(ReadBoardExportPlatformSettingsPane(
+                configuration: services.configuration,
+                allowsServerPathEditing: services.remoteAccess != nil))
+            case .pipeline: AnyView(ReadBoardExportRulesSettingsPane(
                 export: services.export,
                 sourceCatalog: services.sourceCatalog,
                 configuration: services.configuration))
-            case .cleanup: AnyView(CleanupPane(runtimeStatus: services.runtimeStatus,
-                                               administration: services.administration,
-                                               maintenance: services.maintenance))
+            case .cleanup: AnyView(ReadBoardMaintenanceSettingsPane(
+                maintenance: services.maintenance))
             }
         case .module(let identifier):
             if let module = configuration.modules.first(where: { $0.info.identifier == identifier }),

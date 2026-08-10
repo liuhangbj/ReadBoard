@@ -109,7 +109,7 @@ struct ReadBoardSourceFolderHeader: View {
                 if enabled { pendingPolicy = key }
                 else { Task { await model.setPolicy(scope: scope, key: key, enabled: false) } }
             }))
-            .toggleStyle(.checkbox)
+            .readBoardPolicyToggleStyle()
             .controlSize(.small)
             .font(.system(size: 10))
             .foregroundStyle(uniform == nil ? ReadBoardDesign.C.text3 : ReadBoardDesign.C.text2)
@@ -253,7 +253,7 @@ struct ReadBoardSourceFeatureRow: View {
                             key: key,
                             enabled: false) } }
                     }))
-                    .toggleStyle(.checkbox)
+                    .readBoardPolicyToggleStyle()
                     .controlSize(.small)
                     .font(.system(size: 10))
             }
@@ -444,6 +444,17 @@ struct ReadBoardSourceFeatureRow: View {
 
     private func intervalName(_ minutes: Int) -> String {
         minutes < 60 ? "\(minutes) 分钟" : "\(minutes / 60) 小时"
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func readBoardPolicyToggleStyle() -> some View {
+        #if os(macOS)
+        toggleStyle(.checkbox)
+        #else
+        toggleStyle(.switch)
+        #endif
     }
 }
 

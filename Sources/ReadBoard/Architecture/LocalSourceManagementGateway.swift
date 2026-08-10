@@ -1,3 +1,4 @@
+import Foundation
 import ReadBoardContract
 
 public final class LocalSourceManagementGateway: SourceManagementGateway, @unchecked Sendable {
@@ -105,6 +106,14 @@ public final class LocalSourceManagementGateway: SourceManagementGateway, @unche
         scope: SourceScope,
         key: SourcePolicyKey?
     ) async throws -> SourceMaintenanceResult {
+        let job = try await submitBackfillProcessing(scope: scope, key: key)
+        return SourceMaintenanceResult(message: job.message)
+    }
+
+    public func submitBackfillProcessing(
+        scope: SourceScope,
+        key: SourcePolicyKey?
+    ) async throws -> SourceOperationJobSnapshot {
         if let key {
             let enabled = await MainActor.run {
                 switch scope.kind {
@@ -120,14 +129,31 @@ public final class LocalSourceManagementGateway: SourceManagementGateway, @unche
                 throw SourceManagementGatewayError.operationFailed("历史处理范围更新失败")
             }
         }
-        switch scope.kind {
-        case .source:
-            await PipelineWorker.shared.backfillHistory(onlySourceId: scope.id)
-        case .folder:
-            await PipelineWorker.shared.backfillHistoryForFolder(folderId: scope.id)
-        }
-        return SourceMaintenanceResult(
-            message: "历史处理已完成")
+        return await SourceOperationJobCoordinator.shared.submit(
+            kind: .processingBackfill,
+            scope: scope)
+    }
+
+    public func submitSourceSync(scope: SourceScope?) async throws -> SourceOperationJobSnapshot {
+        await SourceOperationJobCoordinator.shared.submit(kind: .sourceSync, scope: scope)
+    }
+
+    public func submitFulltextRefetch(
+        scope: SourceScope,
+        fullHistory: Bool
+    ) async throws -> SourceOperationJobSnapshot {
+        await SourceOperationJobCoordinator.shared.submit(
+            kind: .fulltextRefetch,
+            scope: scope,
+            fullHistory: fullHistory)
+    }
+
+    public func sourceOperationStatus(id: String) async throws -> SourceOperationJobSnapshot {
+        try await SourceOperationJobCoordinator.shared.status(id: id)
+    }
+
+    public func cancelSourceOperation(id: String) async {
+        await SourceOperationJobCoordinator.shared.cancel(id: id)
     }
 
     public func setFetchMode(scope: SourceScope, mode: SourceFetchMode) async throws {
@@ -221,6 +247,152 @@ public final class LocalSourceManagementGateway: SourceManagementGateway, @unche
             return SourceStore.shared.sources.filter { $0.id == scope.id }
         case .folder:
             return SourceStore.shared.sources.filter { $0.folderId == scope.id }
+        }
+    }
+}
+
+private actor SourceOperationJobCoordinator {
+    static let shared = SourceOperationJobCoordinator()
+
+    private var snapshots: [String: SourceOperationJobSnapshot] = [:]
+    private var tasks: [String: Task<Void, Never>] = [:]
+
+    func submit(
+        kind: SourceOperationJobKind,
+        scope: SourceScope?,
+        fullHistory: Bool = false
+    ) -> SourceOperationJobSnapshot {
+        let snapshot = SourceOperationJobSnapshot(
+            kind: kind,
+            scope: scope,
+            phase: .queued,
+            message: queuedMessage(kind))
+        snapshots[snapshot.id] = snapshot
+        tasks[snapshot.id] = Task { [weak self] in
+            await self?.run(
+                id: snapshot.id,
+                kind: kind,
+                scope: scope,
+                fullHistory: fullHistory)
+        }
+        return snapshot
+    }
+
+    func status(id: String) async throws -> SourceOperationJobSnapshot {
+        guard var snapshot = snapshots[id] else {
+            throw SourceManagementGatewayError.operationFailed("长任务不存在或已过期")
+        }
+        if snapshot.phase == .running, snapshot.kind == .processingBackfill {
+            let progressMessage = await MainActor.run { PipelineWorker.shared.backfillProgress }
+            if !progressMessage.isEmpty {
+                snapshot = copy(snapshot, message: progressMessage)
+                snapshots[id] = snapshot
+            }
+        }
+        return snapshot
+    }
+
+    func cancel(id: String) {
+        guard let task = tasks[id], let snapshot = snapshots[id], !snapshot.phase.isTerminal else {
+            return
+        }
+        task.cancel()
+        snapshots[id] = copy(
+            snapshot,
+            phase: .cancelled,
+            message: "任务已取消",
+            finishedAt: Date().timeIntervalSince1970)
+        tasks[id] = nil
+    }
+
+    private func run(
+        id: String,
+        kind: SourceOperationJobKind,
+        scope: SourceScope?,
+        fullHistory: Bool
+    ) async {
+        guard let queued = snapshots[id] else { return }
+        snapshots[id] = copy(queued, phase: .running, message: runningMessage(kind))
+        let result: SourceMaintenanceResult
+        do {
+            let gateway = LocalSourceManagementGateway()
+            switch kind {
+            case .processingBackfill:
+                guard let scope else { throw SourceManagementGatewayError.invalidRequest }
+                switch scope.kind {
+                case .source:
+                    await PipelineWorker.shared.backfillHistory(onlySourceId: scope.id)
+                case .folder:
+                    await PipelineWorker.shared.backfillHistoryForFolder(folderId: scope.id)
+                }
+                let message = await MainActor.run { PipelineWorker.shared.backfillProgress }
+                result = SourceMaintenanceResult(
+                    message: message.isEmpty ? "历史处理已完成" : message)
+            case .sourceSync:
+                if let scope {
+                    result = try await gateway.sync(scope: scope)
+                } else {
+                    result = try await gateway.syncAll()
+                }
+            case .fulltextRefetch:
+                guard let scope else { throw SourceManagementGatewayError.invalidRequest }
+                result = try await gateway.refetchFulltext(
+                    scope: scope,
+                    fullHistory: fullHistory)
+            }
+        } catch {
+            guard let running = snapshots[id], running.phase != .cancelled else { return }
+            snapshots[id] = copy(
+                running,
+                phase: .failed,
+                message: error.localizedDescription,
+                finishedAt: Date().timeIntervalSince1970)
+            tasks[id] = nil
+            return
+        }
+        guard let running = snapshots[id], running.phase != .cancelled else { return }
+        let wasCancelled = Task.isCancelled
+        snapshots[id] = copy(
+            running,
+            phase: wasCancelled ? .cancelled : .succeeded,
+            message: wasCancelled ? "任务已取消" : result.message,
+            affectedCount: result.affectedCount,
+            finishedAt: Date().timeIntervalSince1970)
+        tasks[id] = nil
+    }
+
+    private func copy(
+        _ value: SourceOperationJobSnapshot,
+        phase: SourceOperationJobPhase? = nil,
+        message: String? = nil,
+        affectedCount: Int? = nil,
+        finishedAt: TimeInterval? = nil
+    ) -> SourceOperationJobSnapshot {
+        SourceOperationJobSnapshot(
+            id: value.id,
+            kind: value.kind,
+            scope: value.scope,
+            phase: phase ?? value.phase,
+            progress: value.progress,
+            message: message ?? value.message,
+            affectedCount: affectedCount ?? value.affectedCount,
+            startedAt: value.startedAt,
+            finishedAt: finishedAt ?? value.finishedAt)
+    }
+
+    private func queuedMessage(_ kind: SourceOperationJobKind) -> String {
+        switch kind {
+        case .processingBackfill: "历史处理已加入队列"
+        case .sourceSync: "订阅源更新已加入队列"
+        case .fulltextRefetch: "全文重新提取已加入队列"
+        }
+    }
+
+    private func runningMessage(_ kind: SourceOperationJobKind) -> String {
+        switch kind {
+        case .processingBackfill: "正在处理历史内容…"
+        case .sourceSync: "正在更新订阅源…"
+        case .fulltextRefetch: "正在重新提取全文…"
         }
     }
 }

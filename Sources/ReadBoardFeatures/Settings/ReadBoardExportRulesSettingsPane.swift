@@ -1,9 +1,10 @@
 import SwiftUI
 import ReadBoardContract
+import ReadBoardUI
 
 // MARK: - 导出规则管理（后处理板块）
 
-public struct ExportRulePane: View {
+public struct ReadBoardExportRulesSettingsPane: View {
     @State private var rules: [ExportRuleDTO] = []
     @State private var stats: [Int64: ExportRuleStatsDTO] = [:]
     @State private var editing: ExportRuleDTO? = nil
@@ -28,15 +29,15 @@ public struct ExportRulePane: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text("导出规则").font(.system(size: RB.F.pageTitle, weight: .semibold)).foregroundStyle(Color.rbText)
-                if !rules.isEmpty { Text("\(rules.count)").font(.system(size: 13)).foregroundStyle(Color.rbText3) }
+                Text("导出规则").font(.system(size: ReadBoardDesign.F.pageTitle, weight: .semibold)).foregroundStyle(ReadBoardDesign.C.text)
+                if !rules.isEmpty { Text("\(rules.count)").font(.system(size: 13)).foregroundStyle(ReadBoardDesign.C.text3) }
                 Spacer()
                 Button {
                     editing = ExportRuleDTO()
                     showEditor = true
-                } label: { Label("新建规则", systemImage: "plus") }.buttonStyle(.primaryCapsule)
+                } label: { Label("新建规则", systemImage: "plus") }.buttonStyle(ReadBoardPrimaryButtonStyle())
             }.padding(.horizontal, 20).padding(.vertical, 14)
-            Hairline()
+            ReadBoardHairline()
             if rules.isEmpty {
                 ContentUnavailableView("还没有导出规则", systemImage: "square.and.arrow.up", description: Text("新建一条规则：按条件把内容自动导出到 Obsidian 或 Webhook。"))
             } else {
@@ -46,7 +47,7 @@ public struct ExportRulePane: View {
             }
         }
         .sheet(isPresented: $showEditor) {
-            ExportRuleEditor(
+            ReadBoardExportRuleEditor(
                 rule: editing ?? ExportRuleDTO(),
                 export: export,
                 sourceCatalog: sourceCatalog,
@@ -82,17 +83,17 @@ public struct ExportRulePane: View {
                     _ = try? await export.save(rule: updated)
                     await reload()
                 }
-            })).labelsHidden().controlSize(.small).tint(Color.rbAccent)
+            })).labelsHidden().controlSize(.small).tint(ReadBoardDesign.C.accent)
             VStack(alignment: .leading, spacing: 3) {
-                Text(rule.name.isEmpty ? "未命名" : rule.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.rbText)
-                Text("\(rule.triggerDisplay) → \(rule.targetDisplay)").font(.callout).foregroundStyle(Color.rbText2)
-                Text(statsText(for: rule.id)).font(.caption2.monospacedDigit()).foregroundStyle(Color.rbText3)
+                Text(rule.name.isEmpty ? "未命名" : rule.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(ReadBoardDesign.C.text)
+                Text("\(rule.triggerDisplay) → \(rule.targetDisplay)").font(.callout).foregroundStyle(ReadBoardDesign.C.text2)
+                Text(statsText(for: rule.id)).font(.caption2.monospacedDigit()).foregroundStyle(ReadBoardDesign.C.text3)
             }
             Spacer()
             if runningId == rule.id { ProgressView().controlSize(.small) }
             else { Button("立即执行") { runningId = rule.id; Task { _ = try? await export.run(ruleID: rule.id); runningId = nil; await reload() } }.controlSize(.small).disabled(!rule.enabled) }
-            Button { editing = rule; showEditor = true } label: { Image(systemName: "pencil") }.buttonStyle(.quiet)
-            Button(role: .destructive) { deletingRule = rule } label: { Image(systemName: "trash") }.buttonStyle(.quiet)
+            Button { editing = rule; showEditor = true } label: { Image(systemName: "pencil") }.buttonStyle(ReadBoardQuietButtonStyle())
+            Button(role: .destructive) { deletingRule = rule } label: { Image(systemName: "trash") }.buttonStyle(ReadBoardQuietButtonStyle())
         }.padding(.vertical, 4)
     }
     @MainActor
@@ -119,13 +120,14 @@ public struct ExportRulePane: View {
 
 // MARK: - 规则编辑表单
 
-public struct ExportRuleEditor: View {
+public struct ReadBoardExportRuleEditor: View {
     @State var rule: ExportRuleDTO
     let onSave: (ExportRuleDTO, Bool) -> Void
     private let export: any ExportGateway
     private let platforms: ExportPlatformConfiguration
+    private let sourceCatalog: any SourceCatalogGateway
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var catalog: SourceCatalogStore
+    @State private var catalog = SourceCatalogSnapshot()
 
     // 筛选状态
     @State private var minScoreText = ""; @State private var keywordsText = ""; @State private var excludeKeywordsText = ""
@@ -163,10 +165,9 @@ public struct ExportRuleEditor: View {
     ) {
         self._rule = State(initialValue: rule)
         self.export = export
+        self.sourceCatalog = sourceCatalog
         self.platforms = platforms
         self.onSave = onSave
-        _catalog = StateObject(
-            wrappedValue: SourceCatalogStore(gateway: sourceCatalog))
     }
 
     public var body: some View {
@@ -178,20 +179,20 @@ public struct ExportRuleEditor: View {
                         Picker("目标平台", selection: $rule.target) {
                             Text("Obsidian").tag("obsidian")
                             Text("Webhook").tag("webhook")
-                        }.tint(Color.rbAccent)
+                        }.tint(ReadBoardDesign.C.accent)
                         if !isPlatformEnabled(rule.target) {
                             Text("该平台尚未启用；规则会保存，但启用平台前不会执行。")
-                                .font(.caption2).foregroundStyle(Color.rbScoreMid)
+                                .font(.caption2).foregroundStyle(ReadBoardDesign.C.scoreMid)
                         }
                         Picker("触发时机", selection: $rule.trigger) {
                             Text("内容入库后").tag("ingest"); Text("加工完成后").tag("ready")
                             Text("加星标时").tag("starred"); Text("定时批量导出").tag("scheduled")
                             Text("手动执行").tag("manual")
-                        }.tint(Color.rbAccent)
+                        }.tint(ReadBoardDesign.C.accent)
                         if rule.trigger == "scheduled" {
                             Picker("执行频率", selection: $scheduleInterval) {
                                 Text("每小时").tag("hourly"); Text("每天").tag("daily"); Text("每周").tag("weekly")
-                            }.tint(Color.rbAccent)
+                            }.tint(ReadBoardDesign.C.accent)
                         }
                     }
                     Section("筛选条件（全部满足才导出）") {
@@ -199,63 +200,63 @@ public struct ExportRuleEditor: View {
                         selectionMenu(title: "文件夹", summary: selectedFolderIds.isEmpty ? "全部" : "已选 \(selectedFolderIds.count) 个", items: catalog.folders.map{($0.id,$0.name)}, selection: $selectedFolderIds)
                         stringSelectionMenu(title: "内容类型", summary: ctSummary, items: [("article","文章"),("podcast","播客"),("video","视频")], selection: $selectedContentTypes)
                         stringSelectionMenu(title: "来源平台", summary: plSummary, items: [("rss","RSS"),("podcast","播客"),("youtube","YouTube"),("wechat","公众号")], selection: $selectedPlatforms)
-                        HStack { Text("最低评分").font(.callout).foregroundStyle(Color.rbText2); Spacer(); TextField("不限", text: $minScoreText).textFieldStyle(.roundedBorder).frame(width:80).multilineTextAlignment(.trailing) }
+                        HStack { Text("最低评分").font(.callout).foregroundStyle(ReadBoardDesign.C.text2); Spacer(); TextField("不限", text: $minScoreText).textFieldStyle(.roundedBorder).frame(width:80).multilineTextAlignment(.trailing) }
                         stringSelectionMenu(title: "内容语言", summary: langSummary, items: [("zh","中文"),("en","英文"),("ja","日文")], selection: $selectedLanguages)
                         Picker("已读状态", selection: $rule.criteria.readStatus) {
                             Text("全部").tag(nil as String?); Text("未读").tag("unread" as String?); Text("已读").tag("read" as String?)
-                        }.tint(Color.rbAccent)
-                        VStack(alignment: .leading, spacing:5) { Text("关键词").font(.callout).foregroundStyle(Color.rbText2); TextField("多个关键词用逗号分隔", text: $keywordsText).textFieldStyle(.roundedBorder) }
-                        VStack(alignment: .leading, spacing:5) { Text("排除关键词").font(.callout).foregroundStyle(Color.rbText2); TextField("多个关键词用逗号分隔", text: $excludeKeywordsText).textFieldStyle(.roundedBorder) }
-                        Toggle("限制起始日期", isOn: $publishedAfterEnabled).tint(Color.rbAccent)
+                        }.tint(ReadBoardDesign.C.accent)
+                        VStack(alignment: .leading, spacing:5) { Text("关键词").font(.callout).foregroundStyle(ReadBoardDesign.C.text2); TextField("多个关键词用逗号分隔", text: $keywordsText).textFieldStyle(.roundedBorder) }
+                        VStack(alignment: .leading, spacing:5) { Text("排除关键词").font(.callout).foregroundStyle(ReadBoardDesign.C.text2); TextField("多个关键词用逗号分隔", text: $excludeKeywordsText).textFieldStyle(.roundedBorder) }
+                        Toggle("限制起始日期", isOn: $publishedAfterEnabled).tint(ReadBoardDesign.C.accent)
                         if publishedAfterEnabled { DatePicker("不早于", selection: $publishedAfter, displayedComponents: .date) }
-                        Toggle("限制结束日期", isOn: $publishedBeforeEnabled).tint(Color.rbAccent)
+                        Toggle("限制结束日期", isOn: $publishedBeforeEnabled).tint(ReadBoardDesign.C.accent)
                         if publishedBeforeEnabled { DatePicker("不晚于", selection: $publishedBefore, displayedComponents: .date) }
                     }
                     Section("加工完成条件") {
-                        Toggle("评分完成", isOn: $rule.criteria.requireScored).tint(Color.rbAccent)
-                        Toggle("摘要完成", isOn: $rule.criteria.requireSummary).tint(Color.rbAccent)
-                        Toggle("译文完成", isOn: $rule.criteria.requireTranslated).tint(Color.rbAccent)
-                        Toggle("转录完成", isOn: $rule.criteria.requireTranscribed).tint(Color.rbAccent)
+                        Toggle("评分完成", isOn: $rule.criteria.requireScored).tint(ReadBoardDesign.C.accent)
+                        Toggle("摘要完成", isOn: $rule.criteria.requireSummary).tint(ReadBoardDesign.C.accent)
+                        Toggle("译文完成", isOn: $rule.criteria.requireTranslated).tint(ReadBoardDesign.C.accent)
+                        Toggle("转录完成", isOn: $rule.criteria.requireTranscribed).tint(ReadBoardDesign.C.accent)
                     }
                     Section("导出文稿") {
-                        Toggle("标题使用中文译文（若存在）", isOn: $useTranslatedTitle).tint(Color.rbAccent)
+                        Toggle("标题使用中文译文（若存在）", isOn: $useTranslatedTitle).tint(ReadBoardDesign.C.accent)
                         Picker("文稿类型", selection: $artifactType) {
                             Text("原文").tag("original"); Text("译文").tag("translated")
                             Text("转录稿").tag("transcript"); Text("摘要").tag("summary")
                             Text("摘要＋原文").tag("summary_original"); Text("摘要＋译文").tag("summary_translated")
                             Text("摘要＋转录稿").tag("summary_transcript")
-                        }.tint(Color.rbAccent)
+                        }.tint(ReadBoardDesign.C.accent)
                         Picker("内容缺失时", selection: $missingPolicy) {
                             Text("等待生成").tag("wait"); Text("回退到原文").tag("fallback_original")
                             Text("跳过内容").tag("skip")
-                        }.tint(Color.rbAccent)
+                        }.tint(ReadBoardDesign.C.accent)
                     }
                     Section(rule.target == "webhook" ? "交付设置" : "目标与文件") {
                         if rule.target == "webhook" {
                             LabeledContent("Webhook URL") {
                                 Text(platforms.webhookURL.isEmpty ? "未配置" : platforms.webhookURL)
-                                    .foregroundStyle(platforms.webhookURL.isEmpty ? Color.rbScoreMid : Color.rbText2)
+                                    .foregroundStyle(platforms.webhookURL.isEmpty ? ReadBoardDesign.C.scoreMid : ReadBoardDesign.C.text2)
                                     .lineLimit(1).truncationMode(.middle)
                             }
                             Text("地址和请求 Header 请在“导出平台”页面统一配置。")
-                                .font(.caption2).foregroundStyle(Color.rbText3)
+                                .font(.caption2).foregroundStyle(ReadBoardDesign.C.text3)
                         } else {
                             LabeledContent("Obsidian Vault") {
                                 Text(platforms.obsidianDirectory.isEmpty ? "未配置" : platforms.obsidianDirectory)
-                                    .foregroundStyle(platforms.obsidianDirectory.isEmpty ? Color.rbScoreMid : Color.rbText2)
+                                    .foregroundStyle(platforms.obsidianDirectory.isEmpty ? ReadBoardDesign.C.scoreMid : ReadBoardDesign.C.text2)
                                     .lineLimit(1).truncationMode(.middle)
                             }
                             TextField("子目录模板", text: $subfolder, prompt: Text("{source}/{year}/{month}"))
                             TextField("文件名模板", text: $titleTemplate, prompt: Text("{date} {title}-{id}"))
-                            Text("可用占位符：{title} {date} {id} {source} {ctype} {score} {year} {month}").font(.caption2).foregroundStyle(Color.rbText3)
+                            Text("可用占位符：{title} {date} {id} {source} {ctype} {score} {year} {month}").font(.caption2).foregroundStyle(ReadBoardDesign.C.text3)
                             Picker("已有文件", selection: $writePolicy) {
                                 Text("内容变化时覆盖").tag("overwrite"); Text("跳过").tag("skip"); Text("生成新版本").tag("versioned")
-                            }.tint(Color.rbAccent)
+                            }.tint(ReadBoardDesign.C.accent)
                         }
                         Picker("历史范围", selection: $historyScope) {
                             Text("仅规则创建后的新内容").tag("new_only"); Text("回填所有历史匹配内容").tag("all")
                             Text("指定日期之后").tag("custom_date")
-                        }.tint(Color.rbAccent)
+                        }.tint(ReadBoardDesign.C.accent)
                         if historyScope == "custom_date" {
                             DatePicker("起始日期", selection: $historyAfterDate, displayedComponents: .date)
                         }
@@ -270,17 +271,17 @@ public struct ExportRuleEditor: View {
                         VStack(spacing: 1) {
                             // 表头
                             LazyVGrid(columns: columns, spacing: 0) {
-                                Text("数据项").font(.callout).foregroundStyle(Color.rbText3)
-                                Text("字段名").font(.callout).foregroundStyle(Color.rbText3)
-                                Text("开关").font(.callout).foregroundStyle(Color.rbText3)
-                                Text("导出字段名").font(.callout).foregroundStyle(Color.rbText3).padding(.leading, 8)
+                                Text("数据项").font(.callout).foregroundStyle(ReadBoardDesign.C.text3)
+                                Text("字段名").font(.callout).foregroundStyle(ReadBoardDesign.C.text3)
+                                Text("开关").font(.callout).foregroundStyle(ReadBoardDesign.C.text3)
+                                Text("导出字段名").font(.callout).foregroundStyle(ReadBoardDesign.C.text3).padding(.leading, 8)
                             }.padding(.horizontal, 4).padding(.vertical, 5)
                             Divider()
                             ForEach(allFFields, id: \.self) { field in
                                 LazyVGrid(columns: columns, spacing: 0) {
-                                    Text(fLabels[field] ?? field).font(.callout).foregroundStyle(Color.rbText)
-                                    Text(field).font(.caption.monospaced()).foregroundStyle(Color.rbText3)
-                                    Toggle("", isOn: fBind(field)).tint(Color.rbAccent).labelsHidden()
+                                    Text(fLabels[field] ?? field).font(.callout).foregroundStyle(ReadBoardDesign.C.text)
+                                    Text(field).font(.caption.monospaced()).foregroundStyle(ReadBoardDesign.C.text3)
+                                    Toggle("", isOn: fBind(field)).tint(ReadBoardDesign.C.accent).labelsHidden()
                                     if selectedFrontmatterFields.contains(field) {
                                         TextField("", text: lBind(field),
                                                   prompt: Text(fLabels[field] ?? field))
@@ -296,25 +297,25 @@ public struct ExportRuleEditor: View {
                         }
                     }
                     Section("附件") {
-                        LabeledContent("图片与附件") { Text("保留远程链接").foregroundStyle(Color.rbText2) }
-                        Text("第一版不会复制图片、音频或视频文件。").font(.caption2).foregroundStyle(Color.rbText3)
+                        LabeledContent("图片与附件") { Text("保留远程链接").foregroundStyle(ReadBoardDesign.C.text2) }
+                        Text("第一版不会复制图片、音频或视频文件。").font(.caption2).foregroundStyle(ReadBoardDesign.C.text3)
                     }
                 }.formStyle(.grouped)
             }
-            Hairline()
+            ReadBoardHairline()
             HStack {
-                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction).buttonStyle(.quiet)
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction).buttonStyle(ReadBoardQuietButtonStyle())
                 Spacer()
                 Button { previewRule() } label: { if isPreviewing { ProgressView().controlSize(.small) } else { Text("预览") } }
                     .disabled(isPreviewing || rule.name.trimmingCharacters(in: .whitespaces).isEmpty)
                 Button("保存") { onSave(draftRule(), rule.id > 0) }.keyboardShortcut(.defaultAction)
-                    .buttonStyle(.primaryCapsule).disabled(rule.name.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .buttonStyle(ReadBoardPrimaryButtonStyle()).disabled(rule.name.trimmingCharacters(in: .whitespaces).isEmpty)
             }.padding(.horizontal, 16).padding(.vertical, 12)
         }
         .frame(minWidth: 560, idealWidth: 620, minHeight: 580, idealHeight: 780)
         .navigationTitle(rule.id == 0 ? "新建导出规则" : "编辑导出规则")
         .onAppear { load() }
-        .task { await catalog.refresh() }
+        .task { await refreshCatalog() }
         .sheet(isPresented: $showPreview) { if let preview { ExportRulePreviewView(preview: preview) } }
     }
 
@@ -376,14 +377,21 @@ public struct ExportRuleEditor: View {
         }
     }
 
+    @MainActor
+    private func refreshCatalog() async {
+        if let loaded = try? await sourceCatalog.snapshot() {
+            catalog = loaded
+        }
+    }
+
     private func fBind(_ f: String) -> Binding<Bool> { Binding(get:{selectedFrontmatterFields.contains(f)}, set:{if $0{selectedFrontmatterFields.insert(f)}else{selectedFrontmatterFields.remove(f)}}) }
     private func lBind(_ f: String) -> Binding<String> { Binding(get:{fieldLabelOverrides[f] ?? ""}, set:{v in let t=v.trimmingCharacters(in:.whitespaces); if t.isEmpty{fieldLabelOverrides.removeValue(forKey:f)}else{fieldLabelOverrides[f]=t}}) }
 
     private func selectionMenu(title: String, summary: String, items: [(Int64,String)], selection: Binding<Set<Int64>>) -> some View {
-        HStack { Text(title).font(.callout).foregroundStyle(Color.rbText2); Spacer(); Menu(summary) { Button("全部"){selection.wrappedValue.removeAll()}; Divider(); ForEach(items,id:\.0){item in Button{if selection.wrappedValue.contains(item.0){selection.wrappedValue.remove(item.0)}else{selection.wrappedValue.insert(item.0)}} label:{Label(item.1, systemImage:selection.wrappedValue.contains(item.0) ? "checkmark":"circle")}} }.menuStyle(.borderlessButton).fixedSize() }
+        HStack { Text(title).font(.callout).foregroundStyle(ReadBoardDesign.C.text2); Spacer(); Menu(summary) { Button("全部"){selection.wrappedValue.removeAll()}; Divider(); ForEach(items,id:\.0){item in Button{if selection.wrappedValue.contains(item.0){selection.wrappedValue.remove(item.0)}else{selection.wrappedValue.insert(item.0)}} label:{Label(item.1, systemImage:selection.wrappedValue.contains(item.0) ? "checkmark":"circle")}} }.menuStyle(.borderlessButton).fixedSize() }
     }
     private func stringSelectionMenu(title: String, summary: String, items: [(String,String)], selection: Binding<Set<String>>) -> some View {
-        HStack { Text(title).font(.callout).foregroundStyle(Color.rbText2); Spacer(); Menu(summary) { Button("全部"){selection.wrappedValue.removeAll()}; Divider(); ForEach(items,id:\.0){item in Button{if selection.wrappedValue.contains(item.0){selection.wrappedValue.remove(item.0)}else{selection.wrappedValue.insert(item.0)}} label:{Label(item.1, systemImage:selection.wrappedValue.contains(item.0) ? "checkmark":"circle")}} }.menuStyle(.borderlessButton).fixedSize() }
+        HStack { Text(title).font(.callout).foregroundStyle(ReadBoardDesign.C.text2); Spacer(); Menu(summary) { Button("全部"){selection.wrappedValue.removeAll()}; Divider(); ForEach(items,id:\.0){item in Button{if selection.wrappedValue.contains(item.0){selection.wrappedValue.remove(item.0)}else{selection.wrappedValue.insert(item.0)}} label:{Label(item.1, systemImage:selection.wrappedValue.contains(item.0) ? "checkmark":"circle")}} }.menuStyle(.borderlessButton).fixedSize() }
     }
     private var ctSummary: String { selSummary(selectedContentTypes, ["article":"文章","podcast":"播客","video":"视频"]) }
     private var plSummary: String { selSummary(selectedPlatforms, ["rss":"RSS","podcast":"播客","youtube":"YouTube","wechat":"公众号"]) }
@@ -400,9 +408,9 @@ private struct ExportRulePreviewView: View {
     var body: some View {
         VStack(alignment:.leading, spacing:14) {
             HStack{Text("导出预览").font(.headline);Spacer();Button("完成"){dismiss()}.keyboardShortcut(.defaultAction)}
-            Text("共匹配 \(preview.matchingCount) 条，预览不写文件。").foregroundStyle(Color.rbText2)
+            Text("共匹配 \(preview.matchingCount) 条，预览不写文件。").foregroundStyle(ReadBoardDesign.C.text2)
             if preview.samples.isEmpty { ContentUnavailableView("没有匹配内容", systemImage: "doc.text.magnifyingglass") }
-            else { List(preview.samples, id:\.contentID){s in VStack(alignment:.leading, spacing:5){Text(s.title).font(.system(size:13,weight:.semibold)); if let i=s.issue{Text(i).font(.callout).foregroundStyle(Color.rbScoreLow)} else if let d=s.destination{Text(d).font(.caption.monospaced()).foregroundStyle(Color.rbText3).lineLimit(2).truncationMode(.middle)}; if let m=s.markdown{Text(String(m.prefix(400))).font(.callout).foregroundStyle(Color.rbText2).lineLimit(6)}}.padding(.vertical,4)} }
+            else { List(preview.samples, id:\.contentID){s in VStack(alignment:.leading, spacing:5){Text(s.title).font(.system(size:13,weight:.semibold)); if let i=s.issue{Text(i).font(.callout).foregroundStyle(ReadBoardDesign.C.scoreLow)} else if let d=s.destination{Text(d).font(.caption.monospaced()).foregroundStyle(ReadBoardDesign.C.text3).lineLimit(2).truncationMode(.middle)}; if let m=s.markdown{Text(String(m.prefix(400))).font(.callout).foregroundStyle(ReadBoardDesign.C.text2).lineLimit(6)}}.padding(.vertical,4)} }
         }.padding(20).frame(width:620,height:480)
     }
 }

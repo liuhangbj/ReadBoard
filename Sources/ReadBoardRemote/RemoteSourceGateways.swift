@@ -22,6 +22,12 @@ public struct RemoteProcessingGateway: ProcessingGateway {
             body: RemoteProcessingStatusRequest(requestID: requestID),
             as: ProcessingCommandSnapshot.self)
     }
+
+    public func recent(limit: Int) async -> [ProcessingActivity] {
+        (try? await client.post("api/v1/processing/recent",
+            body: RemoteLimitRequest(limit: limit),
+            as: [ProcessingActivity].self)) ?? []
+    }
 }
 
 public struct RemoteSourceManagementGateway: SourceManagementGateway {
@@ -78,9 +84,45 @@ public struct RemoteSourceManagementGateway: SourceManagementGateway {
 
     public func backfillProcessing(scope: SourceScope,
                                    key: SourcePolicyKey?) async throws -> SourceMaintenanceResult {
+        let job = try await submitBackfillProcessing(scope: scope, key: key)
+        return SourceMaintenanceResult(message: job.message)
+    }
+
+    public func submitBackfillProcessing(
+        scope: SourceScope,
+        key: SourcePolicyKey?
+    ) async throws -> SourceOperationJobSnapshot {
         try await client.post("api/v1/sources/backfill",
             body: RemoteSourceBackfillRequest(scope: scope, key: key),
-            as: SourceMaintenanceResult.self)
+            as: SourceOperationJobSnapshot.self)
+    }
+
+    public func submitSourceSync(scope: SourceScope?) async throws -> SourceOperationJobSnapshot {
+        try await client.post("api/v1/sources/jobs/sync",
+            body: RemoteSourceSyncJobRequest(scope: scope),
+            as: SourceOperationJobSnapshot.self)
+    }
+
+    public func submitFulltextRefetch(
+        scope: SourceScope,
+        fullHistory: Bool
+    ) async throws -> SourceOperationJobSnapshot {
+        try await client.post("api/v1/sources/jobs/fulltext",
+            body: RemoteSourceRefetchRequest(scope: scope, fullHistory: fullHistory),
+            as: SourceOperationJobSnapshot.self)
+    }
+
+    public func sourceOperationStatus(id: String) async throws -> SourceOperationJobSnapshot {
+        try await client.post("api/v1/sources/jobs/status",
+            body: RemoteSourceOperationRequest(id: id),
+            as: SourceOperationJobSnapshot.self)
+    }
+
+    public func cancelSourceOperation(id: String) async {
+        let _: RemoteAcknowledgement? = try? await client.post(
+            "api/v1/sources/jobs/cancel",
+            body: RemoteSourceOperationRequest(id: id),
+            as: RemoteAcknowledgement.self)
     }
 
     public func setFetchMode(scope: SourceScope, mode: SourceFetchMode) async throws {

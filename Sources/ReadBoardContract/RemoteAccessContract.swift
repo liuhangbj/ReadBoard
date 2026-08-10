@@ -15,16 +15,37 @@ public enum RemoteAccessScope: String, Codable, CaseIterable, Hashable, Sendable
         [.readLibrary, .updateReadingState]
     }
 
+    /// 日常远程操作员。可以刷新源、启动内容处理、处理授权和导出，
+    /// 但不能修改全局配置、依赖、备份或其他主机维护设置。
+    public static var operatorAccess: [RemoteAccessScope] {
+        [
+            .readLibrary,
+            .updateReadingState,
+            .manageOperations,
+            .runProcessing,
+            .manageSources,
+            .manageAuthentication,
+            .manageExports,
+        ]
+    }
+
+    public static var administrator: [RemoteAccessScope] { allCases }
+
     public static var fullControl: [RemoteAccessScope] { allCases }
 }
 
 public enum RemoteAccessPreset: String, Codable, CaseIterable, Sendable {
     case reader
+    case operatorAccess
+    case administrator
+    /// 兼容已经保存的旧版预设值；新界面不再使用它。
     case fullControl
 
     public var scopes: [RemoteAccessScope] {
         switch self {
         case .reader: RemoteAccessScope.reader
+        case .operatorAccess: RemoteAccessScope.operatorAccess
+        case .administrator: RemoteAccessScope.administrator
         case .fullControl: RemoteAccessScope.fullControl
         }
     }

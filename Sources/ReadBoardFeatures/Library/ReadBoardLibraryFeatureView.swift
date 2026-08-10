@@ -48,11 +48,20 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
     }
 
     public var body: some View {
+        Group {
         #if os(macOS)
         desktopBody
         #else
         mobileBody
         #endif
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: .readBoardLibrarySnapshotChanged)) { _ in
+                Task {
+                    await model.reload()
+                    await model.refreshNavigation()
+                }
+            }
     }
 
     #if os(macOS)

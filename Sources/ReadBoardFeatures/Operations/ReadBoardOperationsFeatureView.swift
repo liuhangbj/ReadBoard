@@ -21,19 +21,22 @@ public struct ReadBoardOperationsFeatureView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: ReadBoardDesign.Space.xl) {
                 header
+                sourceHealthCard
                 engineCard
                 queueMetrics
                 if !model.runtime.activeItems.isEmpty { activeItemsCard }
+                if !model.recentProcessing.isEmpty { recentProcessingCard }
                 if !model.processingFailures.isEmpty { processingFailuresCard }
                 if !model.fullTextFailures.isEmpty { fullTextFailuresCard }
                 if !model.authentications.isEmpty { authenticationCard }
+                statisticsCard
             }
             .padding(ReadBoardDesign.Space.xl)
             .frame(maxWidth: 1120, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .background(ReadBoardDesign.C.bg)
-        .task { await model.load() }
+        .task { await model.monitor() }
         .refreshable { await model.load() }
         .sheet(isPresented: Binding(
             get: { model.authenticationChallenge != nil },
@@ -63,6 +66,132 @@ public struct ReadBoardOperationsFeatureView: View {
             Text(model.errorMessage ?? "请稍后重试")
         }
         .overlay(alignment: .bottom) { statusToast }
+    }
+
+    private var problemSources: [SourceCatalogItem] {
+        model.sourceCatalog?.sources.filter { $0.enabled && ($0.hasError || $0.isStale) } ?? []
+    }
+
+    private var sourceHealthCard: some View {
+        operationSection("订阅源健康") {
+            HStack(spacing: ReadBoardDesign.Space.md) {
+                let enabled = model.sourceCatalog?.sources.filter(\.enabled).count ?? 0
+                ReadBoardMetricTile(title: "已启用", value: "\(enabled)",
+                    icon: "dot.radiowaves.left.and.right", color: ReadBoardDesign.C.accent)
+                ReadBoardMetricTile(title: "健康", value: "\(max(0, enabled - problemSources.count))",
+                    icon: "checkmark.circle", color: ReadBoardDesign.C.scoreHigh)
+                ReadBoardMetricTile(title: "问题", value: "\(problemSources.count)",
+                    icon: "exclamationmark.triangle",
+                    color: problemSources.isEmpty ? ReadBoardDesign.C.text3 : ReadBoardDesign.C.scoreLow)
+                Spacer(minLength: 8)
+                if model.permissions.allows(.runProcessing, capability: .sourceManagement) {
+                    Button { Task { await model.syncAllSources() } } label: {
+                        Label("全部更新", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(ReadBoardSecondaryButtonStyle())
+                    .disabled(model.activeOperations.contains("sources:all"))
+                }
+            }
+            if problemSources.isEmpty {
+                ReadBoardHairline()
+                Label("当前没有抓取失败或长期未更新的订阅源", systemImage: "checkmark.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(ReadBoardDesign.C.scoreHigh)
+                    .padding(.vertical, 10)
+            } else {
+                ForEach(Array(problemSources.prefix(12).enumerated()), id: \.element.id) { index, source in
+                    ReadBoardHairline()
+                    HStack(spacing: ReadBoardDesign.Space.md) {
+                        Image(systemName: source.hasError
+                            ? "exclamationmark.triangle.fill" : "clock.badge.exclamationmark")
+                            .foregroundStyle(source.hasError
+                                ? ReadBoardDesign.C.scoreLow : ReadBoardDesign.C.scoreMid)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(source.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                            Text(source.error ?? sourceHealthText(source))
+                                .font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.text3)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        if model.permissions.allows(.runProcessing, capability: .sourceManagement) {
+                            Button("重试") { Task { await model.retrySource(id: source.id) } }
+                                .buttonStyle(ReadBoardQuietButtonStyle())
+                                .disabled(model.activeOperations.contains("source:\(source.id)"))
+                        }
+                    }
+                    .padding(.vertical, 8)
+                    if index == 11, problemSources.count > 12 {
+                        Text("另有 \(problemSources.count - 12) 个问题源")
+                            .font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.text3)
+                    }
+                }
+            }
+        }
+    }
+
+    private var recentProcessingCard: some View {
+        operationSection("手动处理任务") {
+            ForEach(Array(model.recentProcessing.enumerated()), id: \.element.id) { index, activity in
+                HStack(spacing: ReadBoardDesign.Space.md) {
+                    processingActivityIcon(activity.snapshot.state)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(activity.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        Text("\(jobTitle(activity.snapshot.operation.rawValue)) · \(activity.snapshot.message)")
+                            .font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.text3)
+                            .lineLimit(2)
+                    }
+                    Spacer()
+                    Text(Date(timeIntervalSince1970: TimeInterval(activity.snapshot.updatedAt))
+                        .formatted(date: .omitted, time: .shortened))
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(ReadBoardDesign.C.text3)
+                }
+                .padding(.vertical, 8)
+                if index < model.recentProcessing.count - 1 { ReadBoardHairline() }
+            }
+        }
+    }
+
+    private var statisticsCard: some View {
+        VStack(alignment: .leading, spacing: ReadBoardDesign.Space.sm) {
+            ReadBoardSectionLabel(text: "资料库概览")
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 10)], spacing: 10) {
+                let value = model.dashboard.overview
+                ReadBoardMetricTile(title: "内容", value: "\(value.totalContent)",
+                    icon: "doc.text", color: ReadBoardDesign.C.accent)
+                ReadBoardMetricTile(title: "未读", value: "\(value.unreadCount)",
+                    icon: "circle.fill", color: ReadBoardDesign.C.scoreMid)
+                ReadBoardMetricTile(title: "星标", value: "\(value.starredCount)",
+                    icon: "star.fill", color: ReadBoardDesign.C.summary)
+                ReadBoardMetricTile(title: "全文", value: "\(value.withFulltext)",
+                    icon: "doc.richtext", color: ReadBoardDesign.C.scoreHigh)
+                ReadBoardMetricTile(title: "已评分", value: "\(value.scored)",
+                    icon: "number", color: ReadBoardDesign.C.translate)
+                ReadBoardMetricTile(title: "已翻译", value: "\(value.translated)",
+                    icon: "character.book.closed", color: ReadBoardDesign.C.podcast)
+                ReadBoardMetricTile(title: "数据库", value: String(format: "%.1f MB", value.databaseSizeMB),
+                    icon: "externaldrive", color: ReadBoardDesign.C.text2)
+            }
+        }
+    }
+
+    private func sourceHealthText(_ source: SourceCatalogItem) -> String {
+        if let hours = source.hoursSinceFetch { return "上次抓取 \(Int(hours)) 小时前" }
+        return "尚未完成首次抓取"
+    }
+
+    @ViewBuilder
+    private func processingActivityIcon(_ state: ProcessingCommandState) -> some View {
+        switch state {
+        case .queued, .running:
+            ProgressView().controlSize(.small)
+        case .succeeded, .noWork:
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(ReadBoardDesign.C.scoreHigh)
+        case .failed:
+            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(ReadBoardDesign.C.scoreLow)
+        case .busy:
+            Image(systemName: "clock.fill").foregroundStyle(ReadBoardDesign.C.scoreMid)
+        }
     }
 
     private var header: some View {

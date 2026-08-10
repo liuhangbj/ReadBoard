@@ -10,6 +10,10 @@ public final class ReadBoardOperationsFeatureModel {
     public private(set) var problemCounts = OperationalProblemCounts()
     public private(set) var processingFailures: [ContentProcessingFailure] = []
     public private(set) var fullTextFailures: [FullTextFailure] = []
+    public private(set) var recentProcessing: [ProcessingActivity] = []
+    public private(set) var sourceCatalog: SourceCatalogSnapshot?
+    public private(set) var dashboard = DashboardStatistics(
+        overview: StatisticsOverview(), jobs: [], topSources: [], exports: [])
     public private(set) var isLoading = false
     public private(set) var activeOperations: Set<String> = []
     public private(set) var authenticationChallenge: PlatformAuthenticationChallenge?
@@ -36,11 +40,48 @@ public final class ReadBoardOperationsFeatureModel {
         async let counts = environment.administration.operationalProblemCounts()
         async let failures = environment.administration.processingFailures()
         async let fulltext = environment.administration.fullTextFailures(limit: 100)
+        async let recent = environment.processing.recent(limit: 20)
+        async let catalog = try? environment.sourceCatalog.snapshot()
+        async let dashboard = environment.administration.dashboardStatistics()
         self.runtime = await runtime
         authentications = await auth
         problemCounts = await counts
         processingFailures = await failures
         fullTextFailures = await fulltext
+        recentProcessing = await recent
+        sourceCatalog = await catalog
+        self.dashboard = await dashboard
+    }
+
+    public func monitor() async {
+        while !Task.isCancelled {
+            await load()
+            let delay = runtime.isRunning || !runtime.activeItems.isEmpty ? 1 : 10
+            try? await Task.sleep(for: .seconds(delay))
+        }
+    }
+
+    public func syncAllSources() async {
+        guard begin("sources:all") else { return }
+        defer { finish("sources:all") }
+        do {
+            let job = try await environment.sourceManagement.submitSourceSync(scope: nil)
+            statusMessage = job.message
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func retrySource(id: Int64) async {
+        guard begin("source:\(id)") else { return }
+        defer { finish("source:\(id)") }
+        do {
+            let job = try await environment.sourceManagement.submitSourceSync(
+                scope: SourceScope(kind: .source, id: id))
+            statusMessage = job.message
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     public func runProcessingScan() async {

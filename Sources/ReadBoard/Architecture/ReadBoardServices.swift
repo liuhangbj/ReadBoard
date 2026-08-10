@@ -18,6 +18,7 @@ public struct ReadBoardServices: Sendable {
     public let authentication: any AuthenticationGateway
     public let maintenance: any MaintenanceGateway
     public let dependencyManagement: (any DependencyManagementGateway)?
+    public let dataRevision: any DataRevisionGateway
     /// 仅宿主机能配置监听地址、配对和设备撤销。远程客户端传 nil，避免用假实现
     /// 把不可用的宿主管理能力伪装成普通连接错误。
     public let remoteAccess: (any RemoteAccessGateway)?
@@ -39,6 +40,7 @@ public struct ReadBoardServices: Sendable {
         authentication: any AuthenticationGateway,
         maintenance: any MaintenanceGateway,
         dependencyManagement: (any DependencyManagementGateway)? = nil,
+        dataRevision: any DataRevisionGateway = StaticDataRevisionGateway(),
         remoteAccess: (any RemoteAccessGateway)?,
         remoteCapabilities: [RemoteServiceCapability] = RemoteServiceCapability.allCases,
         remoteScopes: [RemoteAccessScope] = RemoteAccessScope.fullControl
@@ -57,6 +59,7 @@ public struct ReadBoardServices: Sendable {
         self.authentication = authentication
         self.maintenance = maintenance
         self.dependencyManagement = dependencyManagement
+        self.dataRevision = dataRevision
         self.remoteAccess = remoteAccess
         self.remoteCapabilities = remoteCapabilities
         self.remoteScopes = remoteScopes
@@ -82,6 +85,7 @@ public struct ReadBoardServices: Sendable {
             authentication: LocalAuthenticationGateway(),
             maintenance: LocalMaintenanceGateway(),
             dependencyManagement: LocalDependencyManagementGateway(),
+            dataRevision: LocalDataRevisionGateway(),
             remoteAccess: LocalRemoteAccessGateway()
         )
     }
@@ -103,6 +107,7 @@ public struct ReadBoardServices: Sendable {
             authentication: authentication,
             maintenance: maintenance,
             dependencyManagement: dependencyManagement,
+            dataRevision: dataRevision,
             permissions: permissions)
     }
 }

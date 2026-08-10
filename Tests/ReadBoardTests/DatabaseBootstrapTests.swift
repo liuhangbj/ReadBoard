@@ -8,7 +8,7 @@ final class DatabaseBootstrapTests: XCTestCase {
             throw XCTSkip("需要 READBOARD_DB 指向临时数据库；跳过以免触碰真实库")
         }
         XCTAssertTrue(Database.shared.open())
-        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 31)
+        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 32)
 
         let requiredColumns = ["deleted_at", "llm_translated_md", "llm_transcript_md",
                                "first_image_url"]

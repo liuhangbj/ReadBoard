@@ -1,8 +1,25 @@
+import Foundation
 import ReadBoardContract
 import ReadBoardUI
 import XCTest
 
 final class ReadBoardUITests: XCTestCase {
+    func testDesktopColumnsKeepAStableSystemSplitLayout() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/ReadBoardUI/ReadBoardLibraryComponents.swift"),
+            encoding: .utf8)
+
+        XCTAssertTrue(source.contains("NavigationSplitView {"))
+        XCTAssertTrue(source.contains(".navigationSplitViewColumnWidth("))
+        XCTAssertTrue(source.contains(".navigationSplitViewStyle(.balanced)"))
+        XCTAssertFalse(source.contains("HSplitView {"))
+    }
+
     func testMultipleImagesRemainIndependentRenderBlocks() {
         let markdown = """
         第一段

@@ -19,6 +19,7 @@ public struct ReadBoardFeatureEnvironment: Sendable {
     public let authentication: any AuthenticationGateway
     public let maintenance: any MaintenanceGateway
     public let dependencyManagement: (any DependencyManagementGateway)?
+    public let dataRevision: any DataRevisionGateway
     public let permissions: ReadBoardFeaturePermissions
 
     public init(
@@ -36,6 +37,7 @@ public struct ReadBoardFeatureEnvironment: Sendable {
         authentication: any AuthenticationGateway,
         maintenance: any MaintenanceGateway,
         dependencyManagement: (any DependencyManagementGateway)? = nil,
+        dataRevision: any DataRevisionGateway = StaticDataRevisionGateway(),
         permissions: ReadBoardFeaturePermissions
     ) {
         self.library = library
@@ -52,6 +54,7 @@ public struct ReadBoardFeatureEnvironment: Sendable {
         self.authentication = authentication
         self.maintenance = maintenance
         self.dependencyManagement = dependencyManagement
+        self.dataRevision = dataRevision
         self.permissions = permissions
     }
 }

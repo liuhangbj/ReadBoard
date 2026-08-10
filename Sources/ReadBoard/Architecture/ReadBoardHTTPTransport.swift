@@ -134,6 +134,8 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(RemoteServerProfile(apiVersion: ReadBoardAPI.version,
                     serverName: name, capabilities: services.remoteCapabilities,
                     grantedScopes: grantedScopes, transportSecurity: "tls"))
+            case ("GET", "/api/v1/revisions"):
+                return json(try await services.dataRevision.snapshot())
             case ("POST", "/api/v1/library/page"):
                 return json(try await services.library.page(try decode(ContentQuery.self, request.body)))
             case ("GET", "/api/v1/library/snapshot"):
@@ -168,6 +170,9 @@ public struct ReadBoardHTTPRouter: Sendable {
             case ("POST", "/api/v1/processing/status"):
                 let value = try decode(RemoteProcessingStatusRequest.self, request.body)
                 return json(try await services.processing.status(requestID: value.requestID))
+            case ("POST", "/api/v1/processing/recent"):
+                let value = try decode(RemoteLimitRequest.self, request.body)
+                return json(await services.processing.recent(limit: value.limit))
 
             case ("GET", "/api/v1/sources/sync-settings"):
                 return json(await services.sourceManagement.syncSettings())
@@ -201,8 +206,23 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(RemoteAcknowledgement())
             case ("POST", "/api/v1/sources/backfill"):
                 let value = try decode(RemoteSourceBackfillRequest.self, request.body)
-                return json(try await services.sourceManagement.backfillProcessing(
-                    scope: value.scope, key: value.key))
+                return json(try await services.sourceManagement.submitBackfillProcessing(
+                    scope: value.scope, key: value.key), status: 202)
+            case ("POST", "/api/v1/sources/jobs/status"):
+                let value = try decode(RemoteSourceOperationRequest.self, request.body)
+                return json(try await services.sourceManagement.sourceOperationStatus(id: value.id))
+            case ("POST", "/api/v1/sources/jobs/cancel"):
+                let value = try decode(RemoteSourceOperationRequest.self, request.body)
+                await services.sourceManagement.cancelSourceOperation(id: value.id)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/sources/jobs/sync"):
+                let value = try decode(RemoteSourceSyncJobRequest.self, request.body)
+                return json(try await services.sourceManagement.submitSourceSync(
+                    scope: value.scope), status: 202)
+            case ("POST", "/api/v1/sources/jobs/fulltext"):
+                let value = try decode(RemoteSourceRefetchRequest.self, request.body)
+                return json(try await services.sourceManagement.submitFulltextRefetch(
+                    scope: value.scope, fullHistory: value.fullHistory), status: 202)
             case ("POST", "/api/v1/sources/fetch-mode"):
                 let value = try decode(RemoteSourceFetchModeRequest.self, request.body)
                 try await services.sourceManagement.setFetchMode(scope: value.scope, mode: value.mode)
@@ -429,6 +449,7 @@ public struct ReadBoardHTTPRouter: Sendable {
     private func requiredScope(for request: ReadBoardHTTPRequest) -> RemoteAccessScope? {
         let path = request.path
         if path == "/api/v1/server/profile" { return nil }
+        if path == "/api/v1/revisions" { return .readLibrary }
         if path.hasPrefix("/api/v1/library/") || path.hasPrefix("/api/v1/content/") {
             return ["/api/v1/library/read", "/api/v1/library/star", "/api/v1/library/mark-read"]
                 .contains(path) ? .updateReadingState : .readLibrary

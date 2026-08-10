@@ -154,7 +154,8 @@ public struct RemoteAccessPane: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Picker("访问权限", selection: $pairingPreset) {
                             Text("仅阅读").tag(RemoteAccessPreset.reader)
-                            Text("完整控制").tag(RemoteAccessPreset.fullControl)
+                            Text("日常操作").tag(RemoteAccessPreset.operatorAccess)
+                            Text("管理员").tag(RemoteAccessPreset.administrator)
                         }
                         .pickerStyle(.segmented)
                         HStack {
@@ -328,7 +329,14 @@ public struct RemoteAccessPane: View {
     private func deviceDetail(_ device: PairedRemoteDevice) -> String {
         let created = Date(timeIntervalSince1970: device.createdAt)
             .formatted(date: .abbreviated, time: .shortened)
-        let permission = device.scopes == RemoteAccessScope.reader ? "仅阅读" : "完整控制"
+        let permission: String
+        if device.scopes == RemoteAccessScope.reader {
+            permission = "仅阅读"
+        } else if device.scopes == RemoteAccessScope.operatorAccess {
+            permission = "日常操作"
+        } else {
+            permission = "管理员"
+        }
         guard let lastSeenAt = device.lastSeenAt else {
             return "\(permission) · 配对于 \(created) · 尚未连接"
         }

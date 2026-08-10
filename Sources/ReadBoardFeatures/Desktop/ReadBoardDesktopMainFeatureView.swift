@@ -18,6 +18,7 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
     private let environment: ReadBoardFeatureEnvironment
     private let settingsTitle: String?
     private let settingsIcon: String
+    private let openSettings: (ReadBoardSettingsRoute) -> Void
     private let settingsContent: SettingsContent
 
     @State private var destination: ReadBoardDesktopDestination
@@ -27,18 +28,22 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
     @State private var showCreateFolder = false
     @State private var folderName = ""
     @State private var showImporter = false
+    @State private var showIssueCenter = false
     @State private var operationError: String?
+    @State private var lastRevision: DataRevisionSnapshot?
 
     public init(
         environment: ReadBoardFeatureEnvironment,
         initialLocation: ReadBoardLibraryLocation = .collection(.all),
         settingsTitle: String? = nil,
         settingsIcon: String = "network",
+        openSettings: @escaping (ReadBoardSettingsRoute) -> Void = { _ in },
         @ViewBuilder settings: () -> SettingsContent
     ) {
         self.environment = environment
         self.settingsTitle = settingsTitle
         self.settingsIcon = settingsIcon
+        self.openSettings = openSettings
         self.settingsContent = settings()
         _destination = State(initialValue: .library(initialLocation))
         _sourcesModel = State(initialValue: ReadBoardSourcesFeatureModel(environment: environment))
@@ -59,12 +64,16 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
         .navigationTitle("ReadBoard")
         .tint(ReadBoardDesign.C.accent)
         .task { await reloadSidebar() }
+        .task { await monitorRevisions() }
         .onReceive(NotificationCenter.default.publisher(
             for: .readBoardLibrarySnapshotChanged)) { _ in
                 Task { await reloadSnapshot() }
             }
         .sheet(isPresented: $showAddSource) {
             ReadBoardAddSourceSheet(model: sourcesModel)
+        }
+        .sheet(isPresented: $showIssueCenter) {
+            ReadBoardIssueCenterView(environment: environment, action: handleIssueAction)
         }
         .alert("新建文件夹", isPresented: $showCreateFolder) {
             TextField("文件夹名称", text: $folderName)
@@ -142,7 +151,7 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
         HStack(spacing: 4) {
             if environment.permissions.allows(.manageOperations, capability: .administration) {
                 ReadBoardServiceHealthButton(environment: environment) {
-                    destination = .operations
+                    showIssueCenter = true
                 }
             }
 
@@ -272,14 +281,60 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
             }
         }
     }
+
+    private func handleIssueAction(_ action: ReadBoardIssueAction) {
+        switch action {
+        case .openSources:
+            destination = .sources
+        case .openOperations:
+            destination = .operations
+        case .openSettings(let route):
+            ReadBoardSettingsNavigationStore.shared.request(route)
+            if settingsTitle != nil {
+                destination = .settings
+            } else {
+                openSettings(route)
+            }
+        }
+    }
+
+    @MainActor
+    private func monitorRevisions() async {
+        while !Task.isCancelled {
+            do {
+                let current = try await environment.dataRevision.snapshot()
+                if let previous = lastRevision {
+                    if current.library != previous.library {
+                        NotificationCenter.default.post(
+                            name: .readBoardLibrarySnapshotChanged, object: nil)
+                    }
+                    if current.sources != previous.sources {
+                        await sourcesModel.load()
+                        await reloadSnapshot()
+                    }
+                }
+                lastRevision = current
+                try await Task.sleep(for: .seconds(2))
+            } catch is CancellationError {
+                return
+            } catch {
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+    }
 }
 
 public extension ReadBoardDesktopMainFeatureView where SettingsContent == EmptyView {
     init(
         environment: ReadBoardFeatureEnvironment,
-        initialLocation: ReadBoardLibraryLocation = .collection(.all)
+        initialLocation: ReadBoardLibraryLocation = .collection(.all),
+        openSettings: @escaping (ReadBoardSettingsRoute) -> Void = { _ in }
     ) {
-        self.init(environment: environment, initialLocation: initialLocation) {
+        self.init(
+            environment: environment,
+            initialLocation: initialLocation,
+            openSettings: openSettings
+        ) {
             EmptyView()
         }
     }

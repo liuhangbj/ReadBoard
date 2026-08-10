@@ -32,6 +32,7 @@ final class HTTPTransportTests: XCTestCase {
         let router = ReadBoardHTTPRouter(services: stubServices(), bearerToken: "secret")
         let routes: [(String, String, Data)] = [
             ("POST", "/api/v1/library/page", try body(ContentQuery())),
+            ("GET", "/api/v1/revisions", Data()),
             ("GET", "/api/v1/processing/capabilities", Data()),
             ("GET", "/api/v1/sources/catalog", Data()),
             ("GET", "/api/v1/exports/rules", Data()),

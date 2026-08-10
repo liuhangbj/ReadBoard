@@ -552,18 +552,19 @@ public struct ReadBoardLibraryDesktopColumns<ListPane: View, DetailPane: View>: 
 
     public var body: some View {
         #if os(macOS)
-        HSplitView {
+        NavigationSplitView {
             listPane
-                .frame(
-                    minWidth: ReadBoardLibraryColumnMetrics.listMinimum,
-                    idealWidth: ReadBoardLibraryColumnMetrics.listIdeal,
-                    maxWidth: ReadBoardLibraryColumnMetrics.listMaximum)
+                .navigationSplitViewColumnWidth(
+                    min: ReadBoardLibraryColumnMetrics.listMinimum,
+                    ideal: ReadBoardLibraryColumnMetrics.listIdeal,
+                    max: ReadBoardLibraryColumnMetrics.listMaximum)
                 .background(ReadBoardDesign.C.bg)
-
+        } detail: {
             detailPane
                 .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
                 .background(ReadBoardDesign.C.bg)
         }
+        .navigationSplitViewStyle(.balanced)
         .background(ReadBoardDesign.C.bg)
         #else
         detailPane

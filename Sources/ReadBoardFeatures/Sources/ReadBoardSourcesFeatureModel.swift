@@ -13,6 +13,7 @@ public final class ReadBoardSourcesFeatureModel {
         intervalMinutes: 15)
     public private(set) var isLoading = false
     public private(set) var activeOperations: Set<String> = []
+    public private(set) var sourceJobs: [String: SourceOperationJobSnapshot] = [:]
     public private(set) var statusMessage: String?
     public private(set) var errorMessage: String?
 
@@ -47,8 +48,8 @@ public final class ReadBoardSourcesFeatureModel {
     }
 
     public func syncAll() async {
-        await maintenance(key: "sync:all") {
-            try await self.environment.sourceManagement.syncAll()
+        await submitSourceJob(key: "sync:all") {
+            try await self.environment.sourceManagement.submitSourceSync(scope: nil)
         }
     }
 
@@ -59,8 +60,8 @@ public final class ReadBoardSourcesFeatureModel {
     }
 
     public func sync(scope: SourceScope) async {
-        await maintenance(key: operationKey("sync", scope)) {
-            try await self.environment.sourceManagement.sync(scope: scope)
+        await submitSourceJob(key: operationKey("sync", scope)) {
+            try await self.environment.sourceManagement.submitSourceSync(scope: scope)
         }
     }
 
@@ -99,9 +100,42 @@ public final class ReadBoardSourcesFeatureModel {
                 key: key,
                 enabled: enabled)
             if enabled, backfillHistory {
-                _ = try await self.environment.sourceManagement.backfillProcessing(
+                let job = try await self.environment.sourceManagement.submitBackfillProcessing(
                     scope: scope,
                     key: key)
+                self.sourceJobs[job.id] = job
+                self.monitorSourceJob(id: job.id)
+            }
+        }
+    }
+
+    public func cancelSourceJob(id: String) {
+        Task {
+            await environment.sourceManagement.cancelSourceOperation(id: id)
+            sourceJobs[id] = try? await environment.sourceManagement.sourceOperationStatus(id: id)
+        }
+    }
+
+    private func monitorSourceJob(id: String) {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                do {
+                    let snapshot = try await self.environment.sourceManagement
+                        .sourceOperationStatus(id: id)
+                    self.sourceJobs[id] = snapshot
+                    self.statusMessage = snapshot.message
+                    if snapshot.phase.isTerminal {
+                        if snapshot.phase == .succeeded {
+                            await self.load()
+                        }
+                        return
+                    }
+                } catch {
+                    self.errorMessage = error.localizedDescription
+                    return
+                }
+                try? await Task.sleep(for: .seconds(1))
             }
         }
     }
@@ -143,8 +177,8 @@ public final class ReadBoardSourcesFeatureModel {
     }
 
     public func refetchFulltext(scope: SourceScope, fullHistory: Bool) async {
-        await maintenance(key: operationKey("fulltext", scope)) {
-            try await self.environment.sourceManagement.refetchFulltext(
+        await submitSourceJob(key: operationKey("fulltext", scope)) {
+            try await self.environment.sourceManagement.submitFulltextRefetch(
                 scope: scope,
                 fullHistory: fullHistory)
         }
@@ -203,6 +237,24 @@ public final class ReadBoardSourcesFeatureModel {
             let result = try await operation()
             statusMessage = result.message
             await refreshAfterMutation()
+        } catch is CancellationError {
+            return
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func submitSourceJob(
+        key: String,
+        operation: () async throws -> SourceOperationJobSnapshot
+    ) async {
+        guard begin(key) else { return }
+        defer { finish(key) }
+        do {
+            let job = try await operation()
+            sourceJobs[job.id] = job
+            statusMessage = job.message
+            monitorSourceJob(id: job.id)
         } catch is CancellationError {
             return
         } catch {

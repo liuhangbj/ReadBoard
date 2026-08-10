@@ -102,39 +102,108 @@ public struct ReadBoardSettingsShell: View {
     }
 
     public var body: some View {
+        Group {
+        #if os(macOS)
+            desktopBody
+        #else
+            mobileBody
+        #endif
+        }
+        .onAppear { apply(route) }
+        .onChange(of: route) { _, value in apply(value) }
+    }
+
+    #if os(macOS)
+    private var desktopBody: some View {
         HStack(spacing: 0) {
             List(selection: $selection) {
-                if let primaryItem {
-                    Label(primaryItem.title, systemImage: primaryItem.icon)
-                        .tag(ReadBoardSettingsDestination.module(primaryItem.id))
-                }
-                ForEach(pages) { page in
-                    Label(page.title, systemImage: page.icon)
-                        .tag(ReadBoardSettingsDestination.page(page))
-                }
-                if !modules.isEmpty {
-                    Section("Pro 功能") {
-                        ForEach(modules) { module in
-                            Label(module.title, systemImage: module.icon)
-                                .tag(ReadBoardSettingsDestination.module(module.id))
-                        }
-                    }
-                }
+                desktopNavigationItems
             }
             .listStyle(.sidebar)
             .frame(width: 180)
 
             Divider()
-            content(selection)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding()
+            detail(selection)
         }
         .frame(minWidth: 720, minHeight: 500)
-        #if os(macOS)
         .overlay(ReadBoardSettingsWindowAccessor().frame(width: 0, height: 0))
-        #endif
-        .onAppear { apply(route) }
-        .onChange(of: route) { _, value in apply(value) }
+    }
+
+    @ViewBuilder
+    private var desktopNavigationItems: some View {
+        if let primaryItem {
+            Label(primaryItem.title, systemImage: primaryItem.icon)
+                .tag(ReadBoardSettingsDestination.module(primaryItem.id))
+        }
+        ForEach(pages) { page in
+            Label(page.title, systemImage: page.icon)
+                .tag(ReadBoardSettingsDestination.page(page))
+        }
+        if !modules.isEmpty {
+            Section("Pro 功能") {
+                ForEach(modules) { module in
+                    Label(module.title, systemImage: module.icon)
+                        .tag(ReadBoardSettingsDestination.module(module.id))
+                }
+            }
+        }
+    }
+    #else
+    private var mobileBody: some View {
+        NavigationStack {
+            List {
+                if let primaryItem {
+                    mobileNavigationLink(
+                        .module(primaryItem.id),
+                        title: primaryItem.title,
+                        icon: primaryItem.icon)
+                }
+                ForEach(pages) { page in
+                    mobileNavigationLink(.page(page), title: page.title, icon: page.icon)
+                }
+                if !modules.isEmpty {
+                    Section("Pro 功能") {
+                        ForEach(modules) { module in
+                            mobileNavigationLink(
+                                .module(module.id),
+                                title: module.title,
+                                icon: module.icon)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("设置")
+            .navigationDestination(for: ReadBoardSettingsDestination.self) { destination in
+                detail(destination)
+                    .navigationTitle(title(for: destination))
+            }
+        }
+    }
+
+    private func mobileNavigationLink(
+        _ destination: ReadBoardSettingsDestination,
+        title: String,
+        icon: String
+    ) -> some View {
+        NavigationLink(value: destination) {
+            Label(title, systemImage: icon)
+        }
+    }
+    #endif
+
+    private func detail(_ destination: ReadBoardSettingsDestination) -> some View {
+        content(destination)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding()
+    }
+
+    private func title(for destination: ReadBoardSettingsDestination) -> String {
+        switch destination {
+        case .page(let page): return page.title
+        case .module(let identifier):
+            if primaryItem?.id == identifier { return primaryItem?.title ?? identifier }
+            return modules.first(where: { $0.id == identifier })?.title ?? identifier
+        }
     }
 
     private func apply(_ route: ReadBoardSettingsRoute?) {

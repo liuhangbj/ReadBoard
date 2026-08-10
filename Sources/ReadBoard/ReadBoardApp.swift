@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ReadBoardFeatures
 
 // 入口在 Sources/ReadBoardMain/main.swift（独立 mini-target，库本身无 @main 以便测试链接）
 public struct ReadBoardApp: App {
@@ -58,7 +59,7 @@ public struct ReadBoardApp: App {
 }
 
 public struct RootView: View {
-    @StateObject private var tab = AppTab()
+    @Environment(\.openSettings) private var openSettings
     private let configuration: ReadBoardConfiguration
     private let services: ReadBoardServices
     private let onTerminate: () -> Void
@@ -74,22 +75,16 @@ public struct RootView: View {
     }
 
     public var body: some View {
-        // 无底部 Tab 栏——导航入口移到阅读页左栏底部（订阅源/管理），
-        // 通过共享 AppTab 状态切换。阅读是主视图，订阅源/管理全窗切换。
-        Group {
-            switch tab.selection {
-            case 1:
-                SourcesView(services: services)
-            case 3:
-                ManageView(services: services)
-            default:
-                ContentView(services: services)
-            }
-        }
-        .environmentObject(tab)
+        ReadBoardDesktopMainFeatureView(
+            environment: services.featureEnvironment,
+            openSettings: { route in
+                ReadBoardSettingsNavigationStore.shared.request(route)
+                openSettings()
+            })
         .frame(minWidth: 900, minHeight: 600)
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            onTerminate()
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.willTerminateNotification)) { _ in
+                onTerminate()
         }
     }
 }

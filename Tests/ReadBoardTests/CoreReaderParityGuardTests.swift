@@ -3,21 +3,29 @@ import XCTest
 
 final class CoreReaderParityGuardTests: XCTestCase {
     func testCoreReaderShellKeepsEstablishedDesktopBehaviors() throws {
-        let source = try sourceText("Sources/ReadBoard/ContentView.swift")
+        let appSource = try sourceText("Sources/ReadBoard/ReadBoardApp.swift")
+        XCTAssertTrue(appSource.contains("ReadBoardDesktopMainFeatureView("))
+        XCTAssertFalse(appSource.contains("ContentView(services: services)"))
+
+        let source = try [
+            "Sources/ReadBoardFeatures/Desktop/ReadBoardDesktopMainFeatureView.swift",
+            "Sources/ReadBoardFeatures/Library/ReadBoardLibraryFeatureView.swift",
+            "Sources/ReadBoardFeatures/Library/ReadBoardLibraryNavigation.swift",
+            "Sources/ReadBoardFeatures/Reading/ReadBoardArticleDetailFeatureView.swift",
+        ].map(sourceText).joined(separator: "\n")
         let requiredSentinels = [
-            "navigationSplitViewColumnWidth(min: 180, ideal: 230, max: 360)",
-            "navigationSplitViewColumnWidth(min: 280, ideal: 380, max: 640)",
-            "sidebarCount(unread: vm.totalUnread, total: vm.totalCount)",
-            "sidebarCount(unread: vm.totalPendingUnread, total: vm.totalPending)",
-            "sidebarCount(unread: vm.totalExportedUnread, total: vm.totalExported)",
+            "ReadBoardLibraryDesktopColumns",
+            "ReadBoardLibrarySearchField",
+            "processingFilterChip(.fulltext)",
+            "processingFilterChip(.score)",
+            "processingFilterChip(.summary)",
             "@AppStorage(\"reading.viewMode\")",
             "@AppStorage(\"reading.mediaTab\")",
-            ".popover(isPresented: $showLayoutPopover",
             ".keyboardShortcut(\"j\", modifiers: [])",
             ".keyboardShortcut(\"k\", modifiers: [])",
             ".keyboardShortcut(.space, modifiers: [])",
-            "onPrev: { vm.selectPrev() }, onNext: { vm.selectNext() }",
-            "UserDefaults.standard.set(Array(expandedFolders), forKey: Self.expandedKey)",
+            "await model.selectAdjacent(offset: 1)",
+            "ReadBoardArticleDetailFeatureView",
         ]
 
         for sentinel in requiredSentinels {
@@ -28,17 +36,17 @@ final class CoreReaderParityGuardTests: XCTestCase {
     }
 
     func testCoreReaderModelKeepsCountsAndSelectionActions() throws {
-        let source = try sourceText("Sources/ReadBoard/ContentViewModel.swift")
+        let source = try sourceText(
+            "Sources/ReadBoardFeatures/Library/ReadBoardLibraryFeatureModel.swift")
         let requiredSentinels = [
-            "@Published var totalUnread: Int = 0",
-            "@Published var articleUnread: Int = 0",
-            "@Published var podcastUnread: Int = 0",
-            "@Published var videoUnread: Int = 0",
-            "func toggleRead(_ item: ContentItem)",
-            "func toggleStar(_ item: ContentItem)",
-            "func markAllRead()",
-            "func selectNext()",
-            "func selectPrev()",
+            "public private(set) var navigationSnapshot: LibrarySnapshot?",
+            "public private(set) var selectedItem: ContentSummary?",
+            "public func setRead(",
+            "public func setStarred(",
+            "public func markCurrentLocationRead()",
+            "public func selectAdjacent(",
+            "stateMutationGeneration",
+            "ReadBoardLibraryPaginationState.appendingUnique",
         ]
 
         for sentinel in requiredSentinels {
