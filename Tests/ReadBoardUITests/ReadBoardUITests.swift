@@ -13,11 +13,20 @@ final class ReadBoardUITests: XCTestCase {
             contentsOf: repositoryRoot.appendingPathComponent(
                 "Sources/ReadBoardUI/ReadBoardLibraryComponents.swift"),
             encoding: .utf8)
+        let bridge = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/ReadBoardUI/ReadBoardResizableColumns.swift"),
+            encoding: .utf8)
 
-        XCTAssertTrue(source.contains("NavigationSplitView {"))
-        XCTAssertTrue(source.contains(".navigationSplitViewColumnWidth("))
-        XCTAssertTrue(source.contains(".navigationSplitViewStyle(.balanced)"))
+        XCTAssertTrue(source.contains("ReadBoardResizableColumns("))
+        XCTAssertTrue(source.contains("@AppStorage(\"ReadBoard.Library.ListDetail.leadingWidth\")"))
+        XCTAssertTrue(source.contains("leadingWidth: $persistedListWidth"))
+        XCTAssertTrue(bridge.contains("NSSplitViewDelegate"))
+        XCTAssertTrue(bridge.contains("constrainSplitPosition"))
+        XCTAssertTrue(bridge.contains("onDividerDragEnded"))
+        XCTAssertTrue(bridge.contains("leadingWidth.wrappedValue = Double(width)"))
         XCTAssertFalse(source.contains("HSplitView {"))
+        XCTAssertEqual(ReadBoardLibraryColumnMetrics.listMaximum, .greatestFiniteMagnitude)
     }
 
     func testMultipleImagesRemainIndependentRenderBlocks() {

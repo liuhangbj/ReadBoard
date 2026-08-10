@@ -534,11 +534,15 @@ public enum ReadBoardLibraryColumnMetrics {
     public static let sidebarMaximum: CGFloat = 360
     public static let listMinimum: CGFloat = 280
     public static let listIdeal: CGFloat = 380
-    public static let listMaximum: CGFloat = 640
+    // 中栏不设人为上限；实际可拖范围只由窗口宽度和阅读栏最小宽度决定。
+    public static let listMaximum: CGFloat = .greatestFiniteMagnitude
 }
 
 /// Go 的桌面双栏与 Core 三栏中的中、右两栏共用同一组尺寸和分隔规则。
 public struct ReadBoardLibraryDesktopColumns<ListPane: View, DetailPane: View>: View {
+    @AppStorage("ReadBoard.Library.ListDetail.leadingWidth")
+    private var persistedListWidth = Double(ReadBoardLibraryColumnMetrics.listIdeal)
+
     private let listPane: ListPane
     private let detailPane: DetailPane
 
@@ -552,19 +556,19 @@ public struct ReadBoardLibraryDesktopColumns<ListPane: View, DetailPane: View>: 
 
     public var body: some View {
         #if os(macOS)
-        NavigationSplitView {
+        ReadBoardResizableColumns(
+            leadingWidth: $persistedListWidth,
+            leadingMinimum: ReadBoardLibraryColumnMetrics.listMinimum,
+            leadingIdeal: ReadBoardLibraryColumnMetrics.listIdeal,
+            leadingMaximum: ReadBoardLibraryColumnMetrics.listMaximum,
+            trailingMinimum: 320
+        ) {
             listPane
-                .navigationSplitViewColumnWidth(
-                    min: ReadBoardLibraryColumnMetrics.listMinimum,
-                    ideal: ReadBoardLibraryColumnMetrics.listIdeal,
-                    max: ReadBoardLibraryColumnMetrics.listMaximum)
                 .background(ReadBoardDesign.C.bg)
-        } detail: {
+        } trailing: {
             detailPane
-                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
                 .background(ReadBoardDesign.C.bg)
         }
-        .navigationSplitViewStyle(.balanced)
         .background(ReadBoardDesign.C.bg)
         #else
         detailPane

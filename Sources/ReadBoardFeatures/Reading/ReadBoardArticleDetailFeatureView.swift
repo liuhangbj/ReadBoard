@@ -73,6 +73,9 @@ public struct ReadBoardArticleDetailFeatureView: View {
                 }
             }
         }
+        // NavigationSplitView 会按子视图固有宽度摆放详情。阅读根视图必须先占满
+        // 整个右栏，内部 GeometryReader 才能拿到真实可用宽度并正确居中正文。
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(readingPalette.background)
         #if os(iOS)
         .navigationTitle(currentSummary.sourceName ?? currentSummary.source)
