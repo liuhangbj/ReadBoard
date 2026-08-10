@@ -4,6 +4,17 @@ import ReadBoardFeatures
 import XCTest
 
 final class ReadBoardFeaturesTests: XCTestCase {
+    func testReadingColumnUsesExactCenteredSafeWidth() {
+        XCTAssertEqual(
+            ReadBoardArticleDetailFeatureView.resolvedContentWidth(
+                availableWidth: 1_400, preferredWidth: 720, horizontalPadding: 24),
+            720)
+        XCTAssertEqual(
+            ReadBoardArticleDetailFeatureView.resolvedContentWidth(
+                availableWidth: 640, preferredWidth: 1_000, horizontalPadding: 24),
+            592)
+    }
+
     func testReadingModePreferenceMatchesCorePersistenceSemantics() {
         XCTAssertEqual(
             ReadBoardReadingModePreference.selectedMode(

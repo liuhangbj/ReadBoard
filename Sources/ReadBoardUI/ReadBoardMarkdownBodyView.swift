@@ -116,6 +116,11 @@ public struct ReadBoardMarkdownBodyView: View {
         var isMergedTextFlow: Bool { blocks.count > 1 }
     }
 
+    // 单个 SwiftUI Text 承载数万字时，macOS 可能只布局前半段。连续正文仍按组支持
+    // 跨段选择，但每组保持在一个保守上限内，确保长文全部进入布局树。
+    nonisolated private static let maximumTextFlowCharacters = 12_000
+    nonisolated private static let maximumTextFlowBlocks = 24
+
     public var body: some View {
         LazyVStack(alignment: .leading, spacing: 12) {
             ForEach(units.indices, id: \.self) { index in
@@ -143,21 +148,88 @@ public struct ReadBoardMarkdownBodyView: View {
         buildUnits(ReadBoardMarkdownParser.parse(markdown)).map(\.blocks.count)
     }
 
+    nonisolated public static func selectionUnitCharacterCounts(markdown: String) -> [Int] {
+        buildUnits(ReadBoardMarkdownParser.parse(markdown)).map { unit in
+            unit.blocks.reduce(0) { $0 + textLength($1) }
+        }
+    }
+
     nonisolated private static func buildUnits(
         _ blocks: [ReadBoardMarkdownBlock]
     ) -> [RenderUnit] {
         var output: [RenderUnit] = []
         var textFlow: [ReadBoardMarkdownBlock] = []
-        for block in blocks {
-            if isTextFlow(block) {
-                textFlow.append(block)
-            } else {
-                if !textFlow.isEmpty { output.append(RenderUnit(blocks: textFlow)); textFlow = [] }
-                output.append(RenderUnit(blocks: [block]))
+
+        func flushTextFlow() {
+            guard !textFlow.isEmpty else { return }
+            output.append(RenderUnit(blocks: textFlow))
+            textFlow = []
+        }
+
+        for sourceBlock in blocks {
+            for block in splitOversizedTextFlowBlock(sourceBlock) {
+                if isTextFlow(block) {
+                    let currentCharacters = textFlow.reduce(0) { $0 + textLength($1) }
+                    let nextCharacters = textLength(block)
+                    if !textFlow.isEmpty,
+                       textFlow.count >= maximumTextFlowBlocks
+                        || currentCharacters + nextCharacters > maximumTextFlowCharacters {
+                        flushTextFlow()
+                    }
+                    textFlow.append(block)
+                } else {
+                    flushTextFlow()
+                    output.append(RenderUnit(blocks: [block]))
+                }
             }
         }
-        if !textFlow.isEmpty { output.append(RenderUnit(blocks: textFlow)) }
+        flushTextFlow()
         return output
+    }
+
+    nonisolated private static func splitOversizedTextFlowBlock(
+        _ block: ReadBoardMarkdownBlock
+    ) -> [ReadBoardMarkdownBlock] {
+        guard case .paragraph(let text) = block,
+              text.count > maximumTextFlowCharacters else { return [block] }
+        return splitText(text, limit: maximumTextFlowCharacters).map {
+            .paragraph(text: $0)
+        }
+    }
+
+    /// Unicode 安全且不丢字符地拆分超长段落；优先在接近上限的空白或中文句末断开。
+    nonisolated private static func splitText(_ text: String, limit: Int) -> [String] {
+        guard text.count > limit else { return [text] }
+        var result: [String] = []
+        var start = text.startIndex
+        while text.distance(from: start, to: text.endIndex) > limit {
+            let hardEnd = text.index(start, offsetBy: limit)
+            let searchStart = text.index(hardEnd, offsetBy: -(limit / 5))
+            let preferredBreak = text[searchStart..<hardEnd].lastIndex {
+                $0.isWhitespace || "。！？.!?；;".contains($0)
+            }
+            let end = preferredBreak.map { text.index(after: $0) } ?? hardEnd
+            result.append(String(text[start..<end]))
+            start = end
+        }
+        if start < text.endIndex { result.append(String(text[start...])) }
+        return result
+    }
+
+    nonisolated private static func textLength(_ block: ReadBoardMarkdownBlock) -> Int {
+        switch block {
+        case .heading(_, let text), .paragraph(let text), .quote(let text),
+             .frontmatter(let text):
+            text.count
+        case .listItem(_, _, let text):
+            text.count
+        case .codeBlock(_, let code):
+            code.count
+        case .image(let alt, let url):
+            alt.count + url.count
+        case .divider:
+            0
+        }
     }
 
     nonisolated private static func isTextFlow(_ block: ReadBoardMarkdownBlock) -> Bool {

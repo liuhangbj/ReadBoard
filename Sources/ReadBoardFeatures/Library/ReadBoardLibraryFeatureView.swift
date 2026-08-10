@@ -94,7 +94,11 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
         } message: {
             Text(model.operationErrorMessage ?? "请稍后重试")
         }
-        .overlay(alignment: .bottom) { operationToast }
+        // 阅读器内的处理状态由详情页放在操作按钮右侧；未选择文章时才使用
+        // 资料库级提示，避免“全文提取完成”落到长文章最底部。
+        .overlay(alignment: .topTrailing) {
+            if model.selectedItem == nil { operationToast }
+        }
     }
     #endif
 

@@ -58,6 +58,15 @@ final class ReadBoardUITests: XCTestCase {
         )
     }
 
+    func testVeryLongMarkdownIsSplitIntoRenderableTextUnitsWithoutTruncation() {
+        let text = String(repeating: "这是一段需要完整显示的长文章内容。", count: 4_000)
+        let counts = ReadBoardMarkdownBodyView.selectionUnitCharacterCounts(markdown: text)
+
+        XCTAssertGreaterThan(counts.count, 1)
+        XCTAssertTrue(counts.allSatisfy { $0 <= 12_000 })
+        XCTAssertEqual(counts.reduce(0, +), text.count)
+    }
+
     func testArticleDocumentOwnsModeSelectionForBothClients() {
         let summary = ContentSummary(
             id: 42, contentType: "video", source: "bilibili", sourceType: "bilibili",
