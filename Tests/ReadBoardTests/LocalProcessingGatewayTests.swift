@@ -90,6 +90,45 @@ final class LocalProcessingGatewayTests: XCTestCase {
         XCTAssertFalse(snapshot.contentChanged)
     }
 
+    func testExistingExternalFulltextReportsSuccessWithoutDowngradingFetchStatus() async throws {
+        let db = Database.shared
+        XCTAssertTrue(db.execute(
+            "UPDATE content_source SET config=? WHERE id=?",
+            params: [#"{"fetch_mode":"external_fulltext"}"#, sourceID]))
+        XCTAssertTrue(db.execute(
+            "UPDATE content SET fetch_status=2, fetch_engine='wechat_connector' WHERE id=?",
+            params: [contentID]))
+
+        let gateway = LocalProcessingGateway(database: .shared)
+        let command = ProcessingCommand(
+            requestID: "existing-external-fulltext",
+            contentID: contentID,
+            operation: .fulltext)
+        _ = try await gateway.submit(command)
+        let finished = try await waitForTerminal(command.requestID, gateway: gateway)
+
+        XCTAssertEqual(finished.state, .succeeded)
+        XCTAssertEqual(finished.message, "✅ 平台正文已就绪")
+        XCTAssertEqual(db.scalarInt(
+            "SELECT fetch_status FROM content WHERE id=?", params: [contentID]), 2)
+        XCTAssertEqual(db.scalarString(
+            "SELECT fetch_engine FROM content WHERE id=?", params: [contentID]),
+            "wechat_connector")
+    }
+
+    func testSummaryModeWithStoredBodyDoesNotReportFalseFailure() async throws {
+        let gateway = LocalProcessingGateway(database: .shared)
+        let command = ProcessingCommand(
+            requestID: "stored-summary-fulltext",
+            contentID: contentID,
+            operation: .fulltext)
+        _ = try await gateway.submit(command)
+        let finished = try await waitForTerminal(command.requestID, gateway: gateway)
+
+        XCTAssertEqual(finished.state, .succeeded)
+        XCTAssertEqual(finished.message, "✅ 摘要正文已保存")
+    }
+
     private func waitForTerminal(
         _ requestID: String,
         gateway: LocalProcessingGateway

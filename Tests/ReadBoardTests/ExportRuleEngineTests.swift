@@ -247,6 +247,84 @@ final class ExportRuleEngineTests: XCTestCase {
                                      params: [ruleId]))
     }
 
+    func testConcurrentReadyTriggersAreQueuedInsteadOfDropped() async throws {
+        let token = UUID().uuidString
+        let contentIds: [Int64] = [9_719_001, 9_719_002]
+        for contentId in contentIds {
+            db.execute("DELETE FROM content WHERE id=?", params: [contentId])
+            XCTAssertTrue(db.execute("""
+                INSERT INTO content (id, ctype, guid, source, title, url, content_md)
+                VALUES (?, 'article', ?, 'rss', ?, ?, '# 正文')
+                """, params: [contentId, "queued-ready-\(token)-\(contentId)",
+                                "Queued Ready \(token) \(contentId)",
+                                "https://test.invalid/queued-ready/\(contentId)"]))
+        }
+
+        let platform = ExportPlatformConfig.shared
+        let oldEnabled = platform.isEnabled("webhook")
+        let oldURL = platform.webhookURL
+        platform.setEnabled("webhook", true)
+        platform.webhookURL = "https://webhook.test.invalid/queued-ready"
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [WebhookURLProtocolStub.self]
+        let session = URLSession(configuration: configuration)
+        service.setWebhookSessionForTesting(session)
+        let firstEntered = DispatchSemaphore(value: 0)
+        let releaseFirst = DispatchSemaphore(value: 0)
+        WebhookURLProtocolStub.handler = { request in
+            if let body = requestBodyData(request),
+               let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+               let content = json["content"] as? [String: Any],
+               (content["id"] as? NSNumber)?.int64Value == contentIds[0] {
+                firstEntered.signal()
+                _ = releaseFirst.wait(timeout: .now() + 5)
+            }
+            let response = try XCTUnwrap(HTTPURLResponse(
+                url: try XCTUnwrap(request.url), statusCode: 204,
+                httpVersion: "HTTP/1.1", headerFields: nil))
+            return (response, Data())
+        }
+
+        var rule = makeRule(name: "queued-ready")
+        rule.triggerOn = "ready"
+        rule.target = "webhook"
+        rule.criteria.keywords = [token]
+        let ruleId = service.saveRule(rule)
+        defer {
+            releaseFirst.signal()
+            service.deleteRule(id: ruleId)
+            for contentId in contentIds {
+                db.execute("DELETE FROM content WHERE id=?", params: [contentId])
+            }
+            WebhookURLProtocolStub.handler = nil
+            service.setWebhookSessionForTesting(nil)
+            session.invalidateAndCancel()
+            platform.setEnabled("webhook", oldEnabled)
+            platform.webhookURL = oldURL
+        }
+
+        let exportService = service
+        let firstContentID = contentIds[0]
+        let secondContentID = contentIds[1]
+        let first = Task {
+            await exportService.runPending(trigger: "ready", contentId: firstContentID)
+        }
+        XCTAssertEqual(firstEntered.wait(timeout: .now() + 2), .success)
+        let second = Task {
+            await exportService.runPending(trigger: "ready", contentId: secondContentID)
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        releaseFirst.signal()
+        await first.value
+        await second.value
+
+        XCTAssertEqual(db.scalarInt("""
+            SELECT COUNT(DISTINCT content_id) FROM export_record
+            WHERE rule_id=? AND status='delivered'
+            """, params: [ruleId]), 2)
+    }
+
     func testRevisionCreatesNewDeliveryAndSameHashIsIdempotent() async throws {
         let contentId: Int64 = 9_720_001
         db.execute("DELETE FROM content WHERE id=?", params: [contentId])
