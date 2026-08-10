@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 
 /// 单篇手动内容处理的界面状态。状态按 content id 存在共享 Store 中，
-/// ReadingView 因切换文章被重建后仍能恢复“处理中/处理结果”，不会退回空白。
+/// 共享阅读页因切换文章被重建后仍能恢复“处理中/处理结果”，不会退回空白。
 @MainActor
 final class ContentProcessingStateStore: ObservableObject {
     struct Entry: Identifiable, Equatable, Sendable {

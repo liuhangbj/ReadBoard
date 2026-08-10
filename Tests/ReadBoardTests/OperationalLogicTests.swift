@@ -1,5 +1,6 @@
 import XCTest
 @testable import ReadBoard
+import ReadBoardFeatures
 
 final class FailedJobServiceTests: XCTestCase {
     func testRecentFailuresOnlyShowsLatestStatePerContentAndType() throws {
@@ -263,13 +264,13 @@ final class IssueCenterStoreTests: XCTestCase {
             """, params: [sourceId, "https://test.invalid/stale-\(sourceId)"]))
         SourceStore.shared.reload()
 
-        let store = IssueCenterStore()
+        let store = ReadBoardIssueCenterModel(environment: ReadBoardServices.live.featureEnvironment)
         await store.refresh()
 
         XCTAssertEqual(store.status, .needsAttention)
         XCTAssertTrue(store.issues.contains {
-            $0.id == "sources.rss.stale" && $0.category == .sources
-                && $0.action == .sourceFailures
+            $0.id == "sources.rss" && $0.category == .sources
+                && $0.action == .openSources
         })
     }
 }

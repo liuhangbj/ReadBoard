@@ -62,7 +62,7 @@ public enum ContentSort: String, Codable, CaseIterable, Sendable {
     case score
 }
 
-public enum ProcessingKind: String, Codable, CaseIterable, Sendable {
+public enum ProcessingKind: String, Codable, CaseIterable, Hashable, Sendable {
     case fulltext
     case score
     case summary
@@ -70,12 +70,12 @@ public enum ProcessingKind: String, Codable, CaseIterable, Sendable {
     case transcribe
 }
 
-public enum ProcessingMatch: String, Codable, CaseIterable, Sendable {
+public enum ProcessingMatch: String, Codable, CaseIterable, Hashable, Sendable {
     case complete
     case incomplete
 }
 
-public struct ProcessingCriterion: Codable, Equatable, Sendable {
+public struct ProcessingCriterion: Codable, Equatable, Hashable, Sendable {
     public let kind: ProcessingKind
     public let match: ProcessingMatch
 
@@ -192,6 +192,21 @@ public struct ContentSummary: Identifiable, Codable, Equatable, Sendable {
         self.hasExport = hasExport
         self.hasUnmetProcessing = hasUnmetProcessing
         self.accessState = accessState
+    }
+}
+
+public extension ContentSummary {
+    func replacingState(isRead: Bool, isStarred: Bool) -> ContentSummary {
+        ContentSummary(
+            id: id, contentType: contentType, source: source, sourceType: sourceType,
+            sourceID: sourceID, sourceName: sourceName, title: title, author: author,
+            url: url, language: language, publishedAt: publishedAt, excerpt: excerpt,
+            score: score, summary: summary, fetchStatus: fetchStatus, isRead: isRead,
+            isStarred: isStarred, imageURL: imageURL, hasTranslation: hasTranslation,
+            hasTranscript: hasTranscript, isMedia: isMedia, translatedHead: translatedHead,
+            translatedTitle: translatedTitle, hasFulltext: hasFulltext,
+            hasExport: hasExport, hasUnmetProcessing: hasUnmetProcessing,
+            accessState: accessState)
     }
 }
 

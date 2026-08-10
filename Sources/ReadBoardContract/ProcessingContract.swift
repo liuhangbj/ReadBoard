@@ -71,6 +71,17 @@ public struct ProcessingCommandSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public struct ProcessingActivity: Identifiable, Codable, Equatable, Sendable {
+    public var id: String { snapshot.requestID }
+    public let snapshot: ProcessingCommandSnapshot
+    public let title: String
+
+    public init(snapshot: ProcessingCommandSnapshot, title: String) {
+        self.snapshot = snapshot
+        self.title = title
+    }
+}
+
 public struct ProcessingCapabilities: Codable, Equatable, Sendable {
     public let llmAvailable: Bool
     public let transcriptionAvailable: Bool
@@ -109,4 +120,9 @@ public protocol ProcessingGateway: Sendable {
     func capabilities() async -> ProcessingCapabilities
     func submit(_ command: ProcessingCommand) async throws -> ProcessingCommandSnapshot
     func status(requestID: String) async throws -> ProcessingCommandSnapshot
+    func recent(limit: Int) async -> [ProcessingActivity]
+}
+
+public extension ProcessingGateway {
+    func recent(limit: Int) async -> [ProcessingActivity] { [] }
 }

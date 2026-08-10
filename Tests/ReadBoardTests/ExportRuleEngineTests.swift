@@ -52,7 +52,7 @@ final class ExportRuleEngineTests: XCTestCase {
     }
 
     func testV24SchemaAndRuleOptionsRoundTrip() throws {
-        XCTAssertEqual(db.scalarInt("PRAGMA user_version;"), 31)
+        XCTAssertEqual(db.scalarInt("PRAGMA user_version;"), 32)
         let ruleColumns = Set(db.queryRows("PRAGMA table_info(export_rule);").compactMap { $0["name"] })
         for column in ["revision", "artifact", "missing_policy", "output_format",
                        "subfolder_template", "filename_template", "write_policy",

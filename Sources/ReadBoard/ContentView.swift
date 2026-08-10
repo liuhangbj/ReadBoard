@@ -2,6 +2,7 @@ import SwiftUI
 import WebKit
 import QuartzCore
 import ReadBoardContract
+import ReadBoardFeatures
 
 public struct ContentView: View {
     private let services: ReadBoardServices
@@ -9,7 +10,7 @@ public struct ContentView: View {
     @StateObject private var sourceCatalog: SourceCatalogStore
     @EnvironmentObject private var appTab: AppTab
     @Environment(\.openSettings) private var openSettings
-    @StateObject private var issueCenter: IssueCenterStore
+    @State private var issueCenter: ReadBoardIssueCenterModel
     @State private var showIssueCenter = false
     @FocusState private var listFocused: Bool
     @FocusState private var searchFocused: Bool
@@ -27,12 +28,8 @@ public struct ContentView: View {
         _vm = StateObject(wrappedValue: ContentViewModel(library: services.library))
         _sourceCatalog = StateObject(
             wrappedValue: SourceCatalogStore(gateway: services.sourceCatalog))
-        _issueCenter = StateObject(wrappedValue: IssueCenterStore(
-            sourceCatalog: services.sourceCatalog,
-            runtimeStatus: services.runtimeStatus,
-            administration: services.administration,
-            authentication: services.authentication,
-            configuration: services.configuration))
+        _issueCenter = State(initialValue: ReadBoardIssueCenterModel(
+            environment: services.featureEnvironment))
     }
 
     public var body: some View {
@@ -70,17 +67,15 @@ public struct ContentView: View {
             ShortcutHelpView()
         }
         .sheet(isPresented: $showIssueCenter) {
-            IssueCenterView(
-                store: issueCenter,
-                sourceCatalog: services.sourceCatalog,
-                sourceManagement: services.sourceManagement,
-                runtimeStatus: services.runtimeStatus,
-                administration: services.administration,
-                onOpenSettings: { route in
+            ReadBoardIssueCenterView(environment: services.featureEnvironment) { action in
+                switch action {
+                case .openSources: appTab.selection = 1
+                case .openOperations: appTab.selection = 3
+                case .openSettings(let route):
                     SettingsNavigationStore.shared.request(route)
                     openSettings()
-                },
-                onOpenDashboard: { appTab.selection = 3 })
+                }
+            }
         }
         .task {
             while !Task.isCancelled {

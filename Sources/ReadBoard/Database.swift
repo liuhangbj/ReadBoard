@@ -973,7 +973,7 @@ public final class Database: @unchecked Sendable {
         return result
     }
 
-    /// LLM 轻量字段（score/summary）——ReadingView 完成后刷新镜像用。
+    /// LLM 轻量字段（score/summary）——共享阅读页处理完成后刷新镜像用。
     /// （selectedItem 实例刻意不替换，item 里的这两字段会陈旧；单独小查询避免动 fetchContentBody 的元组签名。）
     func fetchLLMExtras(id: Int64) -> (score: Int?, summary: String?)? {
         guard open() else { return nil }

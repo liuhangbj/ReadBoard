@@ -1,15 +1,38 @@
 import Foundation
 import ReadBoardContract
 
+public enum RemoteRequestFailureKind: String, Sendable {
+    case transport
+    case authorization
+    case version
+    case server
+    case decoding
+    case unknown
+}
+
+public enum RemoteRequestEvent: Sendable {
+    case succeeded(path: String)
+    case failed(path: String, kind: RemoteRequestFailureKind, message: String)
+}
+
 public struct ReadBoardHTTPClient: Sendable {
     public let baseURL: URL
     private let bearerToken: String
     private let session: URLSession
+    private let eventHandler: @Sendable (RemoteRequestEvent) -> Void
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    public init(baseURL: URL, bearerToken: String, session: URLSession = .shared) {
-        self.baseURL = baseURL; self.bearerToken = bearerToken; self.session = session
+    public init(
+        baseURL: URL,
+        bearerToken: String,
+        session: URLSession = .shared,
+        eventHandler: @escaping @Sendable (RemoteRequestEvent) -> Void = { _ in }
+    ) {
+        self.baseURL = baseURL
+        self.bearerToken = bearerToken
+        self.session = session
+        self.eventHandler = eventHandler
         encoder.dateEncodingStrategy = .millisecondsSince1970
         decoder.dateDecodingStrategy = .millisecondsSince1970
     }
@@ -30,24 +53,56 @@ public struct ReadBoardHTTPClient: Sendable {
 
     private func send<Response: Decodable>(method: String, path: String, body: Data?,
                                             as type: Response.Type) async throws -> Response {
-        guard let url = URL(string: path, relativeTo: baseURL) else { throw RemoteClientError.invalidURL }
-        var request = URLRequest(url: url)
-        request.httpMethod = method; request.httpBody = body; request.timeoutInterval = 20
-        request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(ReadBoardRemoteAPI.version,
-                         forHTTPHeaderField: ReadBoardRemoteAPI.versionHeader)
-        if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw RemoteClientError.invalidResponse }
-        guard http.value(forHTTPHeaderField: ReadBoardRemoteAPI.versionHeader)
-                == ReadBoardRemoteAPI.version else {
-            throw RemoteClientError.versionMismatch
+        do {
+            guard let url = URL(string: path, relativeTo: baseURL) else {
+                throw RemoteClientError.invalidURL
+            }
+            var request = URLRequest(url: url)
+            request.httpMethod = method; request.httpBody = body; request.timeoutInterval = 20
+            request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+            request.setValue(ReadBoardRemoteAPI.version,
+                             forHTTPHeaderField: ReadBoardRemoteAPI.versionHeader)
+            if body != nil {
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            }
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw RemoteClientError.invalidResponse
+            }
+            guard http.value(forHTTPHeaderField: ReadBoardRemoteAPI.versionHeader)
+                    == ReadBoardRemoteAPI.version else {
+                throw RemoteClientError.versionMismatch
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                let value = try? decoder.decode(RemoteErrorBody.self, from: data)
+                throw RemoteClientError.server(
+                    status: http.statusCode,
+                    message: value?.message ?? "服务请求失败")
+            }
+            let decoded = try decoder.decode(type, from: data)
+            eventHandler(.succeeded(path: path))
+            return decoded
+        } catch {
+            eventHandler(.failed(
+                path: path,
+                kind: failureKind(for: error),
+                message: error.localizedDescription))
+            throw error
         }
-        guard (200..<300).contains(http.statusCode) else {
-            let value = try? decoder.decode(RemoteErrorBody.self, from: data)
-            throw RemoteClientError.server(status: http.statusCode, message: value?.message ?? "服务请求失败")
+    }
+
+    private func failureKind(for error: Error) -> RemoteRequestFailureKind {
+        if let remote = error as? RemoteClientError {
+            switch remote {
+            case .versionMismatch: return .version
+            case .server(let status, _):
+                return status == 401 || status == 403 ? .authorization : .server
+            case .invalidURL, .invalidResponse: return .transport
+            }
         }
-        return try decoder.decode(type, from: data)
+        if error is URLError { return .transport }
+        if error is DecodingError { return .decoding }
+        return .unknown
     }
 }
 

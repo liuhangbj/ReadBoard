@@ -134,6 +134,8 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(RemoteServerProfile(apiVersion: ReadBoardAPI.version,
                     serverName: name, capabilities: services.remoteCapabilities,
                     grantedScopes: grantedScopes, transportSecurity: "tls"))
+            case ("GET", "/api/v1/revisions"):
+                return json(try await services.dataRevision.snapshot())
             case ("POST", "/api/v1/library/page"):
                 return json(try await services.library.page(try decode(ContentQuery.self, request.body)))
             case ("GET", "/api/v1/library/snapshot"):
@@ -149,6 +151,9 @@ public struct ReadBoardHTTPRouter: Sendable {
             case ("POST", "/api/v1/content/detail"):
                 let value = try decode(RemoteContentIDRequest.self, request.body)
                 return json(try await services.contentDetail.detail(contentID: value.contentID))
+            case ("POST", "/api/v1/media/youtube/stream"):
+                let value = try decode(MediaPlaybackRequest.self, request.body)
+                return json(try await services.mediaPlayback.youtubeStream(videoID: value.videoID))
 
             case ("GET", "/api/v1/processing/capabilities"):
                 return json(await services.processing.capabilities())
@@ -165,6 +170,9 @@ public struct ReadBoardHTTPRouter: Sendable {
             case ("POST", "/api/v1/processing/status"):
                 let value = try decode(RemoteProcessingStatusRequest.self, request.body)
                 return json(try await services.processing.status(requestID: value.requestID))
+            case ("POST", "/api/v1/processing/recent"):
+                let value = try decode(RemoteLimitRequest.self, request.body)
+                return json(await services.processing.recent(limit: value.limit))
 
             case ("GET", "/api/v1/sources/sync-settings"):
                 return json(await services.sourceManagement.syncSettings())
@@ -198,8 +206,23 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(RemoteAcknowledgement())
             case ("POST", "/api/v1/sources/backfill"):
                 let value = try decode(RemoteSourceBackfillRequest.self, request.body)
-                return json(try await services.sourceManagement.backfillProcessing(
-                    scope: value.scope, key: value.key))
+                return json(try await services.sourceManagement.submitBackfillProcessing(
+                    scope: value.scope, key: value.key), status: 202)
+            case ("POST", "/api/v1/sources/jobs/status"):
+                let value = try decode(RemoteSourceOperationRequest.self, request.body)
+                return json(try await services.sourceManagement.sourceOperationStatus(id: value.id))
+            case ("POST", "/api/v1/sources/jobs/cancel"):
+                let value = try decode(RemoteSourceOperationRequest.self, request.body)
+                await services.sourceManagement.cancelSourceOperation(id: value.id)
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/sources/jobs/sync"):
+                let value = try decode(RemoteSourceSyncJobRequest.self, request.body)
+                return json(try await services.sourceManagement.submitSourceSync(
+                    scope: value.scope), status: 202)
+            case ("POST", "/api/v1/sources/jobs/fulltext"):
+                let value = try decode(RemoteSourceRefetchRequest.self, request.body)
+                return json(try await services.sourceManagement.submitFulltextRefetch(
+                    scope: value.scope, fullHistory: value.fullHistory), status: 202)
             case ("POST", "/api/v1/sources/fetch-mode"):
                 let value = try decode(RemoteSourceFetchModeRequest.self, request.body)
                 try await services.sourceManagement.setFetchMode(scope: value.scope, mode: value.mode)
@@ -371,6 +394,25 @@ public struct ReadBoardHTTPRouter: Sendable {
                     try decode(AIPromptConfiguration.self, request.body))
                 return json(RemoteAcknowledgement())
 
+            case ("GET", "/api/v1/dependencies"):
+                guard let gateway = services.dependencyManagement else {
+                    return failure(501, "capability_unavailable", "服务端未启用依赖任务管理")
+                }
+                return json(await gateway.snapshot())
+            case ("POST", "/api/v1/dependencies/submit"):
+                guard let gateway = services.dependencyManagement else {
+                    return failure(501, "capability_unavailable", "服务端未启用依赖任务管理")
+                }
+                return json(try await gateway.submit(
+                    try decode(DependencyTaskRequest.self, request.body)), status: 202)
+            case ("POST", "/api/v1/dependencies/cancel"):
+                guard let gateway = services.dependencyManagement else {
+                    return failure(501, "capability_unavailable", "服务端未启用依赖任务管理")
+                }
+                let value = try decode(RemoteStringIDRequest.self, request.body)
+                await gateway.cancel(taskID: value.id)
+                return json(RemoteAcknowledgement())
+
             case ("GET", "/api/v1/maintenance"):
                 return json(await services.maintenance.snapshot())
             case ("POST", "/api/v1/maintenance/policy"):
@@ -407,10 +449,12 @@ public struct ReadBoardHTTPRouter: Sendable {
     private func requiredScope(for request: ReadBoardHTTPRequest) -> RemoteAccessScope? {
         let path = request.path
         if path == "/api/v1/server/profile" { return nil }
+        if path == "/api/v1/revisions" { return .readLibrary }
         if path.hasPrefix("/api/v1/library/") || path.hasPrefix("/api/v1/content/") {
             return ["/api/v1/library/read", "/api/v1/library/star", "/api/v1/library/mark-read"]
                 .contains(path) ? .updateReadingState : .readLibrary
         }
+        if path.hasPrefix("/api/v1/media/") { return .readLibrary }
         if path.hasPrefix("/api/v1/processing/") {
             return path == "/api/v1/processing/capabilities" ? .manageOperations : .runProcessing
         }
@@ -423,6 +467,7 @@ public struct ReadBoardHTTPRouter: Sendable {
         if path.hasPrefix("/api/v1/auth/") { return .manageAuthentication }
         if path.hasPrefix("/api/v1/exports/") { return .manageExports }
         if path.hasPrefix("/api/v1/configuration") { return .manageConfiguration }
+        if path.hasPrefix("/api/v1/dependencies") { return .manageConfiguration }
         if path.hasPrefix("/api/v1/maintenance") { return .manageMaintenance }
         return nil
     }
@@ -465,7 +510,10 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
     private let bonjourServiceName: String
     private let bonjourTXTRecord: NWTXTRecord
     private let stateHandler: @Sendable (ReadBoardHTTPServerState) -> Void
-    private let queue = DispatchQueue(label: "readboard.http.server", qos: .utility)
+    // TLS handshakes and HTTP reads must not share one serial lane: a slow or
+    // abandoned client would otherwise prevent every other device from connecting.
+    private let queue = DispatchQueue(
+        label: "readboard.http.server", qos: .utility, attributes: .concurrent)
     private var listener: NWListener?
     private let lock = NSLock()
 
@@ -495,6 +543,15 @@ public final class ReadBoardHTTPServer: @unchecked Sendable {
         let tlsOptions = NWProtocolTLS.Options()
         sec_protocol_options_set_local_identity(
             tlsOptions.securityProtocolOptions, tlsIdentity.identity)
+        // Persisted identities are RSA certificates imported into a process-local
+        // keychain.  TLS 1.3 asks the legacy keychain provider for RSA-PSS and can
+        // leave the handshake waiting forever with CSSMERR_CSP_INVALID_KEYATTR_MASK.
+        // TLS 1.2 keeps the same certificate/fingerprint and uses the verified
+        // PKCS#1 signing path, so existing Go clients remain paired without prompts.
+        sec_protocol_options_set_min_tls_protocol_version(
+            tlsOptions.securityProtocolOptions, .TLSv12)
+        sec_protocol_options_set_max_tls_protocol_version(
+            tlsOptions.securityProtocolOptions, .TLSv12)
         let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
         let host: NWEndpoint.Host = allowLAN ? "0.0.0.0" : "127.0.0.1"
         parameters.requiredLocalEndpoint = .hostPort(host: host, port: port)

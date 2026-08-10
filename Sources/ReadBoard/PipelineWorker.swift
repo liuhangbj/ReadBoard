@@ -330,7 +330,7 @@ public final class PipelineWorker: ObservableObject {
             var total = BatchResult()
             for await result in group {
                 total.merge(result)
-                // 单篇产生有效结果后立即唤醒中栏/待处理视图。ContentViewModel 已有
+                // 单篇产生有效结果后立即唤醒共享资料库与待处理视图。
                 // 0.75 秒防抖，会把并发完成的通知合并，避免逐条重绘风暴。
                 if result.succeededContents > 0 {
                     NotificationCenter.default.post(name: .contentUpdated, object: nil)

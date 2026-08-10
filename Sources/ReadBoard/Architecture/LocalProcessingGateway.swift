@@ -85,6 +85,10 @@ private actor LocalProcessingCommandStore {
         return snapshot
     }
 
+    func recent(limit: Int) -> [ProcessingCommandSnapshot] {
+        insertionOrder.reversed().prefix(max(0, min(limit, 100))).compactMap { snapshots[$0] }
+    }
+
     private func prune() {
         guard insertionOrder.count > 256 else { return }
         let removable = insertionOrder.filter { snapshots[$0]?.state.isTerminal == true }
@@ -172,6 +176,17 @@ public final class LocalProcessingGateway: ProcessingGateway, @unchecked Sendabl
 
     public func status(requestID: String) async throws -> ProcessingCommandSnapshot {
         try await commands.snapshot(requestID: requestID)
+    }
+
+    public func recent(limit: Int) async -> [ProcessingActivity] {
+        let snapshots = await commands.recent(limit: limit)
+        guard db.open(), !snapshots.isEmpty else { return [] }
+        return snapshots.map { snapshot in
+            let title = db.queryRows(
+                "SELECT title FROM content WHERE id = ? LIMIT 1;",
+                params: [snapshot.contentID]).first?["title"] ?? "内容 #\(snapshot.contentID)"
+            return ProcessingActivity(snapshot: snapshot, title: title)
+        }
     }
 
     private func runLocked(_ command: ProcessingCommand) async {

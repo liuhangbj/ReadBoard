@@ -7,6 +7,8 @@ let package = Package(
     products: [
         .library(name: "ReadBoardContract", targets: ["ReadBoardContract"]),
         .library(name: "ReadBoardRemote", targets: ["ReadBoardRemote"]),
+        .library(name: "ReadBoardUI", targets: ["ReadBoardUI"]),
+        .library(name: "ReadBoardFeatures", targets: ["ReadBoardFeatures"]),
         .library(name: "ReadBoardCore", targets: ["ReadBoard"]),
         .executable(name: "ReadBoardMain", targets: ["ReadBoardMain"])
     ],
@@ -21,8 +23,18 @@ let package = Package(
             path: "Sources/ReadBoardRemote"
         ),
         .target(
-            name: "ReadBoard",
+            name: "ReadBoardUI",
             dependencies: ["ReadBoardContract"],
+            path: "Sources/ReadBoardUI"
+        ),
+        .target(
+            name: "ReadBoardFeatures",
+            dependencies: ["ReadBoardContract", "ReadBoardUI"],
+            path: "Sources/ReadBoardFeatures"
+        ),
+        .target(
+            name: "ReadBoard",
+            dependencies: ["ReadBoardContract", "ReadBoardUI", "ReadBoardFeatures"],
             path: "Sources/ReadBoard",
             resources: [
                 .copy("Resources/migrations"),
@@ -36,13 +48,23 @@ let package = Package(
         ),
         .testTarget(
             name: "ReadBoardTests",
-            dependencies: ["ReadBoard", "ReadBoardContract"],
+            dependencies: ["ReadBoard", "ReadBoardContract", "ReadBoardFeatures"],
             path: "Tests/ReadBoardTests"
         ),
         .testTarget(
             name: "ReadBoardContractTests",
             dependencies: ["ReadBoardContract"],
             path: "Tests/ReadBoardContractTests"
+        ),
+        .testTarget(
+            name: "ReadBoardUITests",
+            dependencies: ["ReadBoardUI", "ReadBoardContract"],
+            path: "Tests/ReadBoardUITests"
+        ),
+        .testTarget(
+            name: "ReadBoardFeaturesTests",
+            dependencies: ["ReadBoardFeatures", "ReadBoardContract"],
+            path: "Tests/ReadBoardFeaturesTests"
         )
     ]
 )

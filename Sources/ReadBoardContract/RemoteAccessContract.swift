@@ -15,16 +15,37 @@ public enum RemoteAccessScope: String, Codable, CaseIterable, Hashable, Sendable
         [.readLibrary, .updateReadingState]
     }
 
+    /// 日常远程操作员。可以刷新源、启动内容处理、处理授权和导出，
+    /// 但不能修改全局配置、依赖、备份或其他主机维护设置。
+    public static var operatorAccess: [RemoteAccessScope] {
+        [
+            .readLibrary,
+            .updateReadingState,
+            .manageOperations,
+            .runProcessing,
+            .manageSources,
+            .manageAuthentication,
+            .manageExports,
+        ]
+    }
+
+    public static var administrator: [RemoteAccessScope] { allCases }
+
     public static var fullControl: [RemoteAccessScope] { allCases }
 }
 
 public enum RemoteAccessPreset: String, Codable, CaseIterable, Sendable {
     case reader
+    case operatorAccess
+    case administrator
+    /// 兼容已经保存的旧版预设值；新界面不再使用它。
     case fullControl
 
     public var scopes: [RemoteAccessScope] {
         switch self {
         case .reader: RemoteAccessScope.reader
+        case .operatorAccess: RemoteAccessScope.operatorAccess
+        case .administrator: RemoteAccessScope.administrator
         case .fullControl: RemoteAccessScope.fullControl
         }
     }
@@ -32,6 +53,7 @@ public enum RemoteAccessPreset: String, Codable, CaseIterable, Sendable {
 
 public enum RemoteServiceCapability: String, Codable, CaseIterable, Hashable, Sendable {
     case library
+    case mediaPlayback
     case processing
     case sourceManagement
     case sourceOnboarding
@@ -39,7 +61,34 @@ public enum RemoteServiceCapability: String, Codable, CaseIterable, Hashable, Se
     case export
     case administration
     case configuration
+    case dependencyManagement
     case maintenance
+}
+
+/// 客户端可见功能的唯一权限快照。
+/// capability 表示服务端实现了什么，scope 表示当前设备获准做什么；两者必须同时满足。
+public struct ReadBoardPermissionSet: Equatable, Sendable {
+    public let capabilities: Set<RemoteServiceCapability>
+    public let scopes: Set<RemoteAccessScope>
+
+    public init(
+        capabilities: some Sequence<RemoteServiceCapability>,
+        scopes: some Sequence<RemoteAccessScope>
+    ) {
+        self.capabilities = Set(capabilities)
+        self.scopes = Set(scopes)
+    }
+
+    public func allows(
+        _ scope: RemoteAccessScope,
+        capability: RemoteServiceCapability? = nil
+    ) -> Bool {
+        scopes.contains(scope) && capability.map(capabilities.contains) != false
+    }
+
+    public static let localFullControl = ReadBoardPermissionSet(
+        capabilities: RemoteServiceCapability.allCases,
+        scopes: RemoteAccessScope.fullControl)
 }
 
 public struct RemoteServerProfile: Codable, Equatable, Sendable {

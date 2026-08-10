@@ -1,3 +1,4 @@
+import ReadBoardUI
 import SwiftUI
 
 // MARK: - Markdown 渲染器（阅读器正文）
@@ -31,93 +32,36 @@ struct MarkdownRenderer {
 
     /// 把 markdown 文本解析成块序列
     static func parse(_ md: String) -> [MdBlock] {
-        let t0 = Date()
-        let inLen = md.count
-        if inLen > 200_000 {
-            Trace.w("parse 输入异常大：\(inLen) 字符（约 \(inLen/1024)KB）可能拖垮渲染", category: "md")
+        let start = Date()
+        let inputLength = md.count
+        if inputLength > 200_000 {
+            Trace.w(
+                "parse 输入异常大：\(inputLength) 字符（约 \(inputLength / 1024)KB）可能拖垮渲染",
+                category: "md")
         }
-        var blocks: [MdBlock] = []
-        var lines = md.components(separatedBy: "\n")
-
-        // ── 剥离开头抓取元数据区（frontmatter）──
-        // defuddle 抓取的正文开头带元数据，三种混在一起的形式：
-        //   1. 「Cleaned URL: ... / Xxx detected, pre-processing...」调试日志行（可无）
-        //   2. --- 到 --- 包裹的 YAML（title/author/published/domain/url/word_count 等）
-        //   3. 之后残留的一行时间戳（如 2026-07-25 15:07）
-        // 之前只处理「开头即 ---」，但 Cleaned URL 调试行在 --- 前就没匹配上，
-        // 整段元数据全露出来。改为扫描开头，定位 --- 块，连同前面的调试行和后面的
-        // 时间戳一并剥成 .frontmatter，正文从 ## 标题开始。
-        lines = stripLeadingFrontmatter(lines: lines, into: &blocks)
-
-        var i = 0
-        var paraBuf: [String] = []        // 段落累积（连续非空行）
-        var inCode = false
-        var codeLang: String? = nil
-        var codeBuf: [String] = []
-
-        func flushPara() {
-            let text = paraBuf.joined(separator: " ").trimmingCharacters(in: .whitespaces)
-            if !text.isEmpty { blocks.append(.paragraph(text: text)) }
-            paraBuf = []
+        let blocks = ReadBoardMarkdownParser.parse(md).map { block -> MdBlock in
+            switch block {
+            case .heading(let level, let text):
+                .heading(level: level, text: text)
+            case .paragraph(let text):
+                .paragraph(text: text)
+            case .listItem(let ordered, let index, let text):
+                .listItem(ordered: ordered, index: index, text: text)
+            case .quote(let text):
+                .quote(text: text)
+            case .codeBlock(let language, let code):
+                .codeBlock(lang: language, code: code)
+            case .divider:
+                .divider
+            case .image(let alt, let url):
+                .image(alt: alt, url: url)
+            case .frontmatter(let text):
+                .frontmatter(text: text)
+            }
         }
-
-        while i < lines.count {
-            let raw = lines[i]
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            i += 1
-
-            // 代码块围栏
-            if line.hasPrefix("```") {
-                if inCode {
-                    blocks.append(.codeBlock(lang: codeLang, code: codeBuf.joined(separator: "\n")))
-                    codeBuf = []; codeLang = nil; inCode = false
-                } else {
-                    flushPara()
-                    inCode = true
-                    codeLang = line.count > 3 ? String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces) : nil
-                }
-                continue
-            }
-            if inCode { codeBuf.append(raw); continue }
-
-            // 空行：段落分隔
-            if line.isEmpty { flushPara(); continue }
-
-            // 分割线
-            if line == "---" || line == "***" || line == "___" {
-                flushPara(); blocks.append(.divider); continue
-            }
-
-            // 标题 #..######
-            if let h = parseHeading(line) {
-                flushPara(); blocks.append(h); continue
-            }
-
-            // 引用 >
-            if line.hasPrefix(">") {
-                flushPara()
-                let q = line.dropFirst().trimmingCharacters(in: .whitespaces)
-                blocks.append(.quote(text: String(q))); continue
-            }
-
-            // 图片 ![alt](url)
-            if let img = parseImage(line) {
-                flushPara(); blocks.append(img); continue
-            }
-
-            // 无序列表 -/*/+ 或有序 1.
-            if let li = parseListItem(line) {
-                flushPara(); blocks.append(li); continue
-            }
-
-            // 普通行：累积进段落
-            paraBuf.append(line)
-        }
-        flushPara()
-        if inCode, !codeBuf.isEmpty {
-            blocks.append(.codeBlock(lang: codeLang, code: codeBuf.joined(separator: "\n")))
-        }
-        Trace.perf("markdown.parse", start: t0, category: "md", extra: "输入=\(inLen) 块数=\(blocks.count) mem=\(Trace.mb())MB")
+        Trace.perf(
+            "markdown.parse", start: start, category: "md",
+            extra: "输入=\(inputLength) 块数=\(blocks.count) mem=\(Trace.mb())MB")
         return blocks
     }
 

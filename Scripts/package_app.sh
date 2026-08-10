@@ -13,6 +13,7 @@ APP_PATH="$OUTPUT_DIR/ReadBoard.app"
 ENGINE_DIR="$PROJECT_DIR/Sources/ReadBoard/Resources/engine"
 PACKAGING_DIR="$PROJECT_DIR/Packaging"
 SIGN_IDENTITY="${READBOARD_SIGN_IDENTITY:--}"
+ICON_APPEARANCE="${READBOARD_ICON_APPEARANCE:-auto}"
 
 if [ ! -d "$ENGINE_DIR/node_modules/defuddle" ]; then
     command -v npm >/dev/null 2>&1 || {
@@ -58,19 +59,46 @@ if [ -n "${READBOARD_VERSION:-}" ]; then
 fi
 ditto "$RESOURCE_PAYLOAD" "$TMP_APP/Contents/Resources"
 
-# 从源码 PNG 生成标准 icns，不把编译后的 App 或 Assets.car 提交到 Git。
-ICON_SOURCE="$PACKAGING_DIR/Assets.xcassets/AppIcon.appiconset"
-ICONSET="$TMP_ROOT/AppIcon.iconset"
-mkdir -p "$ICONSET"
-for name in \
-    icon_16x16.png icon_16x16@2x.png \
-    icon_32x32.png icon_32x32@2x.png \
-    icon_128x128.png icon_128x128@2x.png \
-    icon_256x256.png icon_256x256@2x.png \
-    icon_512x512.png icon_512x512@2x.png; do
-    cp -p "$ICON_SOURCE/$name" "$ICONSET/$name"
-done
-iconutil -c icns "$ICONSET" -o "$TMP_APP/Contents/Resources/AppIcon.icns"
+# macOS 的传统 icns 不会随系统外观自动切换，因此把两个版本都装入 App，
+# 并在打包时把当前外观对应的版本设为主图标。可用
+# READBOARD_ICON_APPEARANCE=light|dark|auto 显式控制。
+if [ "$ICON_APPEARANCE" = "auto" ]; then
+    if defaults read -g AppleInterfaceStyle 2>/dev/null | grep -q '^Dark$'; then
+        ICON_APPEARANCE="dark"
+    else
+        ICON_APPEARANCE="light"
+    fi
+fi
+case "$ICON_APPEARANCE" in
+    light) PRIMARY_ICON="AppIconLight.icns" ;;
+    dark) PRIMARY_ICON="AppIconDark.icns" ;;
+    *) echo "!! READBOARD_ICON_APPEARANCE 只能是 auto、light 或 dark" >&2; exit 1 ;;
+esac
+
+make_icns() {
+    local source="$1"
+    local output="$2"
+    local iconset="$TMP_ROOT/$(basename "$output" .icns).iconset"
+    mkdir -p "$iconset"
+    for name in \
+        icon_16x16.png icon_16x16@2x.png \
+        icon_32x32.png icon_32x32@2x.png \
+        icon_128x128.png icon_128x128@2x.png \
+        icon_256x256.png icon_256x256@2x.png \
+        icon_512x512.png icon_512x512@2x.png; do
+        [ -f "$source/$name" ] || { echo "!! 缺少图标资源：$source/$name" >&2; exit 1; }
+        cp -p "$source/$name" "$iconset/$name"
+    done
+    iconutil -c icns "$iconset" -o "$output"
+}
+
+ICON_CATALOG="$PACKAGING_DIR/Assets.xcassets"
+make_icns "$ICON_CATALOG/AppIcon.appiconset" \
+    "$TMP_APP/Contents/Resources/AppIconLight.icns"
+make_icns "$ICON_CATALOG/AppIconDark.appiconset" \
+    "$TMP_APP/Contents/Resources/AppIconDark.icns"
+cp -p "$TMP_APP/Contents/Resources/$PRIMARY_ICON" \
+    "$TMP_APP/Contents/Resources/AppIcon.icns"
 
 xattr -cr "$TMP_APP" 2>/dev/null || true
 if [ "$SIGN_IDENTITY" = "-" ]; then

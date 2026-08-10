@@ -545,7 +545,9 @@ public final class LLMPipeline: @unchecked Sendable {
                 setError("整合翻译结果无效（JSON 异常、译文为空或明显不完整）")
                 return false
             }
-            return saveTranslateFull(contentId: contentId, result: result, model: model, policy: policy)
+            return saveTranslateFull(
+                contentId: contentId, result: result, sourceMarkdown: body,
+                model: model, policy: policy)
         } catch {
             setError(Self.describeError(error))
             return false
@@ -606,12 +608,21 @@ public final class LLMPipeline: @unchecked Sendable {
     }
 
     /// 按 policy 开关条件回写：翻译/评分/摘要各自判断
-    private func saveTranslateFull(contentId: Int64, result: TranslateFullResult, model: String, policy: PipelinePolicy) -> Bool {
+    private func saveTranslateFull(
+        contentId: Int64,
+        result: TranslateFullResult,
+        sourceMarkdown: String,
+        model: String,
+        policy: PipelinePolicy
+    ) -> Bool {
         var allOK = true
         if policy.autoTranslate {
+            let translation = MarkdownImageReconciler.reconcile(
+                translation: result.translation,
+                source: sourceMarkdown) ?? result.translation
             let ok = db.execute(
                 "UPDATE content SET llm_translated_md = ?, llm_title_translated = ?, llm_model = ?, llm_processed_at = datetime('now') WHERE id = ?",
-                params: [result.translation, result.title.isEmpty ? nil : result.title, model, contentId])
+                params: [translation, result.title.isEmpty ? nil : result.title, model, contentId])
             if !ok { setError("译文写库失败"); allOK = false }
         }
         if policy.autoScore {
@@ -680,10 +691,12 @@ public final class LLMPipeline: @unchecked Sendable {
                 return false
             }
         }
-        guard let final = translated, !final.isEmpty else {
+        guard let rawFinal = translated, !rawFinal.isEmpty else {
             if lastError == nil { setError("翻译结果为空") }
             return false
         }
+        let final = MarkdownImageReconciler.reconcile(
+            translation: rawFinal, source: body) ?? rawFinal
         guard !Task.isCancelled else { setError("任务已取消"); return false }
         // 提取译文第一行作为标题译文（llm_title_translated），供阅读栏中文标题展示。
         // prompt 明确要求「标题也一并翻译，放在第一行」，首行即为译文标题。

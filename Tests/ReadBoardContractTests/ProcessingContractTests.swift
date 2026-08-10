@@ -2,6 +2,20 @@ import XCTest
 @testable import ReadBoardContract
 
 final class ProcessingContractTests: XCTestCase {
+    func testProcessingActivityRoundTrip() throws {
+        let snapshot = ProcessingCommandSnapshot(
+            requestID: "request",
+            contentID: 42,
+            operation: .translate,
+            state: .running,
+            message: "翻译中",
+            contentChanged: false,
+            updatedAt: 1)
+        let value = ProcessingActivity(snapshot: snapshot, title: "Article")
+        let data = try JSONEncoder().encode(value)
+        XCTAssertEqual(try JSONDecoder().decode(ProcessingActivity.self, from: data), value)
+    }
+
     func testCommandAndSnapshotRoundTripWithStableRequestID() throws {
         let command = ProcessingCommand(
             requestID: "request-1", contentID: 42, operation: .transcribe)

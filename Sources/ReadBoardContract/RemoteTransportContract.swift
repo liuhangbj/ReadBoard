@@ -88,6 +88,16 @@ public struct RemoteSourceBackfillRequest: Codable, Equatable, Sendable {
     public init(scope: SourceScope, key: SourcePolicyKey?) { self.scope = scope; self.key = key }
 }
 
+public struct RemoteSourceOperationRequest: Codable, Equatable, Sendable {
+    public let id: String
+    public init(id: String) { self.id = id }
+}
+
+public struct RemoteSourceSyncJobRequest: Codable, Equatable, Sendable {
+    public let scope: SourceScope?
+    public init(scope: SourceScope?) { self.scope = scope }
+}
+
 public struct RemoteSourceFetchModeRequest: Codable, Equatable, Sendable {
     public let scope: SourceScope
     public let mode: SourceFetchMode
