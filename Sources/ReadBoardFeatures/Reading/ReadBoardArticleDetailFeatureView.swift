@@ -52,17 +52,25 @@ public struct ReadBoardArticleDetailFeatureView: View {
         VStack(spacing: 0) {
             actionBar
             ReadBoardHairline()
-            ScrollView {
-                VStack(alignment: .leading, spacing: ReadBoardDesign.Space.xl) {
-                    articleHeader
-                    processingActions
-                    mediaPlayer
-                    detailContent
+            GeometryReader { geometry in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: ReadBoardDesign.Space.xl) {
+                        articleHeader
+                        processingActions
+                        mediaPlayer
+                        detailContent
+                    }
+                    .frame(
+                        width: Self.resolvedContentWidth(
+                            availableWidth: geometry.size.width,
+                            preferredWidth: readingContentWidth,
+                            horizontalPadding: ReadBoardDesign.Space.xl),
+                        alignment: .leading)
+                    .padding(.vertical, ReadBoardDesign.Space.xl)
+                    // ScrollView 对窄内容的默认横向定位在 macOS 上并不稳定。
+                    // 显式占满可用宽度，确保正文列始终在阅读栏正中。
+                    .frame(width: geometry.size.width, alignment: .center)
                 }
-                .frame(maxWidth: readingContentWidth, alignment: .leading)
-                .padding(.horizontal, ReadBoardDesign.Space.xl)
-                .padding(.vertical, ReadBoardDesign.Space.xl)
-                .frame(maxWidth: .infinity)
             }
         }
         .background(readingPalette.background)
@@ -114,9 +122,39 @@ public struct ReadBoardArticleDetailFeatureView: View {
                     if isMediaDocument {
                         processingButton("AI 转录", icon: "waveform", .transcribe)
                     }
+                    if let message = model.operationStatusMessage, !message.isEmpty {
+                        Divider().frame(height: 18)
+                        Image(systemName: message.contains("失败")
+                            ? "exclamationmark.circle"
+                            : "checkmark.circle")
+                            .foregroundStyle(message.contains("失败")
+                                ? ReadBoardDesign.C.scoreLow
+                                : ReadBoardDesign.C.scoreHigh)
+                        Text(message)
+                            .font(.system(size: 11))
+                            .foregroundStyle(ReadBoardDesign.C.text2)
+                            .lineLimit(1)
+                        Button { model.clearOperationStatus() } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .help("关闭状态提示")
+                    }
                 }
             }
         }
+    }
+
+    /// 把用户设置的内容宽度约束在阅读栏安全区内。返回精确宽度而不是 maxWidth，
+    /// 避免短标题或正文让整个内容列按固有宽度向右漂移。
+    nonisolated public static func resolvedContentWidth(
+        availableWidth: CGFloat,
+        preferredWidth: Double,
+        horizontalPadding: CGFloat
+    ) -> CGFloat {
+        let safeAvailableWidth = max(1, availableWidth - horizontalPadding * 2)
+        return min(max(1, CGFloat(preferredWidth)), safeAvailableWidth)
     }
 
     private func processingButton(
