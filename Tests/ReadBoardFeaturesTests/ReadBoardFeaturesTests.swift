@@ -4,6 +4,20 @@ import ReadBoardFeatures
 import XCTest
 
 final class ReadBoardFeaturesTests: XCTestCase {
+    func testReaderRootFillsTheSplitDetailBeforeCenteringContent() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/ReadBoardFeatures/Reading/ReadBoardArticleDetailFeatureView.swift"),
+            encoding: .utf8)
+
+        XCTAssertTrue(source.contains(
+            ".frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)"))
+    }
+
     func testReadingColumnUsesExactCenteredSafeWidth() {
         XCTAssertEqual(
             ReadBoardArticleDetailFeatureView.resolvedContentWidth(
