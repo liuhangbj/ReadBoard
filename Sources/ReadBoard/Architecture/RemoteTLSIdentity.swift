@@ -191,10 +191,39 @@ actor RemoteTLSIdentityStore {
             SecKeychainDelete(value)
             throw RemoteTLSIdentityError.ephemeralKeychainUnlockFailed(unlockStatus)
         }
+        // A newly created file keychain otherwise inherits an idle lock interval.
+        // Once it locks, Network.framework can wait indefinitely for an invisible
+        // unlock prompt while signing a TLS handshake.  This keychain is scoped to
+        // the current process, stores only the generated TLS identity and is deleted
+        // at shutdown, so it must remain unlocked for the lifetime of the service.
+        do {
+            try disableEphemeralKeychainAutoLock(at: url)
+        } catch {
+            SecKeychainDelete(value)
+            throw error
+        }
         try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         let container = RemoteTLSEphemeralKeychain(reference: value, fileURL: url)
         importedKeychain = container
         return container
+    }
+
+    private func disableEphemeralKeychainAutoLock(at url: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["set-keychain-settings", url.path]
+        let errors = Pipe()
+        process.standardOutput = Pipe()
+        process.standardError = errors
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let message = String(
+                decoding: errors.fileHandleForReading.readDataToEndOfFile(),
+                as: UTF8.self)
+            throw RemoteTLSIdentityError.ephemeralKeychainSettingsFailed(
+                message.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
     }
 }
 
@@ -204,6 +233,7 @@ enum RemoteTLSIdentityError: LocalizedError {
     case certificateMissing
     case ephemeralKeychainFailed(OSStatus)
     case ephemeralKeychainUnlockFailed(OSStatus)
+    case ephemeralKeychainSettingsFailed(String)
     case ephemeralKeychainAccessFailed(OSStatus)
     case ephemeralKeychainACLFailed(OSStatus)
     case privateKeyUnavailable
@@ -217,6 +247,8 @@ enum RemoteTLSIdentityError: LocalizedError {
         case .certificateMissing: "远程访问证书不完整"
         case .ephemeralKeychainFailed(let status): "无法准备远程访问私钥（\(status)）"
         case .ephemeralKeychainUnlockFailed(let status): "无法解锁远程访问私钥（\(status)）"
+        case .ephemeralKeychainSettingsFailed(let message):
+            "无法保持远程访问私钥可用：\(message.isEmpty ? "未知错误" : message)"
         case .ephemeralKeychainAccessFailed(let status): "无法配置远程访问私钥权限（\(status)）"
         case .ephemeralKeychainACLFailed(let status): "无法关闭远程访问私钥交互授权（\(status)）"
         case .privateKeyUnavailable: "远程访问证书缺少私钥"

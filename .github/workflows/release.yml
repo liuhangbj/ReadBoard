@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, for example v1.0.0"
+        description: "Release version, for example v0.9.4-beta.1"
         required: true
         type: string
 
@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           [[ "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
-            echo "Version must look like v1.0.0"
+            echo "Version must look like v0.9.4-beta.1"
             exit 1
           }
 
@@ -119,8 +119,10 @@ jobs:
         run: |
           set -euo pipefail
           NOTE="未经签名的 macOS 应用。首次打开需右键 → 打开，或在系统设置中放行。"
+          FLAGS=()
+          if [[ "$RELEASE_VERSION" == *-* ]]; then FLAGS+=(--prerelease); fi
           gh release create "$RELEASE_VERSION" "$ARCHIVE_PATH" \
             --target "$GITHUB_SHA" \
             --title "ReadBoard $RELEASE_VERSION" \
             --notes "$NOTE" \
-            --generate-notes
+            --generate-notes "${FLAGS[@]}"
