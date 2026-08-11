@@ -10,15 +10,43 @@ struct RemoteTLSIdentity: @unchecked Sendable {
 private final class RemoteTLSEphemeralKeychain: @unchecked Sendable {
     let reference: SecKeychain
     let fileURL: URL
+    private let password: Data
+    private var keepUnlockedTimer: DispatchSourceTimer?
 
-    init(reference: SecKeychain, fileURL: URL) {
+    init(reference: SecKeychain, fileURL: URL, password: Data) {
         self.reference = reference
         self.fileURL = fileURL
+        self.password = password
+        startKeepUnlockedTimer()
     }
 
     deinit {
+        keepUnlockedTimer?.cancel()
         SecKeychainDelete(reference)
         try? FileManager.default.removeItem(at: fileURL)
+    }
+
+    private func startKeepUnlockedTimer() {
+        let timer = DispatchSource.makeTimerSource(
+            queue: DispatchQueue(label: "readboard.remote-tls-keychain.keepalive"))
+        timer.schedule(deadline: .now() + .seconds(10),
+                       repeating: .seconds(10),
+                       leeway: .seconds(1))
+        timer.setEventHandler { [weak self] in
+            self?.unlockSilently()
+        }
+        timer.resume()
+        keepUnlockedTimer = timer
+    }
+
+    private func unlockSilently() {
+        password.withUnsafeBytes { bytes in
+            _ = SecKeychainUnlock(
+                reference,
+                UInt32(password.count),
+                bytes.baseAddress,
+                true)
+        }
     }
 }
 
@@ -80,6 +108,14 @@ actor RemoteTLSIdentityStore {
     }
 
     private func loadIdentity() throws -> RemoteTLSIdentity {
+        // The service must never wait for a local SecurityAgent dialog: remote
+        // clients cannot answer it. All keychain operations below have explicit
+        // credentials and ACLs, so an unexpected authorization request should
+        // fail immediately instead of presenting UI.
+        let interactionStatus = SecKeychainSetUserInteractionAllowed(false)
+        guard interactionStatus == errSecSuccess else {
+            throw RemoteTLSIdentityError.userInteractionPolicyFailed(interactionStatus)
+        }
         let data = try Data(contentsOf: fileURL)
         let keychain = try makeEphemeralImportKeychain()
         var access: SecAccess?
@@ -203,7 +239,10 @@ actor RemoteTLSIdentityStore {
             throw error
         }
         try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        let container = RemoteTLSEphemeralKeychain(reference: value, fileURL: url)
+        let container = RemoteTLSEphemeralKeychain(
+            reference: value,
+            fileURL: url,
+            password: password)
         importedKeychain = container
         return container
     }
@@ -211,7 +250,12 @@ actor RemoteTLSIdentityStore {
     private func disableEphemeralKeychainAutoLock(at url: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["set-keychain-settings", url.path]
+        // An explicit 24-hour interval is more reliable for process-local file
+        // keychains than the legacy "no-timeout" state on recent macOS builds.
+        // The keepalive above remains a recovery path for securityd restarts.
+        process.arguments = [
+            "set-keychain-settings", "-u", "-t", "86400", url.path
+        ]
         let errors = Pipe()
         process.standardOutput = Pipe()
         process.standardError = errors
@@ -234,6 +278,7 @@ enum RemoteTLSIdentityError: LocalizedError {
     case ephemeralKeychainFailed(OSStatus)
     case ephemeralKeychainUnlockFailed(OSStatus)
     case ephemeralKeychainSettingsFailed(String)
+    case userInteractionPolicyFailed(OSStatus)
     case ephemeralKeychainAccessFailed(OSStatus)
     case ephemeralKeychainACLFailed(OSStatus)
     case privateKeyUnavailable
@@ -249,6 +294,8 @@ enum RemoteTLSIdentityError: LocalizedError {
         case .ephemeralKeychainUnlockFailed(let status): "无法解锁远程访问私钥（\(status)）"
         case .ephemeralKeychainSettingsFailed(let message):
             "无法保持远程访问私钥可用：\(message.isEmpty ? "未知错误" : message)"
+        case .userInteractionPolicyFailed(let status):
+            "无法禁止远程访问私钥弹窗（\(status)）"
         case .ephemeralKeychainAccessFailed(let status): "无法配置远程访问私钥权限（\(status)）"
         case .ephemeralKeychainACLFailed(let status): "无法关闭远程访问私钥交互授权（\(status)）"
         case .privateKeyUnavailable: "远程访问证书缺少私钥"
