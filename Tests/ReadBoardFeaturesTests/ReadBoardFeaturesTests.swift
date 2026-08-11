@@ -4,6 +4,21 @@ import ReadBoardFeatures
 import XCTest
 
 final class ReadBoardFeaturesTests: XCTestCase {
+    func testOperationsBoardCentersItsConstrainedContentColumn() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/ReadBoardFeatures/Operations/ReadBoardOperationsFeatureView.swift"),
+            encoding: .utf8)
+
+        XCTAssertTrue(source.contains(
+            ".frame(maxWidth: 1120, alignment: .leading)\n"
+            + "            .frame(maxWidth: .infinity, alignment: .top)"))
+    }
+
     func testReaderRootFillsTheSplitDetailBeforeCenteringContent() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

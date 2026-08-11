@@ -96,8 +96,9 @@ public struct ReadBoardLLMSettingsPane: View {
     @MainActor
     private func reload() async {
         isLoading = true
-        profiles = await configuration.snapshot().llmProfiles
-            .sorted(by: { $0.id < $1.id })
+        if let loaded = try? await configuration.snapshot().llmProfiles {
+            profiles = loaded.sorted(by: { $0.id < $1.id })
+        }
         isLoading = false
     }
 }

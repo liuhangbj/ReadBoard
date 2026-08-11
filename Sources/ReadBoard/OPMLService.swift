@@ -14,7 +14,7 @@ public struct OPMLOutline: Identifiable, Hashable {
 }
 
 /// 无副作用的导入解析结果：仅收集所有 outline + 已存在计数，不写库。
-/// 真正写库由 OPMLImportSummary 确认后调用 SourceStore 完成。
+/// 真正写库由共享导入界面确认后调用 SourceStore 完成。
 public struct OPMLImportPlan {
     var outlines: [OPMLOutline] = []    // 全部叶子（含文件夹关系），去重前
     var parseError: String? = nil

@@ -70,15 +70,20 @@ public final class ReadBoardIssueCenterModel {
         isRefreshing = true
         defer { isRefreshing = false }
         async let catalogValue = try? environment.sourceCatalog.snapshot()
-        async let runtimeValue = environment.runtimeStatus.snapshot(refreshCounts: false)
-        async let problemValue = environment.administration.operationalProblemCounts()
-        async let authenticationValue = environment.authentication.statuses()
-        async let configurationValue = environment.configuration.snapshot()
-        let catalog = await catalogValue ?? SourceCatalogSnapshot()
-        let runtime = await runtimeValue
-        let problems = await problemValue
-        let authentications = await authenticationValue
-        let configuration = await configurationValue
+        async let runtimeValue = try? environment.runtimeStatus.snapshot(refreshCounts: false)
+        async let problemValue = try? environment.administration.operationalProblemCounts()
+        async let authenticationValue = try? environment.authentication.statuses()
+        async let configurationValue = try? environment.configuration.snapshot()
+        let values = await (catalogValue, runtimeValue, problemValue,
+                            authenticationValue, configurationValue)
+        guard let catalog = values.0, let runtime = values.1, let problems = values.2,
+              let authentications = values.3, let configuration = values.4 else {
+            issues = [ReadBoardIssue(
+                id: "service.unavailable", category: .sources, severity: .needsAttention,
+                title: "无法获取服务状态", detail: "当前无法连接 ReadBoard 服务端，请检查网络或连接设置。",
+                affectedCount: 1, actionTitle: nil, action: nil)]
+            return
+        }
 
         var result: [ReadBoardIssue] = []
         let sources = catalog.sources.filter(\.enabled)

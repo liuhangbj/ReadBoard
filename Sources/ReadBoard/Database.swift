@@ -844,15 +844,15 @@ public final class Database: @unchecked Sendable {
         // - oldest：时间正序（从头读起）
         // - score：评分优先（已评分按分数排前，未评分沉底），高质量视图
         if keyword?.isEmpty == false {
-            sql += " ORDER BY \(col)published_at DESC LIMIT ? OFFSET ?;"
+            sql += " ORDER BY \(col)published_at DESC, \(col)id DESC LIMIT ? OFFSET ?;"
         } else {
             switch sortOrder {
             case "oldest":
-                sql += " ORDER BY \(col)published_at ASC LIMIT ? OFFSET ?;"
+                sql += " ORDER BY \(col)published_at ASC, \(col)id ASC LIMIT ? OFFSET ?;"
             case "score":
-                sql += " ORDER BY (\(col)llm_score IS NULL), \(col)llm_score DESC, \(col)published_at DESC LIMIT ? OFFSET ?;"
+                sql += " ORDER BY (\(col)llm_score IS NULL), \(col)llm_score DESC, \(col)published_at DESC, \(col)id DESC LIMIT ? OFFSET ?;"
             default: // newest
-                sql += " ORDER BY \(col)published_at DESC LIMIT ? OFFSET ?;"
+                sql += " ORDER BY \(col)published_at DESC, \(col)id DESC LIMIT ? OFFSET ?;"
             }
         }
 

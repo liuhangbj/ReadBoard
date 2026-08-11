@@ -5,6 +5,7 @@ import ReadBoardContract
 final class LocalReaderGatewayTests: XCTestCase {
     private let sourceID: Int64 = 9_260_001
     private let contentIDs: [Int64] = [9_260_011, 9_260_012, 9_260_013]
+    private let tiedContentIDs: [Int64] = [9_260_014, 9_260_015, 9_260_016]
     private let exportRuleID: Int64 = 9_260_021
 
     override func setUpWithError() throws {
@@ -87,6 +88,32 @@ final class LocalReaderGatewayTests: XCTestCase {
             """, params: [sourceID]), 3)
     }
 
+    func testEqualPublishedDatesKeepStableOrderAfterReadMutation() async throws {
+        let db = Database.shared
+        for id in tiedContentIDs {
+            XCTAssertTrue(db.execute("""
+                INSERT INTO content(
+                    id, source_id, ctype, guid, source, title, url, published_at,
+                    excerpt, fetch_status, read_at, starred, is_duplicate)
+                VALUES (?, ?, 'article', ?, 'rss', ?, ?, '2026-08-10T00:00:00Z',
+                        '', 2, NULL, 0, 0);
+                """, params: [
+                    id, sourceID, "gateway-tied-guid-\(id)", "同时间内容 \(id)",
+                    "https://test.invalid/gateway/tied/\(id)"
+                ]))
+        }
+        let gateway = LocalReaderGateway(database: db)
+        let query = ContentQuery(
+            filter: ContentFilter(sourceID: sourceID), sort: .newest, pageSize: 20)
+
+        let before = try await gateway.page(query).items.map(\.id)
+        _ = try await gateway.setRead(contentID: tiedContentIDs[1], isRead: true)
+        let after = try await gateway.page(query).items.map(\.id)
+
+        XCTAssertEqual(Array(before.prefix(3)), Array(tiedContentIDs.reversed()))
+        XCTAssertEqual(after, before)
+    }
+
     func testBulkReadHonorsExportedFilter() async throws {
         let gateway = LocalReaderGateway(database: .shared)
 
@@ -108,7 +135,7 @@ final class LocalReaderGatewayTests: XCTestCase {
     private func cleanup() {
         let db = Database.shared
         db.execute("DELETE FROM export_rule WHERE id=?", params: [exportRuleID])
-        for id in contentIDs {
+        for id in contentIDs + tiedContentIDs {
             db.execute("DELETE FROM content_job WHERE content_id=?", params: [id])
             db.execute("DELETE FROM content WHERE id=?", params: [id])
         }

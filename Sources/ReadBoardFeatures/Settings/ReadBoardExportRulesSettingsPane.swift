@@ -107,7 +107,9 @@ public struct ReadBoardExportRulesSettingsPane: View {
         }
         rules = loaded
         stats = nextStats
-        platforms = await configuration.snapshot().exportPlatforms
+        if let loadedPlatforms = try? await configuration.snapshot().exportPlatforms {
+            platforms = loadedPlatforms
+        }
     }
 
     private func statsText(for ruleID: Int64) -> String {

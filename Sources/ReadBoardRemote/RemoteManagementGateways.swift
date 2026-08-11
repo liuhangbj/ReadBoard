@@ -37,13 +37,11 @@ public struct RemoteAdministrationGateway: AdministrationGateway {
     private let client: ReadBoardHTTPClient
     public init(client: ReadBoardHTTPClient) { self.client = client }
 
-    public func dashboardStatistics() async -> DashboardStatistics {
-        (try? await client.get("api/v1/admin/dashboard", as: DashboardStatistics.self))
-            ?? DashboardStatistics(overview: StatisticsOverview(), jobs: [],
-                                   topSources: [], exports: [])
+    public func dashboardStatistics() async throws -> DashboardStatistics {
+        try await client.get("api/v1/admin/dashboard", as: DashboardStatistics.self)
     }
-    public func filterRules() async -> [FilterRuleRecord] {
-        (try? await client.get("api/v1/admin/filter-rules", as: [FilterRuleRecord].self)) ?? []
+    public func filterRules() async throws -> [FilterRuleRecord] {
+        try await client.get("api/v1/admin/filter-rules", as: [FilterRuleRecord].self)
     }
     public func createFilterRule(_ rule: FilterRuleRecord) async -> Bool {
         (try? await client.post("api/v1/admin/filter-rules/create", body: rule,
@@ -58,9 +56,9 @@ public struct RemoteAdministrationGateway: AdministrationGateway {
             "api/v1/admin/filter-rules/delete", body: RemoteFilterRuleIDRequest(id: id),
             as: RemoteAcknowledgement.self)
     }
-    public func processingFailures() async -> [ContentProcessingFailure] {
-        (try? await client.get("api/v1/admin/processing-failures",
-                               as: [ContentProcessingFailure].self)) ?? []
+    public func processingFailures() async throws -> [ContentProcessingFailure] {
+        try await client.get("api/v1/admin/processing-failures",
+                             as: [ContentProcessingFailure].self)
     }
     public func retryProcessingFailure(id: Int64) async -> Bool {
         (try? await client.post("api/v1/admin/processing-failures/retry",
@@ -70,13 +68,12 @@ public struct RemoteAdministrationGateway: AdministrationGateway {
         (try? await client.post("api/v1/admin/processing-failures/ignore",
             body: RemoteInt64IDRequest(id: id), as: RemoteBoolValue.self).value) ?? false
     }
-    public func fullTextFailures(limit: Int) async -> [FullTextFailure] {
-        (try? await client.post("api/v1/admin/fulltext-failures",
-            body: RemoteLimitRequest(limit: limit), as: [FullTextFailure].self)) ?? []
+    public func fullTextFailures(limit: Int) async throws -> [FullTextFailure] {
+        try await client.post("api/v1/admin/fulltext-failures",
+            body: RemoteLimitRequest(limit: limit), as: [FullTextFailure].self)
     }
-    public func operationalProblemCounts() async -> OperationalProblemCounts {
-        (try? await client.get("api/v1/admin/problems", as: OperationalProblemCounts.self))
-            ?? OperationalProblemCounts()
+    public func operationalProblemCounts() async throws -> OperationalProblemCounts {
+        try await client.get("api/v1/admin/problems", as: OperationalProblemCounts.self)
     }
 }
 
@@ -84,8 +81,8 @@ public struct RemoteAuthenticationGateway: AuthenticationGateway {
     private let client: ReadBoardHTTPClient
     public init(client: ReadBoardHTTPClient) { self.client = client }
 
-    public func statuses() async -> [PlatformAuthenticationStatus] {
-        (try? await client.get("api/v1/auth/status", as: [PlatformAuthenticationStatus].self)) ?? []
+    public func statuses() async throws -> [PlatformAuthenticationStatus] {
+        try await client.get("api/v1/auth/status", as: [PlatformAuthenticationStatus].self)
     }
     public func beginAuthentication(platformID: String) async throws -> PlatformAuthenticationChallenge {
         try await client.post("api/v1/auth/begin",
@@ -110,9 +107,8 @@ public struct RemoteConfigurationGateway: ConfigurationGateway {
     private let client: ReadBoardHTTPClient
     public init(client: ReadBoardHTTPClient) { self.client = client }
 
-    public func snapshot() async -> ServiceConfigurationSnapshot {
-        (try? await client.get("api/v1/configuration", as: ServiceConfigurationSnapshot.self))
-            ?? ServiceConfigurationSnapshot()
+    public func snapshot() async throws -> ServiceConfigurationSnapshot {
+        try await client.get("api/v1/configuration", as: ServiceConfigurationSnapshot.self)
     }
     public func setProxyURL(_ value: String) async {
         await acknowledge("api/v1/configuration/proxy", RemoteStringValue(value))
@@ -178,10 +174,8 @@ public struct RemoteMaintenanceGateway: MaintenanceGateway {
     private let client: ReadBoardHTTPClient
     public init(client: ReadBoardHTTPClient) { self.client = client }
 
-    public func snapshot() async -> MaintenanceSnapshot {
-        (try? await client.get("api/v1/maintenance", as: MaintenanceSnapshot.self))
-            ?? MaintenanceSnapshot(policy: CleanupPolicy(), usage: StorageUsage(),
-                                   backups: [], trash: [])
+    public func snapshot() async throws -> MaintenanceSnapshot {
+        try await client.get("api/v1/maintenance", as: MaintenanceSnapshot.self)
     }
     public func updatePolicy(_ policy: CleanupPolicy) async {
         let _: RemoteAcknowledgement? = try? await client.post("api/v1/maintenance/policy",
@@ -197,7 +191,9 @@ public struct RemoteMaintenanceGateway: MaintenanceGateway {
                                               as: MaintenanceSnapshot.self) {
             return value
         }
-        return await snapshot()
+        return (try? await snapshot())
+            ?? MaintenanceSnapshot(policy: CleanupPolicy(), usage: StorageUsage(),
+                                   backups: [], trash: [])
     }
     public func restoreBackup(id: String) async throws {
         let _: RemoteAcknowledgement = try await client.post("api/v1/maintenance/backup/restore",
@@ -222,10 +218,10 @@ public struct RemoteDependencyManagementGateway: DependencyManagementGateway {
     private let client: ReadBoardHTTPClient
     public init(client: ReadBoardHTTPClient) { self.client = client }
 
-    public func snapshot() async -> DependencyManagementSnapshot {
-        (try? await client.get(
+    public func snapshot() async throws -> DependencyManagementSnapshot {
+        try await client.get(
             "api/v1/dependencies",
-            as: DependencyManagementSnapshot.self)) ?? DependencyManagementSnapshot()
+            as: DependencyManagementSnapshot.self)
     }
 
     public func submit(_ request: DependencyTaskRequest) async throws -> DependencyTaskSnapshot {

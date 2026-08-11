@@ -51,9 +51,10 @@ public struct ReadBoardAIContentSettingsPane: View {
         }
         .formStyle(.grouped)
         .task {
-            let snapshot = await configuration.snapshot()
-            flags = snapshot.pipelineFlags
-            prompts = snapshot.aiPrompts
+            if let snapshot = try? await configuration.snapshot() {
+                flags = snapshot.pipelineFlags
+                prompts = snapshot.aiPrompts
+            }
         }
         .onChange(of: prompts) { _, _ in schedulePromptSave() }
         .onDisappear {

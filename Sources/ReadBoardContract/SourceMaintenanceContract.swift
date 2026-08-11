@@ -125,7 +125,7 @@ public enum SourceManagementGatewayError: Error, Equatable, Sendable, LocalizedE
 
 /// 订阅源和文件夹的命令端口。列表快照将在下一阶段接入，命令先统一从 UI 移出。
 public protocol SourceManagementGateway: Sendable {
-    func syncSettings() async -> SourceSyncSettings
+    func syncSettings() async throws -> SourceSyncSettings
     func updateSyncSettings(_ settings: SourceSyncSettings) async throws
     func createFolder(name: String) async throws -> SourceMaintenanceResult
     func syncAll() async throws -> SourceMaintenanceResult

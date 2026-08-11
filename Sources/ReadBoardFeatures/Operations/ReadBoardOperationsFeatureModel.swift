@@ -35,22 +35,30 @@ public final class ReadBoardOperationsFeatureModel {
     public func load() async {
         isLoading = true
         defer { isLoading = false }
-        async let runtime = environment.runtimeStatus.snapshot(refreshCounts: true)
-        async let auth = environment.authentication.statuses()
-        async let counts = environment.administration.operationalProblemCounts()
-        async let failures = environment.administration.processingFailures()
-        async let fulltext = environment.administration.fullTextFailures(limit: 100)
-        async let recent = environment.processing.recent(limit: 20)
+        async let runtime = try? environment.runtimeStatus.snapshot(refreshCounts: true)
+        async let auth = try? environment.authentication.statuses()
+        async let counts = try? environment.administration.operationalProblemCounts()
+        async let failures = try? environment.administration.processingFailures()
+        async let fulltext = try? environment.administration.fullTextFailures(limit: 100)
+        async let recent = try? environment.processing.recent(limit: 20)
         async let catalog = try? environment.sourceCatalog.snapshot()
-        async let dashboard = environment.administration.dashboardStatistics()
-        self.runtime = await runtime
-        authentications = await auth
-        problemCounts = await counts
-        processingFailures = await failures
-        fullTextFailures = await fulltext
-        recentProcessing = await recent
-        sourceCatalog = await catalog
-        self.dashboard = await dashboard
+        async let dashboard = try? environment.administration.dashboardStatistics()
+        let values = await (runtime, auth, counts, failures, fulltext, recent, catalog, dashboard)
+        if let value = values.0 { self.runtime = value }
+        if let value = values.1 { authentications = value }
+        if let value = values.2 { problemCounts = value }
+        if let value = values.3 { processingFailures = value }
+        if let value = values.4 { fullTextFailures = value }
+        if let value = values.5 { recentProcessing = value }
+        if let value = values.6 { sourceCatalog = value }
+        if let value = values.7 { self.dashboard = value }
+        if [values.0 != nil, values.1 != nil, values.2 != nil, values.3 != nil,
+            values.4 != nil, values.5 != nil, values.6 != nil, values.7 != nil]
+            .contains(false) {
+            errorMessage = "部分服务状态暂时无法刷新，已保留上次数据"
+        } else {
+            errorMessage = nil
+        }
     }
 
     public func monitor() async {
@@ -196,6 +204,12 @@ public struct ReadBoardServiceHealthSummary: Equatable, Sendable {
     public let issueCount: Int
     public let message: String
 
+    public init(phase: ReadBoardServiceHealthPhase, issueCount: Int, message: String) {
+        self.phase = phase
+        self.issueCount = issueCount
+        self.message = message
+    }
+
     public init(
         runtime: RuntimeStatusSnapshot,
         authentications: [PlatformAuthenticationStatus],
@@ -244,12 +258,21 @@ public final class ReadBoardServiceHealthMonitorModel {
     }
 
     public func load() async {
-        async let runtime = environment.runtimeStatus.snapshot(refreshCounts: false)
-        async let auth = environment.authentication.statuses()
-        async let problems = environment.administration.operationalProblemCounts()
+        async let runtime = try? environment.runtimeStatus.snapshot(refreshCounts: false)
+        async let auth = try? environment.authentication.statuses()
+        async let problems = try? environment.administration.operationalProblemCounts()
         async let catalog = try? environment.sourceCatalog.snapshot()
-        let sourceIssues = await catalog?.sources.filter { $0.hasError || $0.isStale }.count ?? 0
-        summary = await ReadBoardServiceHealthSummary(
+        let values = await (runtime, auth, problems, catalog)
+        guard let runtime = values.0, let auth = values.1,
+              let problems = values.2, let catalog = values.3 else {
+            summary = ReadBoardServiceHealthSummary(
+                phase: .needsAttention,
+                issueCount: 1,
+                message: "无法获取服务状态")
+            return
+        }
+        let sourceIssues = catalog.sources.filter { $0.hasError || $0.isStale }.count
+        summary = ReadBoardServiceHealthSummary(
             runtime: runtime,
             authentications: auth,
             problems: problems,

@@ -169,7 +169,7 @@ public enum SourceOnboardingGatewayError: Error, Equatable, Sendable, LocalizedE
 }
 
 public protocol SourceOnboardingGateway: Sendable {
-    func supportedSourceTypes() async -> [SourceTypeDescriptor]
+    func supportedSourceTypes() async throws -> [SourceTypeDescriptor]
     func discover(identifier: String, suggestedType: String?) async throws -> SourceDiscoveryResult
     func create(request: SourceCreationRequest) async throws -> SourceCreationResult
     func importSources(
@@ -177,5 +177,5 @@ public protocol SourceOnboardingGateway: Sendable {
         refreshAfterCreation: Bool
     ) async throws -> SourceBatchImportResult
     func platformSubscriptions(platform: String) async throws -> [PlatformSubscriptionCandidate]
-    func exportOPML() async -> String
+    func exportOPML() async throws -> String
 }

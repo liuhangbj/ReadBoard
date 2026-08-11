@@ -74,6 +74,6 @@ public struct RuntimeStatusSnapshot: Codable, Equatable, Sendable {
 }
 
 public protocol RuntimeStatusGateway: Sendable {
-    func snapshot(refreshCounts: Bool) async -> RuntimeStatusSnapshot
+    func snapshot(refreshCounts: Bool) async throws -> RuntimeStatusSnapshot
     func runProcessingScan() async
 }

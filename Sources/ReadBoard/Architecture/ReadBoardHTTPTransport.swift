@@ -156,12 +156,12 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(try await services.mediaPlayback.youtubeStream(videoID: value.videoID))
 
             case ("GET", "/api/v1/processing/capabilities"):
-                return json(await services.processing.capabilities())
+                return json(try await services.processing.capabilities())
             case ("GET", "/api/v1/sources/catalog"):
                 return json(try await services.sourceCatalog.snapshot())
             case ("POST", "/api/v1/runtime/snapshot"):
                 let value = try decode(RemoteRuntimeSnapshotRequest.self, request.body)
-                return json(await services.runtimeStatus.snapshot(refreshCounts: value.refreshCounts))
+                return json(try await services.runtimeStatus.snapshot(refreshCounts: value.refreshCounts))
             case ("POST", "/api/v1/runtime/scan"):
                 await services.runtimeStatus.runProcessingScan()
                 return json(RemoteAcknowledgement())
@@ -172,10 +172,10 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(try await services.processing.status(requestID: value.requestID))
             case ("POST", "/api/v1/processing/recent"):
                 let value = try decode(RemoteLimitRequest.self, request.body)
-                return json(await services.processing.recent(limit: value.limit))
+                return json(try await services.processing.recent(limit: value.limit))
 
             case ("GET", "/api/v1/sources/sync-settings"):
-                return json(await services.sourceManagement.syncSettings())
+                return json(try await services.sourceManagement.syncSettings())
             case ("POST", "/api/v1/sources/sync-settings"):
                 try await services.sourceManagement.updateSyncSettings(
                     try decode(SourceSyncSettings.self, request.body))
@@ -255,7 +255,7 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(try await services.sourceManagement.retryFulltext(contentID: value.contentID))
 
             case ("GET", "/api/v1/onboarding/types"):
-                return json(await services.sourceOnboarding.supportedSourceTypes())
+                return json(try await services.sourceOnboarding.supportedSourceTypes())
             case ("POST", "/api/v1/onboarding/discover"):
                 let value = try decode(RemoteSourceDiscoveryRequest.self, request.body)
                 return json(try await services.sourceOnboarding.discover(
@@ -272,7 +272,7 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(try await services.sourceOnboarding.platformSubscriptions(
                     platform: value.platformID))
             case ("GET", "/api/v1/onboarding/export-opml"):
-                return json(RemoteStringValue(await services.sourceOnboarding.exportOPML()))
+                return json(RemoteStringValue(try await services.sourceOnboarding.exportOPML()))
 
             case ("GET", "/api/v1/exports/rules"):
                 return json(try await services.export.rules())
@@ -295,9 +295,9 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(try await services.export.forceExport(contentID: value.contentID))
 
             case ("GET", "/api/v1/admin/dashboard"):
-                return json(await services.administration.dashboardStatistics())
+                return json(try await services.administration.dashboardStatistics())
             case ("GET", "/api/v1/admin/filter-rules"):
-                return json(await services.administration.filterRules())
+                return json(try await services.administration.filterRules())
             case ("POST", "/api/v1/admin/filter-rules/create"):
                 return json(RemoteBoolValue(await services.administration.createFilterRule(
                     try decode(FilterRuleRecord.self, request.body))))
@@ -310,7 +310,7 @@ public struct ReadBoardHTTPRouter: Sendable {
                 await services.administration.deleteFilterRule(id: value.id)
                 return json(RemoteAcknowledgement())
             case ("GET", "/api/v1/admin/processing-failures"):
-                return json(await services.administration.processingFailures())
+                return json(try await services.administration.processingFailures())
             case ("POST", "/api/v1/admin/processing-failures/retry"):
                 let value = try decode(RemoteInt64IDRequest.self, request.body)
                 return json(RemoteBoolValue(await services.administration.retryProcessingFailure(id: value.id)))
@@ -319,12 +319,12 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(RemoteBoolValue(await services.administration.ignoreProcessingFailure(id: value.id)))
             case ("POST", "/api/v1/admin/fulltext-failures"):
                 let value = try decode(RemoteLimitRequest.self, request.body)
-                return json(await services.administration.fullTextFailures(limit: value.limit))
+                return json(try await services.administration.fullTextFailures(limit: value.limit))
             case ("GET", "/api/v1/admin/problems"):
-                return json(await services.administration.operationalProblemCounts())
+                return json(try await services.administration.operationalProblemCounts())
 
             case ("GET", "/api/v1/auth/status"):
-                return json(await services.authentication.statuses())
+                return json(try await services.authentication.statuses())
             case ("POST", "/api/v1/auth/begin"):
                 let value = try decode(RemotePlatformRequest.self, request.body)
                 return json(try await services.authentication.beginAuthentication(
@@ -339,7 +339,7 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(RemoteAcknowledgement())
 
             case ("GET", "/api/v1/configuration"):
-                return json(await services.configuration.snapshot())
+                return json(try await services.configuration.snapshot())
             case ("POST", "/api/v1/configuration/proxy"):
                 await services.configuration.setProxyURL(
                     try decode(RemoteStringValue.self, request.body).value)
@@ -398,7 +398,7 @@ public struct ReadBoardHTTPRouter: Sendable {
                 guard let gateway = services.dependencyManagement else {
                     return failure(501, "capability_unavailable", "服务端未启用依赖任务管理")
                 }
-                return json(await gateway.snapshot())
+                return json(try await gateway.snapshot())
             case ("POST", "/api/v1/dependencies/submit"):
                 guard let gateway = services.dependencyManagement else {
                     return failure(501, "capability_unavailable", "服务端未启用依赖任务管理")
@@ -414,7 +414,7 @@ public struct ReadBoardHTTPRouter: Sendable {
                 return json(RemoteAcknowledgement())
 
             case ("GET", "/api/v1/maintenance"):
-                return json(await services.maintenance.snapshot())
+                return json(try await services.maintenance.snapshot())
             case ("POST", "/api/v1/maintenance/policy"):
                 await services.maintenance.updatePolicy(try decode(CleanupPolicy.self, request.body))
                 return json(RemoteAcknowledgement())

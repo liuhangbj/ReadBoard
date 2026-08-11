@@ -43,7 +43,7 @@ public struct PlatformAuthenticationPoll: Codable, Equatable, Sendable {
 }
 
 public protocol AuthenticationGateway: Sendable {
-    func statuses() async -> [PlatformAuthenticationStatus]
+    func statuses() async throws -> [PlatformAuthenticationStatus]
     func beginAuthentication(platformID: String) async throws -> PlatformAuthenticationChallenge
     func pollAuthentication(platformID: String, challengeID: String) async throws -> PlatformAuthenticationPoll
     func signOut(platformID: String) async throws

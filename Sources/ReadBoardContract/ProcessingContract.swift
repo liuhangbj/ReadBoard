@@ -117,12 +117,12 @@ public enum ProcessingGatewayError: Error, Equatable, Sendable, LocalizedError {
 /// 长任务使用提交＋状态查询模型。远程实现可在内部映射为 Job API，
 /// 不要求客户端维持一个可能持续数十分钟的 HTTP 请求。
 public protocol ProcessingGateway: Sendable {
-    func capabilities() async -> ProcessingCapabilities
+    func capabilities() async throws -> ProcessingCapabilities
     func submit(_ command: ProcessingCommand) async throws -> ProcessingCommandSnapshot
     func status(requestID: String) async throws -> ProcessingCommandSnapshot
-    func recent(limit: Int) async -> [ProcessingActivity]
+    func recent(limit: Int) async throws -> [ProcessingActivity]
 }
 
 public extension ProcessingGateway {
-    func recent(limit: Int) async -> [ProcessingActivity] { [] }
+    func recent(limit: Int) async throws -> [ProcessingActivity] { [] }
 }

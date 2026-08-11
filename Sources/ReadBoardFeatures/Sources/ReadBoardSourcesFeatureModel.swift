@@ -35,10 +35,11 @@ public final class ReadBoardSourcesFeatureModel {
         isLoading = true
         defer { isLoading = false }
         async let catalogRequest = environment.sourceCatalog.snapshot()
-        let settings = await environment.sourceManagement.syncSettings()
+        async let settingsRequest = environment.sourceManagement.syncSettings()
         do {
-            snapshot = try await catalogRequest
-            syncSettings = settings
+            let values = try await (catalogRequest, settingsRequest)
+            snapshot = values.0
+            syncSettings = values.1
             errorMessage = nil
         } catch is CancellationError {
             return
@@ -220,11 +221,21 @@ public final class ReadBoardSourcesFeatureModel {
     }
 
     public func supportedSourceTypes() async -> [SourceTypeDescriptor] {
-        await environment.sourceOnboarding.supportedSourceTypes()
+        do {
+            return try await environment.sourceOnboarding.supportedSourceTypes()
+        } catch {
+            errorMessage = error.localizedDescription
+            return []
+        }
     }
 
     public func exportedOPML() async -> String {
-        await environment.sourceOnboarding.exportOPML()
+        do {
+            return try await environment.sourceOnboarding.exportOPML()
+        } catch {
+            errorMessage = error.localizedDescription
+            return ""
+        }
     }
 
     private func maintenance(
@@ -312,7 +323,7 @@ public final class ReadBoardSourcesFeatureModel {
     private func refreshAfterMutation() async {
         do {
             snapshot = try await environment.sourceCatalog.snapshot()
-            syncSettings = await environment.sourceManagement.syncSettings()
+            syncSettings = try await environment.sourceManagement.syncSettings()
             NotificationCenter.default.post(
                 name: .readBoardLibrarySnapshotChanged,
                 object: nil)

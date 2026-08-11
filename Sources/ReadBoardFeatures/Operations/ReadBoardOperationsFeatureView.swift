@@ -33,7 +33,7 @@ public struct ReadBoardOperationsFeatureView: View {
             }
             .padding(ReadBoardDesign.Space.xl)
             .frame(maxWidth: 1120, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
         .background(ReadBoardDesign.C.bg)
         .task { await model.monitor() }

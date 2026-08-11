@@ -89,7 +89,7 @@ actor RemotePasswordService {
         let data = try JSONEncoder().encode(value)
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
+        try data.write(to: fileURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600],
                                               ofItemAtPath: fileURL.path)
     }

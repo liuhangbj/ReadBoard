@@ -120,7 +120,7 @@ public struct ConnectionTestResult: Codable, Equatable, Sendable {
 }
 
 public protocol ConfigurationGateway: Sendable {
-    func snapshot() async -> ServiceConfigurationSnapshot
+    func snapshot() async throws -> ServiceConfigurationSnapshot
     func setProxyURL(_ value: String) async
     func setFeatureFlag(_ id: String, enabled: Bool) async
     func setPipelineFlag(_ id: String, enabled: Bool) async

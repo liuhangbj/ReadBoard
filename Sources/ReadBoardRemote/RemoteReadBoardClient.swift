@@ -203,10 +203,10 @@ public struct RemoteSourceCatalogGateway: SourceCatalogGateway {
 public struct RemoteRuntimeStatusGateway: RuntimeStatusGateway {
     private let client: ReadBoardHTTPClient
     public init(client: ReadBoardHTTPClient) { self.client = client }
-    public func snapshot(refreshCounts: Bool) async -> RuntimeStatusSnapshot {
-        (try? await client.post("api/v1/runtime/snapshot",
+    public func snapshot(refreshCounts: Bool) async throws -> RuntimeStatusSnapshot {
+        try await client.post("api/v1/runtime/snapshot",
             body: RemoteRuntimeSnapshotRequest(refreshCounts: refreshCounts),
-            as: RuntimeStatusSnapshot.self)) ?? RuntimeStatusSnapshot()
+            as: RuntimeStatusSnapshot.self)
     }
     public func runProcessingScan() async {
         let _: RemoteAcknowledgement? = try? await client.post("api/v1/runtime/scan",

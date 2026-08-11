@@ -80,14 +80,18 @@ public struct ReadBoardGeneralSettingsPane: View {
 
     private func load() async {
         isLoading = true
-        async let sync = sourceManagement.syncSettings()
-        async let config = configuration.snapshot()
+        async let sync = try? sourceManagement.syncSettings()
+        async let config = try? configuration.snapshot()
         let loadedSync = await sync
         let loadedConfig = await config
-        autoSyncEnabled = loadedSync.enabled
-        intervalMinutes = loadedSync.intervalMinutes
-        proxyURL = loadedConfig.proxyURL
-        proxyEnabled = !loadedConfig.proxyURL.isEmpty
+        if let loadedSync {
+            autoSyncEnabled = loadedSync.enabled
+            intervalMinutes = loadedSync.intervalMinutes
+        }
+        if let loadedConfig {
+            proxyURL = loadedConfig.proxyURL
+            proxyEnabled = !loadedConfig.proxyURL.isEmpty
+        }
         isLoading = false
     }
 

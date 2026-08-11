@@ -177,8 +177,10 @@ public struct ReadBoardMaintenanceSettingsPane: View {
     @MainActor
     private func reload() async {
         isLoading = true
-        snapshot = await maintenance.snapshot()
-        policy = snapshot.policy
+        if let loaded = try? await maintenance.snapshot() {
+            snapshot = loaded
+            policy = loaded.policy
+        }
         isLoading = false
     }
 

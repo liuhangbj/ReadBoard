@@ -159,11 +159,12 @@ public struct ReadBoardDependencySettingsPane: View {
             return
         }
         isLoading = dependencies.isEmpty
-        let snapshot = await dependencyManagement.snapshot()
-        dependencies = snapshot.dependencies
-        tasks = snapshot.tasks
-        for item in dependencies where editingPaths[item.id] == nil {
-            editingPaths[item.id] = item.path ?? ""
+        if let snapshot = try? await dependencyManagement.snapshot() {
+            dependencies = snapshot.dependencies
+            tasks = snapshot.tasks
+            for item in dependencies where editingPaths[item.id] == nil {
+                editingPaths[item.id] = item.path ?? ""
+            }
         }
         isLoading = false
     }

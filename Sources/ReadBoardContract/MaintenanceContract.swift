@@ -77,7 +77,7 @@ public struct TrashRestoreResult: Codable, Equatable, Sendable {
 }
 
 public protocol MaintenanceGateway: Sendable {
-    func snapshot() async -> MaintenanceSnapshot
+    func snapshot() async throws -> MaintenanceSnapshot
     func updatePolicy(_ policy: CleanupPolicy) async
     func runCleanup() async -> String
     func createBackup() async -> MaintenanceSnapshot

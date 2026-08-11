@@ -106,9 +106,9 @@
 2. 权限扩展为 Reader / Operator / Administrator，主机专属动作不可由 Go 获得。
 3. 长任务统一为异步 Job，并集中刷新运行状态。
 4. Go 建立最后有效数据缓存与自动重连。
-5. Go macOS 从 `ReadBoardCoreSnapshot` 逐模块切换到 `ReadBoardFeatures`。
-6. Core 与 Go 全部验收通过后，删除 Go 中的数据库、Worker、抓取器、设置页和其他快照实现。
+5. Go macOS 从 `ReadBoardCoreSnapshot` 切换到 `ReadBoardFeatures`。
+6. Core 与 Go 全部验收通过后，删除两端无入口的旧页面、状态 Store 和其他快照实现。
 
-当前活动代码路径：Core / Pro 与 Go macOS 均由 `ReadBoardDesktopMainFeatureView` 组合；Go 工程已移除 `ReadBoardCoreSnapshot` 和旧 `ReadBoardSharedUI` 产品、链接依赖及源码目录。产品仓库只保留连接壳、离线缓存和远程 gateway。
+当前活动代码路径：Core / Pro 与 Go macOS 均由 `ReadBoardDesktopMainFeatureView` 组合；Go 工程已移除 `ReadBoardCoreSnapshot` 和旧 `ReadBoardSharedUI` 产品、链接依赖及源码目录，Core 工程也已移除旧资料库、源管理、数据看板、设置和失败列表页面。产品仓库只保留连接壳、离线缓存和远程 gateway。
 
-删除 `ReadBoardCoreSnapshot` 前，本文件不得再有 `duplicated`、`blocked` 或 `shared-ready` 项。
+当前矩阵没有 `duplicated`、`blocked` 或 `shared-ready` 项。后续新增功能若引入这些状态，不能宣称该版本已经完成前端收口。

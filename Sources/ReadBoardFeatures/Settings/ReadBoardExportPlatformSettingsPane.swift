@@ -55,9 +55,11 @@ public struct ReadBoardExportPlatformSettingsPane: View {
         }
         .formStyle(.grouped)
         .task {
-            value = await configuration.snapshot().exportPlatforms
-            webhookHeaders = value.webhookHeaders.sorted(by: { $0.key < $1.key })
-                .map { "\($0.key): \($0.value)" }.joined(separator: "\n")
+            if let loaded = try? await configuration.snapshot().exportPlatforms {
+                value = loaded
+                webhookHeaders = value.webhookHeaders.sorted(by: { $0.key < $1.key })
+                    .map { "\($0.key): \($0.value)" }.joined(separator: "\n")
+            }
         }
         .onDisappear {
             saveTask?.cancel()

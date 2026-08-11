@@ -5,11 +5,9 @@ public struct RemoteProcessingGateway: ProcessingGateway {
     private let client: ReadBoardHTTPClient
     public init(client: ReadBoardHTTPClient) { self.client = client }
 
-    public func capabilities() async -> ProcessingCapabilities {
-        (try? await client.get("api/v1/processing/capabilities",
-            as: ProcessingCapabilities.self))
-            ?? ProcessingCapabilities(llmAvailable: false, transcriptionAvailable: false,
-                                      fulltextAvailable: false)
+    public func capabilities() async throws -> ProcessingCapabilities {
+        try await client.get("api/v1/processing/capabilities",
+                             as: ProcessingCapabilities.self)
     }
 
     public func submit(_ command: ProcessingCommand) async throws -> ProcessingCommandSnapshot {
@@ -23,10 +21,10 @@ public struct RemoteProcessingGateway: ProcessingGateway {
             as: ProcessingCommandSnapshot.self)
     }
 
-    public func recent(limit: Int) async -> [ProcessingActivity] {
-        (try? await client.post("api/v1/processing/recent",
+    public func recent(limit: Int) async throws -> [ProcessingActivity] {
+        try await client.post("api/v1/processing/recent",
             body: RemoteLimitRequest(limit: limit),
-            as: [ProcessingActivity].self)) ?? []
+            as: [ProcessingActivity].self)
     }
 }
 
@@ -34,9 +32,8 @@ public struct RemoteSourceManagementGateway: SourceManagementGateway {
     private let client: ReadBoardHTTPClient
     public init(client: ReadBoardHTTPClient) { self.client = client }
 
-    public func syncSettings() async -> SourceSyncSettings {
-        (try? await client.get("api/v1/sources/sync-settings", as: SourceSyncSettings.self))
-            ?? SourceSyncSettings(enabled: false, intervalMinutes: 15)
+    public func syncSettings() async throws -> SourceSyncSettings {
+        try await client.get("api/v1/sources/sync-settings", as: SourceSyncSettings.self)
     }
 
     public func updateSyncSettings(_ settings: SourceSyncSettings) async throws {
@@ -171,8 +168,8 @@ public struct RemoteSourceOnboardingGateway: SourceOnboardingGateway {
     private let client: ReadBoardHTTPClient
     public init(client: ReadBoardHTTPClient) { self.client = client }
 
-    public func supportedSourceTypes() async -> [SourceTypeDescriptor] {
-        (try? await client.get("api/v1/onboarding/types", as: [SourceTypeDescriptor].self)) ?? []
+    public func supportedSourceTypes() async throws -> [SourceTypeDescriptor] {
+        try await client.get("api/v1/onboarding/types", as: [SourceTypeDescriptor].self)
     }
 
     public func discover(identifier: String,
@@ -203,8 +200,7 @@ public struct RemoteSourceOnboardingGateway: SourceOnboardingGateway {
             as: [PlatformSubscriptionCandidate].self)
     }
 
-    public func exportOPML() async -> String {
-        (try? await client.get("api/v1/onboarding/export-opml", as: RemoteStringValue.self).value)
-            ?? ""
+    public func exportOPML() async throws -> String {
+        try await client.get("api/v1/onboarding/export-opml", as: RemoteStringValue.self).value
     }
 }

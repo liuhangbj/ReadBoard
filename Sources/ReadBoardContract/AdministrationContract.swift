@@ -131,14 +131,14 @@ public struct OperationalProblemCounts: Codable, Equatable, Sendable {
 }
 
 public protocol AdministrationGateway: Sendable {
-    func dashboardStatistics() async -> DashboardStatistics
-    func filterRules() async -> [FilterRuleRecord]
+    func dashboardStatistics() async throws -> DashboardStatistics
+    func filterRules() async throws -> [FilterRuleRecord]
     @discardableResult func createFilterRule(_ rule: FilterRuleRecord) async -> Bool
     func updateFilterRule(_ rule: FilterRuleRecord) async
     func deleteFilterRule(id: Int64) async
-    func processingFailures() async -> [ContentProcessingFailure]
+    func processingFailures() async throws -> [ContentProcessingFailure]
     @discardableResult func retryProcessingFailure(id: Int64) async -> Bool
     @discardableResult func ignoreProcessingFailure(id: Int64) async -> Bool
-    func fullTextFailures(limit: Int) async -> [FullTextFailure]
-    func operationalProblemCounts() async -> OperationalProblemCounts
+    func fullTextFailures(limit: Int) async throws -> [FullTextFailure]
+    func operationalProblemCounts() async throws -> OperationalProblemCounts
 }

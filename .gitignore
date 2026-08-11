@@ -29,6 +29,7 @@ secrets.json
 *.dmg
 *.xcarchive/
 .artifacts/
+dist/
 
 # node 依赖（engine 的 package.json 进 git，node_modules 首次 npm install 重建）
 **/node_modules/

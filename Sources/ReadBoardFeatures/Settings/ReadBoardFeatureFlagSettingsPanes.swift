@@ -61,7 +61,11 @@ public struct ReadBoardFeatureBoardSettingsPane: View {
             }
         }
         .formStyle(.grouped)
-        .task { states = await configuration.snapshot().featureFlags }
+        .task {
+            if let loaded = try? await configuration.snapshot().featureFlags {
+                states = loaded
+            }
+        }
     }
 
     private func featureBinding(_ id: String) -> Binding<Bool> {
@@ -106,9 +110,10 @@ public struct ReadBoardFulltextSettingsPane: View {
         }
         .formStyle(.grouped)
         .task {
-            let snapshot = await configuration.snapshot()
-            enabled = snapshot.serviceFlags["defuddle"] ?? false
-            dependencies = snapshot.dependencies
+            if let snapshot = try? await configuration.snapshot() {
+                enabled = snapshot.serviceFlags["defuddle"] ?? false
+                dependencies = snapshot.dependencies
+            }
         }
         .alert("defuddle 依赖缺失", isPresented: $showMissingAlert) {
             Button("重新检测") { Task { await reloadAndEnable() } }
@@ -138,7 +143,8 @@ public struct ReadBoardFulltextSettingsPane: View {
     }
 
     private func reloadAndEnable() async {
-        dependencies = await configuration.snapshot().dependencies
+        guard let loaded = try? await configuration.snapshot().dependencies else { return }
+        dependencies = loaded
         let missing = dependencyProblems()
         if missing.isEmpty {
             enabled = true

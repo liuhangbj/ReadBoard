@@ -69,7 +69,7 @@ public struct DependencyManagementSnapshot: Codable, Equatable, Sendable {
 }
 
 public protocol DependencyManagementGateway: Sendable {
-    func snapshot() async -> DependencyManagementSnapshot
+    func snapshot() async throws -> DependencyManagementSnapshot
     func submit(_ request: DependencyTaskRequest) async throws -> DependencyTaskSnapshot
     func cancel(taskID: String) async
 }

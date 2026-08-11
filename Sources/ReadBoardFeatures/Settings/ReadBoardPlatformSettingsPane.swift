@@ -163,16 +163,18 @@ public struct ReadBoardPlatformSettingsPane: View {
 
     @MainActor
     private func reload() async {
-        async let config = configuration.snapshot()
-        async let auth = authentication.statuses()
-        flags = await config.sourceTypeFlags
+        async let config = try? configuration.snapshot()
+        async let auth = try? authentication.statuses()
+        if let loaded = await config {
+            flags = loaded.sourceTypeFlags
+        }
         if let loadedCatalog = try? await sourceCatalog.snapshot() {
             sourceCounts = Dictionary(grouping: loadedCatalog.sources, by: \.sourceType)
                 .mapValues(\.count)
-        } else {
-            sourceCounts = [:]
         }
-        authentications = await auth
+        if let loaded = await auth {
+            authentications = loaded
+        }
     }
 
     private func beginAuthentication(_ platformID: String) {
