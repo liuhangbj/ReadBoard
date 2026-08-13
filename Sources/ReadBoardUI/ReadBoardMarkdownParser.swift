@@ -17,19 +17,27 @@ public enum ReadBoardMarkdownParser {
         var blocks: [ReadBoardMarkdownBlock] = []
         let lines = stripLeadingFrontmatter(
             lines: markdown.components(separatedBy: "\n"), into: &blocks)
-        var paragraph: [String] = []
+        var paragraph: [(text: String, hardBreakAfter: Bool)] = []
         var code: [String] = []
         var codeLanguage: String?
         var isInCodeBlock = false
 
         func flushParagraph() {
-            let text = paragraph.joined(separator: " ")
-                .trimmingCharacters(in: .whitespaces)
+            var text = ""
+            for index in paragraph.indices {
+                if index > paragraph.startIndex {
+                    let previous = paragraph[paragraph.index(before: index)]
+                    text += previous.hardBreakAfter ? "\n" : " "
+                }
+                text += paragraph[index].text
+            }
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty { blocks.append(.paragraph(text: text)) }
             paragraph = []
         }
 
         for raw in lines {
+            let hasMarkdownHardBreak = raw.hasSuffix("  ")
             let line = raw.trimmingCharacters(in: .whitespaces)
             if line.hasPrefix("```") {
                 if isInCodeBlock {
@@ -63,7 +71,7 @@ public enum ReadBoardMarkdownParser {
             if let listItem = parseListItem(line) {
                 flushParagraph(); blocks.append(listItem); continue
             }
-            paragraph.append(line)
+            paragraph.append((text: line, hardBreakAfter: hasMarkdownHardBreak))
         }
         flushParagraph()
         if isInCodeBlock, !code.isEmpty {

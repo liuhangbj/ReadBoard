@@ -198,11 +198,16 @@ public final class LocalSourceManagementGateway: SourceManagementGateway, @unche
         await MainActor.run { SourceStore.shared.setEnabled(id: sourceID, enabled: enabled) }
     }
 
-    public func setMaximumRetainedContent(sourceID: Int64, count: Int) async throws {
-        guard sourceID > 0, count >= 0 else { throw SourceManagementGatewayError.invalidRequest }
+    public func setMaximumRetainedContent(scope: SourceScope, count: Int) async throws {
+        guard scope.id > 0, count >= 0 else { throw SourceManagementGatewayError.invalidRequest }
         await MainActor.run {
-            SourceStore.shared.setMaxKeep(id: sourceID, count: count)
-            if count > 0 { _ = SourceStore.shared.enforceMaxKeep(sourceId: sourceID) }
+            switch scope.kind {
+            case .source:
+                SourceStore.shared.setMaxKeep(id: scope.id, count: count)
+                if count > 0 { _ = SourceStore.shared.enforceMaxKeep(sourceId: scope.id) }
+            case .folder:
+                SourceStore.shared.setFolderMaxKeep(folderId: scope.id, count: count)
+            }
         }
     }
 

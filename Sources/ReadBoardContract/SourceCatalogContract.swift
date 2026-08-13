@@ -38,6 +38,9 @@ public struct SourceCatalogItem: Identifiable, Codable, Equatable, Hashable, Sen
     public let transcribable: Bool
     public let availableFetchModes: [SourceFetchMode]
     public let fulltextDisplayName: String?
+    public let adaptiveFetchDisplayName: String?
+    /// 可选以兼容尚未升级该字段的旧服务端快照。
+    public let automaticRecovery: Bool?
 
     public init(
         id: Int64,
@@ -57,7 +60,9 @@ public struct SourceCatalogItem: Identifiable, Codable, Equatable, Hashable, Sen
         hoursSinceFetch: Double? = nil,
         transcribable: Bool,
         availableFetchModes: [SourceFetchMode] = [],
-        fulltextDisplayName: String? = nil
+        fulltextDisplayName: String? = nil,
+        adaptiveFetchDisplayName: String? = nil,
+        isRecovering: Bool = false
     ) {
         self.id = id
         self.sourceType = sourceType
@@ -77,9 +82,12 @@ public struct SourceCatalogItem: Identifiable, Codable, Equatable, Hashable, Sen
         self.transcribable = transcribable
         self.availableFetchModes = availableFetchModes
         self.fulltextDisplayName = fulltextDisplayName
+        self.adaptiveFetchDisplayName = adaptiveFetchDisplayName
+        self.automaticRecovery = isRecovering
     }
 
     public var hasError: Bool { !(error?.isEmpty ?? true) }
+    public var isRecovering: Bool { automaticRecovery ?? false }
     public var isStale: Bool { hoursSinceFetch.map { $0 > 48 } ?? true }
 }
 

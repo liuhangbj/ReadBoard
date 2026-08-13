@@ -29,7 +29,7 @@ public struct ReadBoardAIContentSettingsPane: View {
             Section {
                 ForEach(ReadBoardAIPipelineDescriptor.all) { pipeline in
                     VStack(alignment: .leading, spacing: 8) {
-                        Toggle(pipeline.title, isOn: Binding(
+                        ReadBoardSettingsToggleRow(pipeline.title, isOn: Binding(
                             get: { flags[pipeline.id] ?? true },
                             set: { value in
                                 flags[pipeline.id] = value
@@ -44,9 +44,10 @@ public struct ReadBoardAIContentSettingsPane: View {
                     .padding(.vertical, 5)
                 }
             } header: {
-                Text("AI 内容处理开关")
+                ReadBoardSettingsSectionTitle("AI 内容处理开关")
             } footer: {
                 Text("全局开关开启后，仍可在文件夹或订阅源中单独设置处理策略，也可对单篇内容手动执行。")
+                    .readBoardTextRole(.detail)
             }
         }
         .formStyle(.grouped)
@@ -87,27 +88,17 @@ private struct ReadBoardAIPromptEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text("提示词")
-                    .font(.caption)
-                    .foregroundStyle(ReadBoardDesign.C.text2)
-                Spacer()
-                Picker("", selection: mode) {
+            ReadBoardSettingsPickerRow("提示词", selection: mode) {
                     Text("使用默认").tag("default")
                     Text("使用自定义").tag("custom")
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 190)
             }
             if mode.wrappedValue == "custom" {
                 customFields
                 Text("程序会把这些字段拼入固定提示词；输出格式和语言分流保持不变。")
-                    .font(.caption2)
+                    .readBoardTextRole(.detail)
                     .foregroundStyle(ReadBoardDesign.C.text3)
             }
         }
-        .padding(.leading, 20)
     }
 
     @ViewBuilder
@@ -119,7 +110,7 @@ private struct ReadBoardAIPromptEditor: View {
             weightRow("可读性", value: $configuration.scoreReadabilityWeight)
             let weights = normalizedWeights
             Text("实际权重：\(weights.0)% / \(weights.1)% / \(weights.2)%（自动归一化为 100%）")
-                .font(.caption2)
+                .readBoardTextRole(.detail)
                 .foregroundStyle(ReadBoardDesign.C.text3)
         case "summarize":
             pickerRow("摘要长度", selection: $configuration.summaryLength) {
@@ -144,13 +135,10 @@ private struct ReadBoardAIPromptEditor: View {
                 Text("英文").tag("en")
                 Text("日文").tag("ja")
             }
-            HStack {
-                Text("术语要求").font(.caption).foregroundStyle(ReadBoardDesign.C.text2)
-                Spacer()
+            ReadBoardSettingsInputRow("术语要求") {
                 TextField("如：公司名保留英文，首次出现补中文",
                           text: $configuration.translationTerms)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 310)
+                    .readBoardSettingsInput()
             }
         case "transcribe":
             pickerRow("口语程度", selection: $configuration.transcriptSpeechStyle) {
@@ -158,8 +146,9 @@ private struct ReadBoardAIPromptEditor: View {
                 Text("适度整理").tag("standard")
                 Text("偏书面化").tag("written")
             }
-            Toggle("翻译非中文转录稿", isOn: $configuration.transcriptTranslate)
-                .font(.caption)
+            ReadBoardSettingsToggleRow(
+                "翻译非中文转录稿",
+                isOn: $configuration.transcriptTranslate)
         default:
             EmptyView()
         }
@@ -176,13 +165,12 @@ private struct ReadBoardAIPromptEditor: View {
     }
 
     private func weightRow(_ title: String, value: Binding<Int>) -> some View {
-        Stepper(value: value, in: 5...80, step: 5) {
-            HStack {
-                Text(title).font(.caption).foregroundStyle(ReadBoardDesign.C.text2)
-                Spacer()
-                Text("\(value.wrappedValue)").font(.caption.monospacedDigit())
-            }
-        }
+        ReadBoardSettingsStepperRow(
+            title,
+            value: value,
+            range: 5...80,
+            step: 5,
+            displayValue: "\(value.wrappedValue)")
     }
 
     private func pickerRow<Value: Hashable, Content: View>(
@@ -190,13 +178,6 @@ private struct ReadBoardAIPromptEditor: View {
         selection: Binding<Value>,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        HStack {
-            Text(title).font(.caption).foregroundStyle(ReadBoardDesign.C.text2)
-            Spacer()
-            Picker("", selection: selection, content: content)
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(width: 130)
-        }
+        ReadBoardSettingsPickerRow(title, selection: selection, content: content)
     }
 }

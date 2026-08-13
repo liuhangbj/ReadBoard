@@ -158,6 +158,14 @@ struct LibraryCounts: Sendable {
     var podcastUnread = 0
     var videos = 0
     var videoUnread = 0
+    var inbox = 0
+    var inboxUnread = 0
+    var inboxArticles = 0
+    var inboxArticleUnread = 0
+    var inboxPodcasts = 0
+    var inboxPodcastUnread = 0
+    var inboxVideos = 0
+    var inboxVideoUnread = 0
 }
 
 struct ReaderPayload: Sendable {
@@ -169,6 +177,17 @@ struct ReaderPayload: Sendable {
     let videoId: String?
     let score: Int?
     let summary: String?
+}
+
+/// 资料库呈现状态。等待正文的条目仍保留在数据库和问题中心中，但不进入阅读列表、
+/// 左栏计数、自动处理或导出；正文成功落盘后再切回 visible。
+enum ContentVisibilityState {
+    static let visible = "visible"
+    static let awaitingContent = "awaiting_content"
+
+    static func visibleCondition(columnPrefix: String = "") -> String {
+        "\(columnPrefix)visibility_state = '\(visible)'"
+    }
 }
 
 // MARK: - SQLite 只读访问
@@ -675,8 +694,11 @@ public final class Database: @unchecked Sendable {
         let rows = queryRows(on: db, """
             WITH agg AS (
                 SELECT source_id,
-                       SUM(CASE WHEN is_duplicate = 0 AND deleted_at IS NULL THEN 1 ELSE 0 END) AS n,
-                       SUM(CASE WHEN is_duplicate = 0 AND deleted_at IS NULL AND read_at IS NULL THEN 1 ELSE 0 END) AS unread
+                       SUM(CASE WHEN is_duplicate = 0 AND deleted_at IS NULL
+                                      AND visibility_state = 'visible' THEN 1 ELSE 0 END) AS n,
+                       SUM(CASE WHEN is_duplicate = 0 AND deleted_at IS NULL
+                                      AND visibility_state = 'visible'
+                                      AND read_at IS NULL THEN 1 ELSE 0 END) AS unread
                 FROM content GROUP BY source_id
             )
             SELECT s.folder_id AS fid, f.name AS fname, s.id AS sid, s.name AS sname,
@@ -738,6 +760,7 @@ public final class Database: @unchecked Sendable {
                        processedFilters: [String: Int] = [:],
                        contentCategory: String? = nil,
                        unmetProcessingOnly: Bool = false,
+                       inboxOnly: Bool = false,
                        restrictToContentIds: Set<Int64>? = nil,
                        sortOrder: String = "newest",
                        limit: Int = 200, offset: Int = 0) -> [ContentItem] {
@@ -792,6 +815,8 @@ public final class Database: @unchecked Sendable {
         conds.append("c.is_duplicate = 0")
         // 排除已删除（软删除 guid 留底防重抓，列表不显示）
         conds.append("c.deleted_at IS NULL")
+        // 外部平台只返回标题时先留在后台补正文，不向阅读列表暴露空壳。
+        conds.append(Self.visibleContentCondition(columnPrefix: "c."))
         let col = "c."
         if source != nil { conds.append("\(col)source = ?") }
         if sourceId != nil { conds.append("\(col)source_id = ?") }
@@ -819,6 +844,7 @@ public final class Database: @unchecked Sendable {
         if unmetProcessingOnly {
             conds.append(Self.unmetProcessingCondition(columnPrefix: col))
         }
+        if inboxOnly { conds.append("\(col)ingest_origin='inbox'") }
         if let ids = restrictToContentIds {
             if ids.isEmpty {
                 conds.append("0")
@@ -1079,8 +1105,9 @@ public final class Database: @unchecked Sendable {
                      processedFilters: [String: Int] = [:],
                      contentCategory: String? = nil,
                      unmetProcessingOnly: Bool = false,
+                     inboxOnly: Bool = false,
                      restrictToContentIds: Set<Int64>? = nil) -> Int {
-        var sql = "UPDATE content SET read_at = datetime('now') WHERE read_at IS NULL AND is_duplicate = 0 AND deleted_at IS NULL"
+        var sql = "UPDATE content SET read_at = datetime('now') WHERE read_at IS NULL AND is_duplicate = 0 AND deleted_at IS NULL AND visibility_state = 'visible'"
         var conds: [String] = []
         if source != nil { conds.append("source = ?") }
         if sourceId != nil { conds.append("source_id = ?") }
@@ -1107,6 +1134,7 @@ public final class Database: @unchecked Sendable {
         if unmetProcessingOnly {
             conds.append(Self.unmetProcessingCondition(columnPrefix: ""))
         }
+        if inboxOnly { conds.append("ingest_origin='inbox'") }
         if let ids = restrictToContentIds {
             if ids.isEmpty { conds.append("0") }
             else { conds.append("id IN (\(ids.sorted().map(String.init).joined(separator: ",")))") }
@@ -1182,7 +1210,7 @@ public final class Database: @unchecked Sendable {
         guard open() else { return 0 }
         var stmt: OpaquePointer?
         var n = 0
-        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM content WHERE is_duplicate = 0 AND deleted_at IS NULL;", -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM content WHERE is_duplicate = 0 AND deleted_at IS NULL AND visibility_state = 'visible';", -1, &stmt, nil) == SQLITE_OK {
             if sqlite3_step(stmt) == SQLITE_ROW { n = Int(sqlite3_column_int64(stmt, 0)) }
         }
         sqlite3_finalize(stmt)
@@ -1192,7 +1220,7 @@ public final class Database: @unchecked Sendable {
     /// 已导出文章数（export_record 中有 delivered 记录的 content 数）
     func totalExported() -> Int {
         guard open() else { return 0 }
-        return scalarInt("SELECT COUNT(DISTINCT er.content_id) FROM export_record er JOIN content c ON c.id=er.content_id WHERE er.status='delivered' AND c.is_duplicate=0 AND c.deleted_at IS NULL;") ?? 0
+        return scalarInt("SELECT COUNT(DISTINCT er.content_id) FROM export_record er JOIN content c ON c.id=er.content_id WHERE er.status='delivered' AND c.is_duplicate=0 AND c.deleted_at IS NULL AND c.visibility_state='visible';") ?? 0
     }
 
     /// 「全部文章」未读数——与 totalCount 同口径（活跃有效 + 未读）。
@@ -1201,7 +1229,7 @@ public final class Database: @unchecked Sendable {
         guard open() else { return 0 }
         var stmt: OpaquePointer?
         var n = 0
-        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM content WHERE is_duplicate = 0 AND deleted_at IS NULL AND read_at IS NULL;", -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM content WHERE is_duplicate = 0 AND deleted_at IS NULL AND visibility_state = 'visible' AND read_at IS NULL;", -1, &stmt, nil) == SQLITE_OK {
             if sqlite3_step(stmt) == SQLITE_ROW { n = Int(sqlite3_column_int64(stmt, 0)) }
         }
         sqlite3_finalize(stmt)
@@ -1222,15 +1250,25 @@ public final class Database: @unchecked Sendable {
                    SUM(CASE WHEN ctype='podcast' AND read_at IS NULL THEN 1 ELSE 0 END) AS podcast_unread,
                    SUM(CASE WHEN ctype IN ('video','youtube') THEN 1 ELSE 0 END) AS videos,
                    SUM(CASE WHEN ctype IN ('video','youtube') AND read_at IS NULL THEN 1 ELSE 0 END) AS video_unread,
-                   (SELECT COUNT(DISTINCT er.content_id)
-                    FROM export_record er JOIN content ec ON ec.id=er.content_id
-                    WHERE er.status='delivered' AND ec.is_duplicate=0 AND ec.deleted_at IS NULL) AS exported,
+                   SUM(CASE WHEN ingest_origin='inbox' THEN 1 ELSE 0 END) AS inbox,
+                   SUM(CASE WHEN ingest_origin='inbox' AND read_at IS NULL THEN 1 ELSE 0 END) AS inbox_unread,
+                   SUM(CASE WHEN ingest_origin='inbox' AND ctype NOT IN ('podcast','video','youtube') THEN 1 ELSE 0 END) AS inbox_articles,
+                   SUM(CASE WHEN ingest_origin='inbox' AND ctype NOT IN ('podcast','video','youtube') AND read_at IS NULL THEN 1 ELSE 0 END) AS inbox_article_unread,
+                   SUM(CASE WHEN ingest_origin='inbox' AND ctype='podcast' THEN 1 ELSE 0 END) AS inbox_podcasts,
+                   SUM(CASE WHEN ingest_origin='inbox' AND ctype='podcast' AND read_at IS NULL THEN 1 ELSE 0 END) AS inbox_podcast_unread,
+                   SUM(CASE WHEN ingest_origin='inbox' AND ctype IN ('video','youtube') THEN 1 ELSE 0 END) AS inbox_videos,
+                   SUM(CASE WHEN ingest_origin='inbox' AND ctype IN ('video','youtube') AND read_at IS NULL THEN 1 ELSE 0 END) AS inbox_video_unread,
                    (SELECT COUNT(DISTINCT er.content_id)
                     FROM export_record er JOIN content ec ON ec.id=er.content_id
                     WHERE er.status='delivered' AND ec.is_duplicate=0
-                      AND ec.deleted_at IS NULL AND ec.read_at IS NULL) AS exported_unread
+                      AND ec.deleted_at IS NULL AND ec.visibility_state='visible') AS exported,
+                   (SELECT COUNT(DISTINCT er.content_id)
+                    FROM export_record er JOIN content ec ON ec.id=er.content_id
+                    WHERE er.status='delivered' AND ec.is_duplicate=0
+                      AND ec.deleted_at IS NULL AND ec.visibility_state='visible'
+                      AND ec.read_at IS NULL) AS exported_unread
             FROM content
-            WHERE is_duplicate=0 AND deleted_at IS NULL;
+            WHERE is_duplicate=0 AND deleted_at IS NULL AND visibility_state='visible';
             """).first else { return LibraryCounts() }
         func value(_ key: String) -> Int { Int(row[key] ?? "0") ?? 0 }
         return LibraryCounts(
@@ -1240,7 +1278,14 @@ public final class Database: @unchecked Sendable {
             exportedUnread: value("exported_unread"),
             articles: value("articles"), articleUnread: value("article_unread"),
             podcasts: value("podcasts"), podcastUnread: value("podcast_unread"),
-            videos: value("videos"), videoUnread: value("video_unread"))
+            videos: value("videos"), videoUnread: value("video_unread"),
+            inbox: value("inbox"), inboxUnread: value("inbox_unread"),
+            inboxArticles: value("inbox_articles"),
+            inboxArticleUnread: value("inbox_article_unread"),
+            inboxPodcasts: value("inbox_podcasts"),
+            inboxPodcastUnread: value("inbox_podcast_unread"),
+            inboxVideos: value("inbox_videos"),
+            inboxVideoUnread: value("inbox_video_unread"))
     }
 
     /// 条目设置要求的处理结果仍有任一缺失。这里刻意不判断 Worker 水位线、退避、
@@ -1257,6 +1302,10 @@ public final class Database: @unchecked Sendable {
          OR (\(c)auto_transcribe=1 AND LENGTH(TRIM(COALESCE(\(c)llm_transcript_md,'')))=0
           AND NOT EXISTS (SELECT 1 FROM content_processing_ignore i WHERE i.content_id=\(c)id AND i.jtype='transcribe')))
         """
+    }
+
+    static func visibleContentCondition(columnPrefix: String = "") -> String {
+        ContentVisibilityState.visibleCondition(columnPrefix: columnPrefix)
     }
 
     // MARK: 辅助

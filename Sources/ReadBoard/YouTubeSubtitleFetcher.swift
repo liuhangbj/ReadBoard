@@ -181,17 +181,16 @@ enum YouTubeSubtitleFetcher {
 }
 
 enum SubtitleTextFormatter {
+    struct TimedLine: Equatable, Sendable {
+        let start: TimeInterval
+        var end: TimeInterval
+        let text: String
+    }
+
     static func markdown(from rawLines: [String]) -> String? {
         var lines: [String] = []
         for raw in rawLines {
-            let cleaned = raw
-                .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-                .replacingOccurrences(of: "&nbsp;", with: " ")
-                .replacingOccurrences(of: "&amp;", with: "&")
-                .replacingOccurrences(of: "&lt;", with: "<")
-                .replacingOccurrences(of: "&gt;", with: ">")
-                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleaned = clean(raw)
             guard !cleaned.isEmpty, cleaned != lines.last else { continue }
             lines.append(cleaned)
         }
@@ -209,6 +208,45 @@ enum SubtitleTextFormatter {
         }
         if !current.isEmpty { paragraphs.append(current) }
         return paragraphs.joined(separator: "\n\n")
+    }
+
+    /// 保留平台字幕的时间片边界：每个 cue 使用 Markdown 硬换行，明显停顿则另起段落。
+    /// 不补写标点，也不依赖任何语言模型。
+    static func markdown(
+        from rawLines: [TimedLine], paragraphGap: TimeInterval = 1.2
+    ) -> String? {
+        var lines: [TimedLine] = []
+        for raw in rawLines.sorted(by: { $0.start < $1.start }) {
+            let cleaned = clean(raw.text)
+            guard !cleaned.isEmpty else { continue }
+            if cleaned == lines.last?.text {
+                lines[lines.count - 1].end = max(lines[lines.count - 1].end, raw.end)
+                continue
+            }
+            lines.append(TimedLine(start: raw.start, end: raw.end, text: cleaned))
+        }
+        guard !lines.isEmpty else { return nil }
+
+        var markdown = ""
+        for index in lines.indices {
+            markdown += lines[index].text
+            guard index < lines.index(before: lines.endIndex) else { continue }
+            let next = lines[lines.index(after: index)]
+            let gap = max(0, next.start - lines[index].end)
+            markdown += gap >= paragraphGap ? "\n\n" : "  \n"
+        }
+        return markdown
+    }
+
+    private static func clean(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func endsSentence(_ text: String) -> Bool {

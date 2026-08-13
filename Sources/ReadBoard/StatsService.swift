@@ -39,9 +39,12 @@ public final class StatsService: @unchecked Sendable {
         // 单趟聚合：9 个 content 维度一次扫完
         if let row = db.queryRows("""
             SELECT
-              SUM(CASE WHEN is_duplicate = 0 AND deleted_at IS NULL THEN 1 ELSE 0 END) AS total,
-              SUM(CASE WHEN read_at IS NULL AND is_duplicate = 0 AND deleted_at IS NULL THEN 1 ELSE 0 END) AS unread,
-              SUM(CASE WHEN starred = 1 AND is_duplicate = 0 AND deleted_at IS NULL THEN 1 ELSE 0 END) AS starred,
+              SUM(CASE WHEN is_duplicate = 0 AND deleted_at IS NULL
+                             AND visibility_state = 'visible' THEN 1 ELSE 0 END) AS total,
+              SUM(CASE WHEN read_at IS NULL AND is_duplicate = 0 AND deleted_at IS NULL
+                             AND visibility_state = 'visible' THEN 1 ELSE 0 END) AS unread,
+              SUM(CASE WHEN starred = 1 AND is_duplicate = 0 AND deleted_at IS NULL
+                             AND visibility_state = 'visible' THEN 1 ELSE 0 END) AS starred,
               SUM(CASE WHEN is_duplicate = 1 THEN 1 ELSE 0 END) AS dup,
               SUM(CASE WHEN content_md IS NOT NULL AND content_md != '' AND is_duplicate = 0 THEN 1 ELSE 0 END) AS fulltext,
               SUM(CASE WHEN llm_score IS NOT NULL AND is_duplicate = 0 THEN 1 ELSE 0 END) AS scored,
@@ -98,6 +101,8 @@ public final class StatsService: @unchecked Sendable {
         db.queryRows("""
             SELECT s.name, COUNT(c.id) AS cnt FROM content_source s
             JOIN content c ON c.source_id = s.id
+              AND c.is_duplicate=0 AND c.deleted_at IS NULL
+              AND c.visibility_state='visible'
             GROUP BY s.id ORDER BY cnt DESC LIMIT ?;
             """, params: [limit]).map {
                 ($0["name"] ?? "", Int($0["cnt"] ?? "0") ?? 0)

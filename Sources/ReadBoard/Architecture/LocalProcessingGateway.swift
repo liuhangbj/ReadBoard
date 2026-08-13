@@ -233,6 +233,12 @@ public final class LocalProcessingGateway: ProcessingGateway, @unchecked Sendabl
             throw ProcessingGatewayError.contentNotFound(contentID)
         }
         let config = row["config"] ?? "{}"
+        let itemPolicy = PipelinePolicy(
+            autoScore: db.scalarInt("SELECT auto_score FROM content WHERE id=?", params: [contentID]) == 1,
+            autoTranslate: db.scalarInt("SELECT auto_translate FROM content WHERE id=?", params: [contentID]) == 1,
+            autoTranscribe: db.scalarInt("SELECT auto_transcribe FROM content WHERE id=?", params: [contentID]) == 1,
+            autoSummarize: db.scalarInt("SELECT auto_summarize FROM content WHERE id=?", params: [contentID]) == 1)
+        let hasSourcePolicy = row["config"] != nil
         return Input(
             contentID: contentID,
             title: row["title"] ?? "内容 #\(contentID)",
@@ -244,9 +250,17 @@ public final class LocalProcessingGateway: ProcessingGateway, @unchecked Sendabl
             contentHTML: loaded.contentHtml,
             transcriptMarkdown: loaded.llmTranscriptMd,
             audioURL: loaded.audioUrl,
-            policy: PipelinePolicy.from(configJson: config),
-            fetchMode: Self.fetchMode(config: config)
+            policy: hasSourcePolicy ? PipelinePolicy.from(configJson: config) : itemPolicy,
+            fetchMode: hasSourcePolicy ? Self.fetchMode(config: config)
+                : Self.inboxFetchMode(contentType: row["ctype"] ?? "article", url: row["url"] ?? "")
         )
+    }
+
+    private static func inboxFetchMode(contentType: String, url: String) -> FetchMode {
+        guard let host = URL(string: url)?.host?.lowercased() else { return .defuddle }
+        if host.contains("youtube.com") || host == "youtu.be" { return .youtubeSubtitle }
+        if host.contains("bilibili.com") || host == "b23.tv" { return .bilibiliSubtitle }
+        return contentType == "podcast" ? .summary : .defuddle
     }
 
     private func perform(_ command: ProcessingCommand, input: Input) async -> Outcome {

@@ -17,8 +17,8 @@ public struct SourceScope: Codable, Equatable, Sendable {
 
 public enum SourcePolicyKey: String, Codable, CaseIterable, Sendable {
     case score = "auto_score"
-    case translate = "auto_translate"
     case summarize = "auto_summarize"
+    case translate = "auto_translate"
     case transcribe = "auto_transcribe"
 }
 
@@ -144,7 +144,7 @@ public protocol SourceManagementGateway: Sendable {
     func redetectFetchMode(scope: SourceScope) async throws
     func setFetchInterval(scope: SourceScope, minutes: Int) async throws
     func setEnabled(sourceID: Int64, enabled: Bool) async throws
-    func setMaximumRetainedContent(sourceID: Int64, count: Int) async throws
+    func setMaximumRetainedContent(scope: SourceScope, count: Int) async throws
     func refetchFulltext(scope: SourceScope, fullHistory: Bool) async throws -> SourceMaintenanceResult
     func retryFulltext(contentID: Int64) async throws -> SourceMaintenanceResult
 }

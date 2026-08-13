@@ -161,7 +161,8 @@ public struct ReadBoardArticleModePicker<Item: Hashable>: View {
                 let isSelected = selection == item
                 Button { selection = item } label: {
                     Text(label)
-                        .font(.system(size: fontSize, weight: isSelected ? .medium : .regular))
+                        .readBoardInterfaceFont(
+                            size: fontSize, weight: isSelected ? .medium : .regular)
                         .foregroundStyle(
                             isSelected ? ReadBoardDesign.C.accent : ReadBoardDesign.C.text2)
                         .frame(maxWidth: fillsAvailableWidth ? .infinity : nil)
@@ -275,7 +276,7 @@ public struct ReadBoardArticleActionBar<SettingsContent: View>: View {
                     .frame(maxWidth: 340)
             } else {
                 Text(availableModes.first?.title ?? "正文")
-                    .font(.system(size: 10, weight: .medium))
+                    .readBoardInterfaceFont(size: 10, weight: .medium)
                     .foregroundStyle(ReadBoardDesign.C.text3)
             }
 
@@ -298,7 +299,7 @@ public struct ReadBoardArticleActionBar<SettingsContent: View>: View {
                 }
                 Button { showsSettings = true } label: {
                     Text("Aa")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .readBoardInterfaceFont(size: 12, weight: .semibold)
                         .frame(width: 24, height: 24)
                 }
                 .buttonStyle(ReadBoardQuietButtonStyle())
@@ -343,7 +344,7 @@ public struct ReadBoardArticleHeader<TitleContent: View>: View {
         metadataParts: [String],
         kind: ReadBoardArticleKind,
         badges: [ReadBoardArticleBadgeValue] = [],
-        translatedTitleFont: Font = .system(size: 16, weight: .medium, design: .serif),
+        translatedTitleFont: Font = .system(size: 16, weight: .medium),
         translatedTitleColor: Color = ReadBoardDesign.C.text2,
         metadataFont: Font = .system(size: 11),
         metadataColor: Color = ReadBoardDesign.C.text3,
@@ -375,6 +376,7 @@ public struct ReadBoardArticleHeader<TitleContent: View>: View {
                 HStack(spacing: 6) {
                     kindIcon
                     Text(metadataParts.joined(separator: "  ·  "))
+                        .textSelection(.enabled)
                 }
                 .font(metadataFont)
                 .foregroundStyle(metadataColor)
@@ -455,13 +457,13 @@ public struct ReadBoardArticleEmptyState: View {
     public var body: some View {
         VStack(spacing: ReadBoardDesign.Space.md) {
             Image(systemName: icon)
-                .font(.system(size: 24, weight: .light))
+                .readBoardInterfaceFont(size: 24, weight: .light)
                 .foregroundStyle(ReadBoardDesign.C.text3)
             Text(title)
-                .font(.system(size: 15, weight: .semibold, design: .serif))
+                .readBoardInterfaceFont(size: 15, weight: .semibold)
                 .foregroundStyle(ReadBoardDesign.C.text2)
             Text(message)
-                .font(.system(size: 11)).foregroundStyle(ReadBoardDesign.C.text3)
+                .readBoardInterfaceFont(size: 11).foregroundStyle(ReadBoardDesign.C.text3)
                 .multilineTextAlignment(.center)
             if let retry {
                 Button("重试", action: retry).buttonStyle(ReadBoardSecondaryButtonStyle())

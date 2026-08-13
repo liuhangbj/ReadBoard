@@ -56,17 +56,17 @@ public struct ReadBoardPlatformSettingsPane: View {
                     VStack(alignment: .leading, spacing: 7) {
                         HStack(spacing: 12) {
                             Image(systemName: type.icon)
-                                .font(.system(size: 16))
+                                .readBoardTextRole(.item)
                                 .foregroundStyle(ReadBoardDesign.C.accent)
                                 .frame(width: 24)
                             VStack(alignment: .leading, spacing: 2) {
                                 HStack(spacing: 6) {
-                                    Text(type.title).font(.system(size: 13, weight: .semibold))
+                                    Text(type.title).readBoardTextRole(.itemTitle)
                                     if let count = sourceCounts[type.id], count > 0 {
                                         ReadBoardBadge(text: "\(count) 个源", color: ReadBoardDesign.C.text3)
                                     }
                                 }
-                                Text(type.subtitle).font(.caption).foregroundStyle(ReadBoardDesign.C.text2)
+                                Text(type.subtitle).readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.text2)
                             }
                             Spacer()
                             if permissions.allows(.manageSources, capability: .sourceManagement) {
@@ -80,9 +80,10 @@ public struct ReadBoardPlatformSettingsPane: View {
                     .padding(.vertical, 5)
                 }
             } header: {
-                Text("多平台订阅")
+                ReadBoardSettingsSectionTitle("多平台订阅")
             } footer: {
                 Text("关闭类型后不会删除已有内容，但该类型的抓取与新建订阅会暂停。具体订阅源请在“订阅管理”中维护。")
+                    .readBoardTextRole(.detail)
             }
         }
         .formStyle(.grouped)
@@ -145,7 +146,7 @@ public struct ReadBoardPlatformSettingsPane: View {
         HStack(spacing: 8) {
             Circle().fill(authenticationColor(status.phase)).frame(width: 7, height: 7)
             Text(status.accountName ?? status.message ?? authenticationTitle(status.phase))
-                .font(.caption).foregroundStyle(ReadBoardDesign.C.text2).lineLimit(1)
+                .readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.text2).lineLimit(1)
             Spacer()
             ReadBoardBadge(text: authenticationTitle(status.phase),
                            color: authenticationColor(status.phase))
@@ -153,9 +154,11 @@ public struct ReadBoardPlatformSettingsPane: View {
                 if status.phase == .authenticated {
                     Button("退出") { signOutStatus = status }
                         .buttonStyle(ReadBoardQuietButtonStyle())
+                        .readBoardSettingsButton(.inline)
                 } else {
                     Button("重新登录") { beginAuthentication(status.platformID) }
                         .buttonStyle(ReadBoardSecondaryButtonStyle())
+                        .readBoardSettingsButton(.inline)
                 }
             }
         }
@@ -217,7 +220,7 @@ private struct ReadBoardPlatformAuthenticationSheet: View {
 
     var body: some View {
         VStack(spacing: ReadBoardDesign.Space.lg) {
-            Text("平台登录").font(.system(size: 18, weight: .semibold, design: .serif))
+            Text("平台登录").readBoardTextRole(.pageTitle)
             if let image = qrImage(challenge.qrPayload) {
                 image.resizable().interpolation(.none).scaledToFit()
                     .frame(width: 220, height: 220)
@@ -225,9 +228,10 @@ private struct ReadBoardPlatformAuthenticationSheet: View {
                     .clipShape(RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.lg))
             }
             Text("使用对应平台 App 扫描二维码并确认登录")
-                .font(.caption).foregroundStyle(ReadBoardDesign.C.text2)
+                .readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.text2)
             Button("取消", action: onCancel)
                 .buttonStyle(ReadBoardSecondaryButtonStyle())
+                .readBoardSettingsButton(.inline)
         }
         .padding(ReadBoardDesign.Space.xl)
         .frame(minWidth: 360, minHeight: 420)

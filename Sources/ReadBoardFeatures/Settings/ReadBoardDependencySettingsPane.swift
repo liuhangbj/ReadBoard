@@ -49,7 +49,7 @@ public struct ReadBoardDependencySettingsPane: View {
                         description: "yt-dlp 与 ffmpeg",
                         ids: ["ytdlp", "ffmpeg"])
                     if let message {
-                        Section { Text(message).font(.caption).foregroundStyle(ReadBoardDesign.C.text2) }
+                        Section { Text(message).readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.text2) }
                     }
                 }
                 .formStyle(.grouped)
@@ -78,19 +78,20 @@ public struct ReadBoardDependencySettingsPane: View {
             }
         } header: {
             HStack {
-                Text(title)
+                ReadBoardSettingsSectionTitle(title)
                 Spacer()
                 let ready = ids.allSatisfy { id in
                     dependencies.first(where: { $0.id == id })?.installed == true
                 }
                 Label(ready ? "可用" : "缺少依赖",
                       systemImage: ready ? "checkmark.circle" : "exclamationmark.triangle")
-                    .font(.caption)
+                    .readBoardTextRole(.detail)
                     .foregroundStyle(ready
                         ? ReadBoardDesign.C.scoreHigh : ReadBoardDesign.C.scoreMid)
             }
         } footer: {
             Text(description)
+                .readBoardTextRole(.detail)
         }
     }
 
@@ -102,51 +103,55 @@ public struct ReadBoardDependencySettingsPane: View {
                     .foregroundStyle(item.installed
                         ? ReadBoardDesign.C.scoreHigh : ReadBoardDesign.C.scoreMid)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(item.displayName).font(.system(size: 12, weight: .semibold))
+                    Text(item.displayName).readBoardTextRole(.itemTitle)
                     Text(item.version ?? (item.installed ? "已安装" : "服务端未找到"))
-                        .font(.caption2).foregroundStyle(ReadBoardDesign.C.text3)
+                        .readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.text3)
                 }
                 Spacer()
                 if let active = activeTask(item.id) {
                     ProgressView().controlSize(.small)
-                    Text(active.message).font(.caption2).foregroundStyle(ReadBoardDesign.C.text2)
+                    Text(active.message).readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.text2)
                     Button("取消") { Task { await cancel(active) } }
                         .buttonStyle(ReadBoardQuietButtonStyle())
+                        .readBoardSettingsButton(.inline)
                 } else if supportsInstall(item.id) {
                     Button(item.installed ? "更新" : "安装") {
                         Task { await submit(item) }
                     }
                     .buttonStyle(ReadBoardSecondaryButtonStyle())
+                    .readBoardSettingsButton(.inline)
                 }
             }
 
             if allowsServerPathEditing {
                 HStack(spacing: 8) {
                     TextField("自动检测或输入服务端路径", text: pathBinding(item))
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11, design: .monospaced))
+                        .readBoardSettingsInput(.fill, design: .monospaced)
                     #if os(macOS)
-                    Button("选择…") { pickPath(item) }.controlSize(.small)
+                    Button("选择…") { pickPath(item) }
+                        .buttonStyle(ReadBoardSecondaryButtonStyle())
+                        .readBoardSettingsButton(.inline)
                     #endif
                     Button("保存") { savePath(item) }
-                        .controlSize(.small)
+                        .buttonStyle(ReadBoardSecondaryButtonStyle())
+                        .readBoardSettingsButton(.inline)
                         .disabled((editingPaths[item.id] ?? "") == (item.path ?? ""))
                 }
             } else {
                 Text(item.path ?? "由服务端自动检测")
-                    .font(.system(size: 10, design: .monospaced))
+                    .readBoardTextRole(.detail, design: .monospaced)
                     .foregroundStyle(ReadBoardDesign.C.text3)
                     .textSelection(.enabled)
                 Text("服务端路径只能在 Core 主机修改。")
-                    .font(.caption2).foregroundStyle(ReadBoardDesign.C.text3)
+                    .readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.text3)
             }
 
             if item.customPathIsStale {
                 Text("已保存的路径不可用，请在 Core 主机修改或清空后重新检测。")
-                    .font(.caption).foregroundStyle(ReadBoardDesign.C.scoreLow)
+                    .readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.scoreLow)
             }
             if let failed = tasks.first(where: { $0.dependencyID == item.id && $0.phase == .failed }) {
-                Text(failed.message).font(.caption).foregroundStyle(ReadBoardDesign.C.scoreLow)
+                Text(failed.message).readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.scoreLow)
             }
         }
         .padding(.vertical, 4)

@@ -142,6 +142,13 @@ public struct RemoteConfigurationGateway: ConfigurationGateway {
     public func moveLLMProfile(from: Int, to: Int) async {
         await acknowledge("api/v1/configuration/llm/move", RemoteMoveRequest(from: from, to: to))
     }
+    public func llmAPIKey(profileID: Int) async throws -> String? {
+        let value = try await client.post(
+            "api/v1/configuration/llm/api-key",
+            body: RemoteIntIDRequest(id: profileID),
+            as: RemoteStringValue.self).value
+        return value.isEmpty ? nil : value
+    }
     public func testLLMProfile(_ update: LLMProfileUpdate) async -> ConnectionTestResult {
         (try? await client.post("api/v1/configuration/llm/test", body: update,
                                as: ConnectionTestResult.self))

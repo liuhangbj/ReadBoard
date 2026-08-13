@@ -69,12 +69,14 @@ public struct ReadBoardMarkdownStyle {
     public let fontSize: CGFloat
     public let lineSpacing: CGFloat
     public let palette: ReadBoardMarkdownPalette
+    public let layoutRevision: String
     private let fontProvider: (CGFloat, Font.Weight, Font.Design) -> Font
 
     public init(
         fontSize: CGFloat,
         lineSpacing: CGFloat,
         palette: ReadBoardMarkdownPalette = .paper,
+        layoutRevision: String = "default",
         fontProvider: @escaping (CGFloat, Font.Weight, Font.Design) -> Font = {
             size, weight, design in .system(size: size, weight: weight, design: design)
         }
@@ -82,6 +84,7 @@ public struct ReadBoardMarkdownStyle {
         self.fontSize = fontSize
         self.lineSpacing = lineSpacing
         self.palette = palette
+        self.layoutRevision = layoutRevision
         self.fontProvider = fontProvider
     }
 
@@ -135,6 +138,10 @@ public struct ReadBoardMarkdownBodyView: View {
                 }
             }
         }
+        // macOS 有时会让包含 AttributedString 的 LazyVStack 沿用字体变化前的
+        // 文本布局缓存，结果是当前文章正文高度变成 0。只重建渲染子树，保留
+        // 已解析的 units；切换字体、字号或主题时无需重新加载文章。
+        .id(style.layoutRevision)
         .frame(maxWidth: .infinity, alignment: .leading)
         .task(id: markdown) {
             let parsed = await Task.detached(priority: .userInitiated) {

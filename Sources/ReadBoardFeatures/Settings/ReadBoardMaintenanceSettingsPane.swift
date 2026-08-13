@@ -28,7 +28,7 @@ public struct ReadBoardMaintenanceSettingsPane: View {
             backupSection
             trashSection
             if let message {
-                Section { Text(message).font(.caption).foregroundStyle(ReadBoardDesign.C.text2) }
+                Section { Text(message).readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.text2) }
             }
         }
         .formStyle(.grouped)
@@ -66,12 +66,18 @@ public struct ReadBoardMaintenanceSettingsPane: View {
     }
 
     private var storageSection: some View {
-        Section("当前占用") {
-            LabeledContent("数据库", value: bytes(snapshot.usage.databaseBytes))
-            LabeledContent("数据库备份", value: "\(bytes(snapshot.usage.backupBytes)) · \(snapshot.usage.backupCount) 份")
-            LabeledContent("临时文件", value: "\(bytes(snapshot.usage.temporaryBytes)) · \(snapshot.usage.temporaryCount) 项")
-            LabeledContent("回收站", value: bytes(snapshot.usage.trashBytes))
-            LabeledContent("可清理原始 HTML", value: "\(snapshot.usage.cleanableHTMLCount) 条")
+        Section {
+            ReadBoardSettingsValueRow("数据库", value: bytes(snapshot.usage.databaseBytes))
+            ReadBoardSettingsValueRow(
+                "数据库备份",
+                value: "\(bytes(snapshot.usage.backupBytes)) · \(snapshot.usage.backupCount) 份")
+            ReadBoardSettingsValueRow(
+                "临时文件",
+                value: "\(bytes(snapshot.usage.temporaryBytes)) · \(snapshot.usage.temporaryCount) 项")
+            ReadBoardSettingsValueRow("回收站", value: bytes(snapshot.usage.trashBytes))
+            ReadBoardSettingsValueRow(
+                "可清理原始 HTML",
+                value: "\(snapshot.usage.cleanableHTMLCount) 条")
             HStack {
                 Spacer()
                 Button {
@@ -81,28 +87,43 @@ public struct ReadBoardMaintenanceSettingsPane: View {
                     else { Label("立即清理", systemImage: "sparkles") }
                 }
                 .buttonStyle(ReadBoardSecondaryButtonStyle())
+                .readBoardSettingsButton(.inline)
                 .disabled(busyAction != nil)
             }
+        } header: {
+            ReadBoardSettingsSectionTitle("当前占用")
         }
     }
 
     private var policySection: some View {
-        Section("清理策略") {
-            Toggle("删除长期已读内容", isOn: $policy.deleteReadEnabled)
+        Section {
+            ReadBoardSettingsToggleRow("删除长期已读内容", isOn: $policy.deleteReadEnabled)
             if policy.deleteReadEnabled {
-                Stepper("已读超过 \(policy.deleteReadAfterDays) 天",
-                        value: $policy.deleteReadAfterDays, in: 7...365, step: 7)
+                ReadBoardSettingsStepperRow(
+                    "已读内容保留",
+                    value: $policy.deleteReadAfterDays,
+                    range: 7...365,
+                    step: 7,
+                    displayValue: "\(policy.deleteReadAfterDays) 天")
             }
-            Toggle("清理已提取内容的原始 HTML", isOn: $policy.cleanHTML)
+            ReadBoardSettingsToggleRow("清理已提取内容的原始 HTML", isOn: $policy.cleanHTML)
             if policy.cleanHTML {
-                Stepper("保留原始 HTML \(policy.cleanHTMLAfterDays) 天",
-                        value: $policy.cleanHTMLAfterDays, in: 1...90)
+                ReadBoardSettingsStepperRow(
+                    "原始 HTML 保留",
+                    value: $policy.cleanHTMLAfterDays,
+                    range: 1...90,
+                    displayValue: "\(policy.cleanHTMLAfterDays) 天")
             }
-            Toggle("限制数据库备份数量", isOn: $policy.backupRetentionEnabled)
+            ReadBoardSettingsToggleRow("限制数据库备份数量", isOn: $policy.backupRetentionEnabled)
             if policy.backupRetentionEnabled {
-                Stepper("保留最近 \(policy.backupKeepCount) 份",
-                        value: $policy.backupKeepCount, in: 1...30)
+                ReadBoardSettingsStepperRow(
+                    "数据库备份保留",
+                    value: $policy.backupKeepCount,
+                    range: 1...30,
+                    displayValue: "\(policy.backupKeepCount) 份")
             }
+        } header: {
+            ReadBoardSettingsSectionTitle("清理策略")
         }
     }
 
@@ -110,7 +131,7 @@ public struct ReadBoardMaintenanceSettingsPane: View {
         Section {
             HStack {
                 Text(snapshot.lastBackupAt.map { "最近备份：\($0)" } ?? "尚无自动备份记录")
-                    .font(.caption)
+                    .readBoardTextRole(.detail)
                     .foregroundStyle(ReadBoardDesign.C.text3)
                 Spacer()
                 Button {
@@ -119,26 +140,29 @@ public struct ReadBoardMaintenanceSettingsPane: View {
                     if busyAction == "backup" { ProgressView().controlSize(.small) }
                     else { Label("创建备份", systemImage: "externaldrive.badge.plus") }
                 }
+                .buttonStyle(ReadBoardSecondaryButtonStyle())
+                .readBoardSettingsButton(.inline)
                 .disabled(busyAction != nil)
             }
             if let error = snapshot.lastBackupError, !error.isEmpty {
-                Text(error).font(.caption).foregroundStyle(ReadBoardDesign.C.scoreLow)
+                Text(error).readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.scoreLow)
             }
             ForEach(snapshot.backups) { backup in
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(backup.displayName).font(.system(size: 12, weight: .medium))
+                        Text(backup.displayName).readBoardTextRole(.itemTitle)
                         Text("\(backup.date.formatted(date: .abbreviated, time: .shortened)) · \(bytes(backup.sizeBytes))")
-                            .font(.caption2).foregroundStyle(ReadBoardDesign.C.text3)
+                            .readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.text3)
                     }
                     Spacer()
                     Button("恢复") { backupToRestore = backup }
-                        .buttonStyle(ReadBoardQuietButtonStyle())
+                        .buttonStyle(ReadBoardSecondaryButtonStyle())
+                        .readBoardSettingsButton(.inline)
                         .disabled(busyAction != nil)
                 }
             }
         } header: {
-            Text("数据库备份 / 恢复")
+            ReadBoardSettingsSectionTitle("数据库备份 / 恢复")
         }
     }
 
@@ -150,27 +174,31 @@ public struct ReadBoardMaintenanceSettingsPane: View {
                 ForEach(snapshot.trash) { item in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(item.date).font(.system(size: 12, weight: .medium))
+                            Text(item.date).readBoardTextRole(.itemTitle)
                             Text("\(item.itemCount) 条 · \(bytes(item.sizeBytes))")
-                                .font(.caption2).foregroundStyle(ReadBoardDesign.C.text3)
+                                .readBoardTextRole(.detail).foregroundStyle(ReadBoardDesign.C.text3)
                         }
                         Spacer()
                         Button("恢复") { Task { await restoreTrash(item) } }
-                            .buttonStyle(ReadBoardQuietButtonStyle())
+                            .buttonStyle(ReadBoardSecondaryButtonStyle())
+                            .readBoardSettingsButton(.inline)
                         Button(role: .destructive) { trashToDelete = item } label: {
                             Image(systemName: "trash")
                         }
-                        .buttonStyle(ReadBoardQuietButtonStyle())
+                        .buttonStyle(ReadBoardDestructiveButtonStyle())
+                        .readBoardSettingsButton(.icon)
                     }
                 }
                 HStack {
                     Spacer()
                     Button("清空回收站", role: .destructive) { confirmClearTrash = true }
+                        .buttonStyle(ReadBoardDestructiveButtonStyle())
+                        .readBoardSettingsButton(.inline)
                         .disabled(busyAction != nil)
                 }
             }
         } header: {
-            Text("回收站（删除内容的可恢复备份）")
+            ReadBoardSettingsSectionTitle("回收站（删除内容的可恢复备份）")
         }
     }
 

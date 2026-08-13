@@ -47,6 +47,7 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/readboard-package.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 TMP_APP="$TMP_ROOT/ReadBoard.app"
 mkdir -p "$TMP_APP/Contents/MacOS" "$TMP_APP/Contents/Resources"
+mkdir -p "$TMP_APP/Contents/PlugIns"
 
 cp -p "$BIN" "$TMP_APP/Contents/MacOS/ReadBoard"
 cp -p "$PACKAGING_DIR/Info.plist" "$TMP_APP/Contents/Info.plist"
@@ -58,6 +59,9 @@ if [ -n "${READBOARD_VERSION:-}" ]; then
         "$TMP_APP/Contents/Info.plist"
 fi
 ditto "$RESOURCE_PAYLOAD" "$TMP_APP/Contents/Resources"
+"$SCRIPT_DIR/build_share_extension.sh" \
+    "$TMP_APP/Contents/PlugIns/ReadBoardShareExtension.appex" \
+    "readboard" "com.liuhangbj.readboard.share"
 
 # macOS 的传统 icns 不会随系统外观自动切换，因此把两个版本都装入 App，
 # 并在打包时把当前外观对应的版本设为主图标。可用
@@ -102,8 +106,13 @@ cp -p "$TMP_APP/Contents/Resources/$PRIMARY_ICON" \
 
 xattr -cr "$TMP_APP" 2>/dev/null || true
 if [ "$SIGN_IDENTITY" = "-" ]; then
+    codesign --force --sign - \
+        "$TMP_APP/Contents/PlugIns/ReadBoardShareExtension.appex"
     codesign --force --sign - "$TMP_APP"
 else
+    codesign --force --options runtime --timestamp \
+        --sign "$SIGN_IDENTITY" \
+        "$TMP_APP/Contents/PlugIns/ReadBoardShareExtension.appex"
     codesign --force --options runtime --timestamp \
         --entitlements "$PACKAGING_DIR/ReadBoard.entitlements" \
         --sign "$SIGN_IDENTITY" "$TMP_APP"

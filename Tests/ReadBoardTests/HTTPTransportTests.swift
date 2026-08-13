@@ -16,7 +16,7 @@ final class HTTPTransportTests: XCTestCase {
     func testProtectedRouteRejectsMissingBearerToken() async throws {
         let router = ReadBoardHTTPRouter(services: .live, bearerToken: "secret")
         let response = await router.handle(.init(method: "GET", path: "/api/v1/configuration",
-            headers: ["X-ReadBoard-API-Version": "1"]))
+            headers: [ReadBoardAPI.versionHeader: ReadBoardAPI.version]))
         XCTAssertEqual(response.status, 401)
     }
 
@@ -41,6 +41,7 @@ final class HTTPTransportTests: XCTestCase {
             ("GET", "/api/v1/configuration", Data()),
             ("GET", "/api/v1/maintenance", Data()),
             ("GET", "/api/v1/dependencies", Data()),
+            ("GET", "/api/v1/inbox/configuration", Data()),
         ]
         for (method, path, requestBody) in routes {
             let response = await router.handle(.init(
@@ -61,6 +62,33 @@ final class HTTPTransportTests: XCTestCase {
         let task = try JSONDecoder().decode(DependencyTaskSnapshot.self, from: response.body)
         XCTAssertEqual(task.dependencyID, "ffmpeg")
         XCTAssertEqual(task.phase, .queued)
+    }
+
+    func testLLMAPIKeyRouteRequiresConfigurationPermissionAndReturnsOnDemand() async throws {
+        let router = ReadBoardHTTPRouter(
+            services: stubServices(configuration: StubConfigurationGateway(apiKey: "secret-key")),
+            bearerToken: "secret")
+        let response = await router.handle(.init(
+            method: "POST",
+            path: "/api/v1/configuration/llm/api-key",
+            headers: authorizedHeaders,
+            body: try body(RemoteIntIDRequest(id: 0))))
+        XCTAssertEqual(response.status, 200)
+        XCTAssertEqual(
+            try JSONDecoder().decode(RemoteStringValue.self, from: response.body).value,
+            "secret-key")
+    }
+
+    func testConfigurationSnapshotStillNeverContainsLLMAPIKey() async throws {
+        let router = ReadBoardHTTPRouter(
+            services: stubServices(configuration: StubConfigurationGateway(apiKey: "secret-key")),
+            bearerToken: "secret")
+        let response = await router.handle(.init(
+            method: "GET",
+            path: "/api/v1/configuration",
+            headers: authorizedHeaders))
+        XCTAssertEqual(response.status, 200)
+        XCTAssertFalse(String(decoding: response.body, as: UTF8.self).contains("secret-key"))
     }
 
     func testMalformedJSONBecomesStableInvalidRequest() async {
@@ -91,7 +119,8 @@ final class HTTPTransportTests: XCTestCase {
     private func body<T: Encodable>(_ value: T) throws -> Data { try JSONEncoder().encode(value) }
 
     private func stubServices(
-        library: any LibraryGateway = StubLibraryGateway()
+        library: any LibraryGateway = StubLibraryGateway(),
+        configuration: any ConfigurationGateway = StubConfigurationGateway()
     ) -> ReadBoardServices {
         let base = ReadBoardServices.live
         return ReadBoardServices(
@@ -105,9 +134,10 @@ final class HTTPTransportTests: XCTestCase {
             runtimeStatus: base.runtimeStatus,
             export: StubExportGateway(),
             administration: StubAdministrationGateway(),
-            configuration: StubConfigurationGateway(),
+            configuration: configuration,
             authentication: StubAuthenticationGateway(),
             maintenance: StubMaintenanceGateway(),
+            inbox: base.inbox,
             dependencyManagement: StubDependencyManagementGateway(),
             remoteAccess: nil)
     }
@@ -172,6 +202,7 @@ private struct StubAuthenticationGateway: AuthenticationGateway {
 }
 
 private struct StubConfigurationGateway: ConfigurationGateway {
+    var apiKey: String? = nil
     func snapshot() async -> ServiceConfigurationSnapshot { ServiceConfigurationSnapshot() }
     func setProxyURL(_ value: String) async {}
     func setFeatureFlag(_ id: String, enabled: Bool) async {}
@@ -182,6 +213,7 @@ private struct StubConfigurationGateway: ConfigurationGateway {
     func addLLMProfile() async {}
     func removeLLMProfile(id: Int) async {}
     func moveLLMProfile(from: Int, to: Int) async {}
+    func llmAPIKey(profileID: Int) async throws -> String? { apiKey }
     func testLLMProfile(_ update: LLMProfileUpdate) async -> ConnectionTestResult { fatalError("unused") }
     func fetchLLMModels(profileID: Int, endpoint: String, apiKey: String?) async throws -> [String] { [] }
     func setDependencyPath(id: String, path: String) async {}

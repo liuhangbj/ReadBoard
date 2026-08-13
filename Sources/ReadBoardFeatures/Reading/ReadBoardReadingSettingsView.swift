@@ -1,10 +1,16 @@
 import ReadBoardUI
 import SwiftUI
 
+public enum ReadBoardReadingSettingsPresentation: Sendable {
+    case popover
+    case settingsPane
+}
+
 public struct ReadBoardReadingSettingsView: View {
     @AppStorage("reading.theme") private var themeRaw = ReadBoardReadingTheme.claude.rawValue
     @AppStorage("reading.themeMode") private var themeModeRaw = ReadBoardReadingColorMode.system.rawValue
     @AppStorage("reading.font") private var fontRaw = "system"
+    @AppStorage("reading.interfaceFont") private var interfaceFontRaw = "system"
     @AppStorage("reading.fontSize") private var fontSize: Double = 16
     @AppStorage("reading.titleFontSize") private var titleFontSize: Double = 24
     @AppStorage("reading.metaFontSize") private var metaFontSize: Double = 12
@@ -17,35 +23,50 @@ public struct ReadBoardReadingSettingsView: View {
     @AppStorage("list.showDate") private var showDate = true
     @AppStorage("list.unreadBold") private var unreadBold = true
     @AppStorage("list.dateFormat") private var dateFormat = "absolute"
+    private let presentation: ReadBoardReadingSettingsPresentation
 
-    public init() {}
+    public init(presentation: ReadBoardReadingSettingsPresentation = .popover) {
+        self.presentation = presentation
+    }
 
     public var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("阅读器设置")
-                    .font(.system(size: 14, weight: .semibold))
-                Spacer()
-                Button("恢复默认", action: restoreDefaults)
-                    .buttonStyle(ReadBoardQuietButtonStyle())
+            if presentation == .popover {
+                HStack {
+                    Text("阅读器设置")
+                        .readBoardTextRole(.itemTitle)
+                    Spacer()
+                    Button("恢复默认", action: restoreDefaults)
+                        .buttonStyle(ReadBoardSecondaryButtonStyle())
+                        .readBoardSettingsButton(.inline)
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 16)
+                .padding(.bottom, 8)
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 16)
-            .padding(.bottom, 8)
 
             Form {
-                Section("阅读区版面") {
-                    Picker("主题", selection: $themeRaw) {
-                        ForEach(ReadBoardReadingTheme.allCases) { theme in
-                            Text(theme.displayName).tag(theme.rawValue)
+                Section {
+                    settingsPicker("主题", selection: $themeRaw) {
+                            ForEach(ReadBoardReadingTheme.allCases) { theme in
+                                Text(theme.displayName).tag(theme.rawValue)
+                            }
                         }
-                    }
-                    Picker("亮暗", selection: $themeModeRaw) {
+                    settingsPicker("亮暗", selection: $themeModeRaw) {
                         ForEach(ReadBoardReadingColorMode.allCases) { mode in
                             Text(mode.displayName).tag(mode.rawValue)
                         }
                     }
-                    Picker("正文/标题字体", selection: $fontRaw) {
+                    settingsPicker("界面字体", selection: $interfaceFontRaw) {
+                        ForEach(ReadBoardInterfaceFont.presets, id: \.key) { preset in
+                            Text(preset.title).tag(preset.key)
+                        }
+                        Divider()
+                        ForEach(ReadBoardInterfaceFont.availableFontFamilies, id: \.self) { family in
+                            Text(family).font(.custom(family, size: 13)).tag("custom:\(family)")
+                        }
+                    }
+                    settingsPicker("正文字体", selection: $fontRaw) {
                         ForEach(ReadBoardReadingFont.presets, id: \.key) { preset in
                             Text(preset.title).tag(preset.key)
                         }
@@ -65,29 +86,50 @@ public struct ReadBoardReadingSettingsView: View {
                     settingSlider(
                         "界面缩放", value: $uiFontScale, range: 0.8...1.6,
                         step: 0.05, suffix: "%", multiplier: 100)
+                } header: {
+                    settingsSectionHeader("阅读区版面", showsReset: presentation == .settingsPane)
                 }
 
-                Section("文章列表") {
-                    Picker("列表密度", selection: $density) {
+                Section {
+                    settingsPicker("列表密度", selection: $density) {
                         Text("舒适").tag("comfortable")
                         Text("紧凑").tag("compact")
                     }
-                    Toggle("显示来源名", isOn: $showSource)
-                    Toggle("显示日期", isOn: $showDate)
+                    settingsToggle("显示来源名", isOn: $showSource)
+                    settingsToggle("显示日期", isOn: $showDate)
                     if showDate {
-                        Picker("日期格式", selection: $dateFormat) {
+                        settingsPicker("日期格式", selection: $dateFormat) {
                             Text("绝对（2026-07-25）").tag("absolute")
                             Text("相对（3 小时前）").tag("relative")
                         }
                     }
-                    Toggle("未读文章标题加粗", isOn: $unreadBold)
+                    settingsToggle("未读文章标题加粗", isOn: $unreadBold)
+                } header: {
+                    ReadBoardSettingsSectionTitle("文章列表")
                 }
             }
             .formStyle(.grouped)
         }
         #if os(macOS)
-        .frame(width: 480, height: 620)
+        .modifier(ReadBoardReadingSettingsPresentationModifier(
+            presentation: presentation))
         #endif
+    }
+
+    private func settingsSectionHeader(
+        _ title: String,
+        showsReset: Bool
+    ) -> some View {
+        HStack {
+            ReadBoardSettingsSectionTitle(title)
+            Spacer()
+            if showsReset {
+                Button("恢复默认", action: restoreDefaults)
+                    .buttonStyle(ReadBoardSecondaryButtonStyle())
+                    .readBoardSettingsButton(.inline)
+                    .textCase(nil)
+            }
+        }
     }
 
     private func settingSlider(
@@ -98,18 +140,31 @@ public struct ReadBoardReadingSettingsView: View {
         suffix: String,
         multiplier: Double = 1
     ) -> some View {
-        HStack {
-            Text("\(title) \(Int(value.wrappedValue * multiplier))\(suffix)")
-                .frame(width: 112, alignment: .leading)
-            Slider(value: value, in: range, step: step)
-                .tint(ReadBoardDesign.C.accent)
-        }
+        ReadBoardSettingsSliderRow(
+            title,
+            value: value,
+            range: range,
+            step: step,
+            displayValue: "\(Int(value.wrappedValue * multiplier))\(suffix)")
+    }
+
+    private func settingsPicker<Value: Hashable, Content: View>(
+        _ title: String,
+        selection: Binding<Value>,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        ReadBoardSettingsPickerRow(title, selection: selection, content: content)
+    }
+
+    private func settingsToggle(_ title: String, isOn: Binding<Bool>) -> some View {
+        ReadBoardSettingsToggleRow(title, isOn: isOn)
     }
 
     private func restoreDefaults() {
         themeRaw = ReadBoardReadingTheme.claude.rawValue
         themeModeRaw = ReadBoardReadingColorMode.system.rawValue
         fontRaw = "system"
+        interfaceFontRaw = "system"
         fontSize = 16
         titleFontSize = 24
         metaFontSize = 12
@@ -124,3 +179,22 @@ public struct ReadBoardReadingSettingsView: View {
         dateFormat = "absolute"
     }
 }
+
+#if os(macOS)
+private struct ReadBoardReadingSettingsPresentationModifier: ViewModifier {
+    let presentation: ReadBoardReadingSettingsPresentation
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        switch presentation {
+        case .popover:
+            content.frame(width: 480, height: 620)
+        case .settingsPane:
+            content.frame(
+                maxWidth: .infinity,
+                maxHeight: .infinity,
+                alignment: .topLeading)
+        }
+    }
+}
+#endif

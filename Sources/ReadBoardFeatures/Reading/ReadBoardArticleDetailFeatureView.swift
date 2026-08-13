@@ -2,11 +2,15 @@ import Foundation
 import ReadBoardContract
 import ReadBoardUI
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 public struct ReadBoardArticleDetailFeatureView: View {
     public let summary: ContentSummary
     public let model: ReadBoardLibraryFeatureModel
     private let environment: ReadBoardFeatureEnvironment
+    private let globalMediaPlayer: ReadBoardGlobalMediaPlayer?
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var showReadingSettings = false
@@ -16,6 +20,7 @@ public struct ReadBoardArticleDetailFeatureView: View {
     @AppStorage("reading.theme") private var themeRaw = ReadBoardReadingTheme.claude.rawValue
     @AppStorage("reading.themeMode") private var themeModeRaw = ReadBoardReadingColorMode.system.rawValue
     @AppStorage("reading.font") private var fontRaw = "system"
+    @AppStorage("reading.interfaceFont") private var interfaceFontRaw = "system"
     @AppStorage("reading.fontSize") private var readingFontSize: Double = 16
     @AppStorage("reading.titleFontSize") private var titleFontSize: Double = 24
     @AppStorage("reading.metaFontSize") private var metaFontSize: Double = 12
@@ -27,11 +32,13 @@ public struct ReadBoardArticleDetailFeatureView: View {
     public init(
         summary: ContentSummary,
         model: ReadBoardLibraryFeatureModel,
-        environment: ReadBoardFeatureEnvironment
+        environment: ReadBoardFeatureEnvironment,
+        mediaPlayer: ReadBoardGlobalMediaPlayer? = nil
     ) {
         self.summary = summary
         self.model = model
         self.environment = environment
+        self.globalMediaPlayer = mediaPlayer
     }
 
     private var currentSummary: ContentSummary {
@@ -53,23 +60,34 @@ public struct ReadBoardArticleDetailFeatureView: View {
             actionBar
             ReadBoardHairline()
             GeometryReader { geometry in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: ReadBoardDesign.Space.xl) {
-                        articleHeader
-                        processingActions
+                let readingColumnWidth = Self.resolvedContentWidth(
+                    availableWidth: geometry.size.width,
+                    preferredWidth: readingContentWidth,
+                    horizontalPadding: ReadBoardDesign.Space.xl)
+
+                VStack(spacing: 0) {
+                    if playbackItem != nil {
                         mediaPlayer
-                        detailContent
+                            .frame(width: readingColumnWidth)
+                            .padding(.vertical, ReadBoardDesign.Space.md)
+                            .frame(width: geometry.size.width, alignment: .center)
+                        ReadBoardHairline()
                     }
-                    .frame(
-                        width: Self.resolvedContentWidth(
-                            availableWidth: geometry.size.width,
-                            preferredWidth: readingContentWidth,
-                            horizontalPadding: ReadBoardDesign.Space.xl),
-                        alignment: .leading)
-                    .padding(.vertical, ReadBoardDesign.Space.xl)
-                    // ScrollView 对窄内容的默认横向定位在 macOS 上并不稳定。
-                    // 显式占满可用宽度，确保正文列始终在阅读栏正中。
-                    .frame(width: geometry.size.width, alignment: .center)
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: ReadBoardDesign.Space.xl) {
+                            articleHeader
+                            processingActions
+                            detailContent
+                        }
+                        .frame(
+                            width: readingColumnWidth,
+                            alignment: .leading)
+                        .padding(.vertical, ReadBoardDesign.Space.xl)
+                        // ScrollView 对窄内容的默认横向定位在 macOS 上并不稳定。
+                        // 显式占满可用宽度，确保正文列始终在阅读栏正中。
+                        .frame(width: geometry.size.width, alignment: .center)
+                    }
                 }
             }
         }
@@ -85,8 +103,16 @@ public struct ReadBoardArticleDetailFeatureView: View {
             ReadBoardArticleShareView(
                 item: currentSummary,
                 canExport: environment.permissions.allows(
-                    .manageExports, capability: .export),
+                .manageExports, capability: .export),
                 onExport: { await model.forceExport(contentID: currentSummary.id) })
+        }
+        .task(id: playbackItem?.id) {
+            guard let item = playbackItem, let globalMediaPlayer else { return }
+            globalMediaPlayer.prepare(item)
+        }
+        .onDisappear {
+            guard let itemID = playbackItem?.id else { return }
+            globalMediaPlayer?.discardPrepared(itemID: itemID)
         }
     }
 
@@ -134,12 +160,12 @@ public struct ReadBoardArticleDetailFeatureView: View {
                                 ? ReadBoardDesign.C.scoreLow
                                 : ReadBoardDesign.C.scoreHigh)
                         Text(message)
-                            .font(.system(size: 11))
+                            .readBoardInterfaceFont(size: 11)
                             .foregroundStyle(ReadBoardDesign.C.text2)
                             .lineLimit(1)
                         Button { model.clearOperationStatus() } label: {
                             Image(systemName: "xmark")
-                                .font(.system(size: 9, weight: .semibold))
+                                .readBoardInterfaceFont(size: 9, weight: .semibold)
                         }
                         .buttonStyle(.plain)
                         .help("关闭状态提示")
@@ -180,16 +206,30 @@ public struct ReadBoardArticleDetailFeatureView: View {
                 metadataParts: document.metadataParts,
                 kind: document.kind,
                 badges: document.badges,
-                translatedTitleFont: readingFont(
-                    size: titleFontSize * 0.72, weight: .medium, design: .serif),
+                translatedTitleFont: interfaceFont(
+                    size: titleFontSize * 0.72, weight: .medium),
                 translatedTitleColor: readingPalette.textSecondary,
-                metadataFont: readingFont(size: metaFontSize),
+                metadataFont: interfaceFont(size: metaFontSize),
                 metadataColor: readingPalette.textFaint
             ) {
                 if let originalURL {
+                    #if os(macOS)
+                    ReadBoardSelectableLinkTitle(
+                        text: currentSummary.title,
+                        destination: originalURL,
+                        font: ReadBoardInterfaceFont.nsFont(
+                            rawValue: interfaceFontRaw,
+                            size: titleFontSize * uiFontScale,
+                            weight: .semibold),
+                        normalColor: NSColor(readingPalette.text),
+                        hoverColor: NSColor(ReadBoardDesign.C.accent))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .help("点击在浏览器打开原文；拖动可选择标题")
+                    #else
                     Link(destination: originalURL) { articleTitle }
                         .buttonStyle(.plain)
                         .help("点击在浏览器打开原文")
+                    #endif
                 } else {
                     articleTitle
                 }
@@ -197,7 +237,7 @@ public struct ReadBoardArticleDetailFeatureView: View {
             if let summaryText = document.summaryText {
                 ReadBoardArticleSummaryCard(
                     text: summaryText,
-                    font: readingFont(size: summaryFontSize),
+                    font: interfaceFont(size: summaryFontSize),
                     textColor: readingPalette.textSecondary,
                     backgroundColor: readingPalette.markdown.backgroundAlt)
             }
@@ -206,7 +246,7 @@ public struct ReadBoardArticleDetailFeatureView: View {
 
     private var articleTitle: some View {
         Text(currentSummary.title)
-            .font(readingFont(size: titleFontSize, weight: .semibold, design: .serif))
+            .font(interfaceFont(size: titleFontSize, weight: .semibold))
             .foregroundStyle(readingPalette.text)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
@@ -229,6 +269,7 @@ public struct ReadBoardArticleDetailFeatureView: View {
                         fontSize: readingFontSize,
                         lineSpacing: readingLineSpacing,
                         palette: readingPalette.markdown,
+                        layoutRevision: markdownLayoutRevision,
                         fontProvider: { size, weight, design in
                             ReadBoardReadingFont.font(
                                 rawValue: fontRaw,
@@ -262,24 +303,31 @@ public struct ReadBoardArticleDetailFeatureView: View {
 
     @ViewBuilder
     private var mediaPlayer: some View {
-        if let detail = currentDetail {
-            if currentSummary.contentType == "podcast",
-               let rawURL = detail.audioURL,
-               let url = playableURL(rawURL) {
-                ReadBoardAudioPlayerView(url: url, title: currentSummary.title)
-            } else if isVideoContent,
-                      let videoID = detail.videoID?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !videoID.isEmpty {
-                if videoPlatform == .bilibili {
-                    ReadBoardBilibiliPlayerView(bvid: videoID, pageURL: originalURL)
-                } else {
-                    ReadBoardYouTubePlayerView(
-                        videoID: videoID,
-                        title: currentSummary.title,
-                        gateway: environment.mediaPlayback)
+        if let item = playbackItem {
+            if let globalMediaPlayer {
+                ReadBoardGlobalMediaPlayerView(item: item, player: globalMediaPlayer)
+            } else if let detail = currentDetail {
+                if item.kind == .audio,
+                   let rawURL = detail.audioURL,
+                   let url = playableURL(rawURL) {
+                    ReadBoardAudioPlayerView(url: url, title: currentSummary.title)
+                } else if let videoID = item.videoID {
+                    if item.kind == .bilibili {
+                        ReadBoardBilibiliPlayerView(bvid: videoID, pageURL: originalURL)
+                    } else {
+                        ReadBoardYouTubePlayerView(
+                            videoID: videoID,
+                            title: currentSummary.title,
+                            gateway: environment.mediaPlayback)
+                    }
                 }
             }
         }
+    }
+
+    private var playbackItem: ReadBoardPlaybackItem? {
+        guard let detail = currentDetail else { return nil }
+        return ReadBoardPlaybackItem.make(summary: currentSummary, detail: detail)
     }
 
     private var readBinding: Binding<Bool> {
@@ -315,16 +363,37 @@ public struct ReadBoardArticleDetailFeatureView: View {
             systemColorScheme: colorScheme)
     }
 
-    private func readingFont(
+    /// 标题、元信息和摘要属于阅读器界面层，只响应各自字号与界面缩放；
+    /// 用户选择的 reading.font 仅交给正文 Markdown 的 fontProvider。
+    private func interfaceFont(
         size: Double,
         weight: Font.Weight = .regular,
         design: Font.Design = .default
     ) -> Font {
-        ReadBoardReadingFont.font(
-            rawValue: fontRaw,
+        ReadBoardInterfaceFont.font(
+            rawValue: interfaceFontRaw,
             size: size * uiFontScale,
             weight: weight,
             design: design)
+    }
+
+    /// AttributedString 的字体属性嵌在正文渲染树中。macOS 不总会在这些偏好
+    /// 改变时主动丢弃旧布局，因此提供一个纯外观版本号给共享 Markdown 内核。
+    private var markdownLayoutRevision: String {
+        [
+            fontRaw,
+            interfaceFontRaw,
+            String(readingFontSize),
+            String(titleFontSize),
+            String(metaFontSize),
+            String(summaryFontSize),
+            String(readingLineSpacing),
+            String(readingContentWidth),
+            String(uiFontScale),
+            themeRaw,
+            themeModeRaw,
+            colorScheme == .dark ? "dark" : "light",
+        ].joined(separator: "|")
     }
 
     private var isMediaDocument: Bool {

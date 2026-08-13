@@ -220,11 +220,19 @@ public final class FailedJobService: @unchecked Sendable {
             return false
         }
         await PipelineWorker.shared.unlockContent(job.contentId)
-        if recordsOwnResult { return ok }
+        if recordsOwnResult {
+            if ok {
+                await ExportService.shared.runPending(trigger: "ready", contentId: job.contentId)
+            }
+            return ok
+        }
         // 成功结果必须记账；即使界面在模型返回后恰好消失/取消，也不能继续显示旧失败。
         // 只有“未成功且任务已取消”才不新增失败记录。
         guard ok || !Task.isCancelled else { return false }
         recordResult(contentId: job.contentId, jtype: job.jtype, ok: ok, error: error)
+        if ok {
+            await ExportService.shared.runPending(trigger: "ready", contentId: job.contentId)
+        }
         return ok
     }
 

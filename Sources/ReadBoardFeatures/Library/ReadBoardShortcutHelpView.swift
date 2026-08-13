@@ -14,14 +14,14 @@ struct ReadBoardShortcutHelpView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("快捷键")
-                .font(.system(size: 15, weight: .semibold))
+                .readBoardInterfaceFont(size: 15, weight: .semibold)
                 .padding(.bottom, 12)
             ForEach(shortcuts, id: \.0) { shortcut in
                 HStack {
                     Text(shortcut.0)
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .frame(minWidth: 72, alignment: .center)
-                    Text(shortcut.1).font(.system(size: 12))
+                    Text(shortcut.1).readBoardInterfaceFont(size: 12)
                     Spacer()
                 }
                 .padding(.vertical, 6)

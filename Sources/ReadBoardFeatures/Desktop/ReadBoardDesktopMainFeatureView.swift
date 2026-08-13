@@ -24,13 +24,18 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
     @State private var destination: ReadBoardDesktopDestination
     @State private var snapshot: LibrarySnapshot?
     @State private var sourcesModel: ReadBoardSourcesFeatureModel
+    @State private var mediaPlayer: ReadBoardGlobalMediaPlayer
+    @State private var playbackNavigationRequest: ReadBoardPlaybackNavigationRequest?
     @State private var showAddSource = false
+    @State private var showInboxImport = false
     @State private var showCreateFolder = false
     @State private var folderName = ""
     @State private var showImporter = false
     @State private var showIssueCenter = false
     @State private var operationError: String?
     @State private var lastRevision: DataRevisionSnapshot?
+    @AppStorage("reading.uiFontScale") private var uiFontScale: Double = 1
+    @AppStorage("reading.interfaceFont") private var interfaceFontRaw = "system"
 
     public init(
         environment: ReadBoardFeatureEnvironment,
@@ -47,15 +52,23 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
         self.settingsContent = settings()
         _destination = State(initialValue: .library(initialLocation))
         _sourcesModel = State(initialValue: ReadBoardSourcesFeatureModel(environment: environment))
+        _mediaPlayer = State(initialValue: ReadBoardGlobalMediaPlayer(
+            mediaPlayback: environment.mediaPlayback))
     }
 
     public var body: some View {
         NavigationSplitView {
             sidebar
                 .navigationSplitViewColumnWidth(
-                    min: ReadBoardLibraryColumnMetrics.sidebarMinimum,
-                    ideal: ReadBoardLibraryColumnMetrics.sidebarIdeal,
-                    max: ReadBoardLibraryColumnMetrics.sidebarMaximum)
+                    min: ReadBoardLibraryColumnMetrics.scaledSidebarWidth(
+                        ReadBoardLibraryColumnMetrics.sidebarMinimum,
+                        interfaceScale: uiFontScale),
+                    ideal: ReadBoardLibraryColumnMetrics.scaledSidebarWidth(
+                        ReadBoardLibraryColumnMetrics.sidebarIdeal,
+                        interfaceScale: uiFontScale),
+                    max: ReadBoardLibraryColumnMetrics.scaledSidebarWidth(
+                        ReadBoardLibraryColumnMetrics.sidebarMaximum,
+                        interfaceScale: uiFontScale))
         } detail: {
             destinationContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -63,14 +76,26 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
         }
         .navigationTitle("ReadBoard")
         .tint(ReadBoardDesign.C.accent)
+        .onAppear { ReadBoardDockIconController.shared.start() }
         .task { await reloadSidebar() }
         .task { await monitorRevisions() }
         .onReceive(NotificationCenter.default.publisher(
             for: .readBoardLibrarySnapshotChanged)) { _ in
                 Task { await reloadSnapshot() }
             }
+        .onReceive(NotificationCenter.default.publisher(
+            for: Notification.Name("readBoardInboxImportCompleted"))) { _ in
+                destination = .library(.collection(.inbox))
+                Task { await reloadSnapshot() }
+            }
         .sheet(isPresented: $showAddSource) {
             ReadBoardAddSourceSheet(model: sourcesModel)
+        }
+        .sheet(isPresented: $showInboxImport) {
+            ReadBoardInboxImportSheet(inbox: environment.inbox) { _ in
+                destination = .library(.collection(.inbox))
+                Task { await reloadSnapshot() }
+            }
         }
         .sheet(isPresented: $showIssueCenter) {
             ReadBoardIssueCenterView(environment: environment, action: handleIssueAction)
@@ -106,6 +131,9 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
             allowedContentTypes: [.xml, .data],
             allowsMultipleSelection: false,
             onCompletion: importOPML)
+        .readBoardInterfaceFont(size: 13 * uiFontScale)
+        .readBoardInterfaceFontFamily(interfaceFontRaw)
+        .readBoardInterfaceScale(uiFontScale)
     }
 
     @ViewBuilder
@@ -115,10 +143,14 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
             ReadBoardLibraryFeatureView(
                 environment: environment,
                 location: location,
-                automaticallyMarksRead: true)
+                automaticallyMarksRead: true,
+                mediaPlayer: mediaPlayer,
+                playbackNavigationRequest: playbackNavigationRequest)
                 .id(location)
         case .sources:
-            ReadBoardSourcesFeatureView(environment: environment)
+            ReadBoardSourcesFeatureView(
+                environment: environment,
+                model: sourcesModel)
         case .operations:
             ReadBoardOperationsFeatureView(environment: environment)
         case .settings:
@@ -136,9 +168,19 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
                     selection: librarySelection,
                     snapshot: snapshot,
                     environment: environment,
-                    presentation: .readerSidebar)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 6)
+                    sourceModel: sourcesModel,
+                    presentation: .readerSidebar,
+                    scale: sidebarScale)
+                    .padding(.horizontal, 6 * sidebarScale)
+                    .padding(.vertical, 6 * sidebarScale)
+            }
+
+            if mediaPlayer.hasUserStartedPlayback, mediaPlayer.item != nil {
+                ReadBoardMiniPlayerView(
+                    player: mediaPlayer,
+                    openCurrentItem: openCurrentlyPlayingItem)
+                    .padding(.horizontal, 8 * sidebarScale)
+                    .padding(.vertical, 7 * sidebarScale)
             }
 
             ReadBoardHairline()
@@ -150,19 +192,19 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
     private var sidebarHeader: some View {
         HStack(spacing: 4) {
             if environment.permissions.allows(.manageOperations, capability: .administration) {
-                ReadBoardServiceHealthButton(environment: environment) {
+                ReadBoardServiceHealthButton(environment: environment, scale: sidebarScale) {
                     showIssueCenter = true
                 }
             }
 
-            ReadBoardSectionLabel(text: "订阅源")
-            Spacer(minLength: 4)
+            ReadBoardSectionLabel(text: "资料库", scale: sidebarScale)
+            Spacer(minLength: 4 * sidebarScale)
 
             if environment.permissions.allows(.manageSources, capability: .sourceManagement) {
                 Button { showCreateFolder = true } label: {
                     Image(systemName: "folder.badge.plus")
-                        .font(.system(size: 13))
-                        .frame(width: 24, height: 24)
+                        .readBoardInterfaceFont(size: 13 * sidebarScale)
+                        .frame(width: 24 * sidebarScale, height: 24 * sidebarScale)
                 }
                 .buttonStyle(ReadBoardQuietButtonStyle())
                 .help("新建文件夹")
@@ -176,20 +218,29 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
                     }
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 13))
-                        .frame(width: 24, height: 24)
+                        .readBoardInterfaceFont(size: 13 * sidebarScale)
+                        .frame(width: 24 * sidebarScale, height: 24 * sidebarScale)
                 }
                 .menuStyle(.borderlessButton)
                 .buttonStyle(ReadBoardQuietButtonStyle())
                 .help("添加订阅源 / 导入 OPML")
             }
+            if environment.permissions.allows(.updateReadingState, capability: .library) {
+                Button { showInboxImport = true } label: {
+                    Image(systemName: "tray.and.arrow.down")
+                        .readBoardInterfaceFont(size: 13 * sidebarScale)
+                        .frame(width: 24 * sidebarScale, height: 24 * sidebarScale)
+                }
+                .buttonStyle(ReadBoardQuietButtonStyle())
+                .help("添加链接到收件箱")
+            }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10 * sidebarScale)
+        .padding(.vertical, 8 * sidebarScale)
     }
 
     private var sidebarFooter: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 8 * sidebarScale) {
             if environment.permissions.allows(.manageSources, capability: .sourceManagement) {
                 footerButton(
                     title: "订阅管理",
@@ -198,7 +249,7 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
             }
             if environment.permissions.allows(.manageOperations, capability: .administration) {
                 footerButton(
-                    title: "数据看板",
+                    title: "运行状态",
                     icon: "chart.bar.doc.horizontal",
                     destination: .operations)
             }
@@ -209,8 +260,8 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
                     destination: .settings)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10 * sidebarScale)
+        .padding(.vertical, 8 * sidebarScale)
     }
 
     private func footerButton(
@@ -221,19 +272,23 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
         Button { destination = target } label: {
             ViewThatFits(in: .horizontal) {
                 Label(title, systemImage: icon)
-                    .font(.system(size: 11))
+                    .readBoardInterfaceFont(size: 11 * sidebarScale)
                 Image(systemName: icon)
-                    .font(.system(size: 12))
+                    .readBoardInterfaceFont(size: 12 * sidebarScale)
             }
             .foregroundStyle(destination == target
                 ? ReadBoardDesign.C.accent
                 : ReadBoardDesign.C.text2)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 5)
+            .padding(.vertical, 5 * sidebarScale)
             .contentShape(Rectangle())
         }
         .buttonStyle(ReadBoardQuietButtonStyle())
         .help(title)
+    }
+
+    private var sidebarScale: Double {
+        ReadBoardLibraryColumnMetrics.sidebarScale(for: uiFontScale)
     }
 
     private var librarySelection: Binding<ReadBoardLibraryLocation?> {
@@ -243,8 +298,17 @@ public struct ReadBoardDesktopMainFeatureView<SettingsContent: View>: View {
                 return location
             },
             set: { location in
-                if let location { destination = .library(location) }
+                if let location {
+                    playbackNavigationRequest = nil
+                    destination = .library(location)
+                }
             })
+    }
+
+    private func openCurrentlyPlayingItem() {
+        guard let item = mediaPlayer.item else { return }
+        playbackNavigationRequest = ReadBoardPlaybackNavigationRequest(summary: item.summary)
+        destination = .library(.collection(.all))
     }
 
     private func reloadSidebar() async {

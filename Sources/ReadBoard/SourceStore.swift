@@ -72,12 +72,17 @@ public struct FeedSource: Identifiable, Hashable, Sendable {
 
     /// 是否到期该抓（距 last_fetched_at 超过间隔；从未抓过 = 到期）
     var isDue: Bool {
-        guard let t = lastFetchedAt, !t.isEmpty else { return true }
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        f.timeZone = TimeZone(identifier: "UTC")
-        guard let last = f.date(from: t) else { return true }
+        guard let last = lastFetchedDate else { return true }
         return Date().timeIntervalSince(last) >= TimeInterval(fetchIntervalMin * 60)
+    }
+
+    var lastFetchedDate: Date? {
+        guard let t = lastFetchedAt, !t.isEmpty else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        return formatter.date(from: t)
     }
 
     /// 该源是否可转录（播客/视频才有音频流）
@@ -138,6 +143,12 @@ public final class SourceStore: ObservableObject {
     // MARK: 自动抓取调度
 
     private var syncTimer: Timer?
+    private var adaptiveSyncTimer: Timer?
+    private var adaptiveSyncScheduledAt: Date?
+    private var autoSyncStarted = false
+#if DEBUG
+    var adaptiveSyncScheduledAtForTesting: Date? { adaptiveSyncScheduledAt }
+#endif
     /// 自动抓取间隔（秒），默认 15 分钟。持久化到 UserDefaults，启动时读回。
     var syncInterval: TimeInterval {
         get {
@@ -149,7 +160,7 @@ public final class SourceStore: ObservableObject {
     func setSyncInterval(minutes: Int) {
         UserDefaults.standard.set(Double(minutes), forKey: "sourceStore.syncIntervalMin")
         // 重启调度让新间隔生效
-        if syncTimer != nil {
+        if autoSyncStarted {
             stopAutoSync()
             startAutoSync()
         }
@@ -166,7 +177,8 @@ public final class SourceStore: ObservableObject {
     /// 启动周期自动抓取（立即跑一轮 + Timer 周期）。App 启动时调用。
     /// 自动调度走 manual=false：只抓到期的源（按各自抓取间隔）。
     func startAutoSync() {
-        guard autoSyncEnabled, syncTimer == nil else { return }
+        guard autoSyncEnabled, !autoSyncStarted else { return }
+        autoSyncStarted = true
         // 关键：sources 数组初始为空（只在 reload()/syncAll 末尾填充）。
         // 启动时若不调 reload()，syncAll 遍历空 sources → 一个源都不抓（实测重启 0 抓取）。
         // 先 reload 填充，再启动调度。
@@ -183,8 +195,32 @@ public final class SourceStore: ObservableObject {
     }
 
     func stopAutoSync() {
+        autoSyncStarted = false
         syncTimer?.invalidate()
         syncTimer = nil
+        adaptiveSyncTimer?.invalidate()
+        adaptiveSyncTimer = nil
+        adaptiveSyncScheduledAt = nil
+    }
+
+    /// 固定周期负责普通源兜底；外部平台返回的 nextCheckAt 用一次性 Timer 精确唤醒。
+    /// 这让风控退避和历史发布时间预测真正参与调度，同时不会额外请求平台接口。
+    private func scheduleAdaptiveSync(at date: Date?) {
+        guard autoSyncStarted, autoSyncEnabled, let date else { return }
+        if let scheduled = adaptiveSyncScheduledAt, scheduled <= date { return }
+        adaptiveSyncTimer?.invalidate()
+        adaptiveSyncScheduledAt = date
+        adaptiveSyncTimer = Timer.scheduledTimer(
+            withTimeInterval: max(1, date.timeIntervalSinceNow),
+            repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.adaptiveSyncTimer = nil
+                self.adaptiveSyncScheduledAt = nil
+                await self.syncAll(manual: false)
+            }
+        }
     }
 
     func reload() {
@@ -526,6 +562,7 @@ public final class SourceStore: ObservableObject {
             let current = db.scalarString("SELECT config FROM content_source WHERE id = ?", params: [sid]) ?? "{}"
             var obj = (try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any]) ?? [:]
             obj["fetch_mode"] = (FetchMode.platformDefault(for: row["stype"] ?? "") ?? mode).rawValue
+            obj["fetch_mode_auto"] = false
             if let data = try? JSONSerialization.data(withJSONObject: obj),
                let str = String(data: data, encoding: .utf8) {
                 db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, sid])
@@ -556,6 +593,32 @@ public final class SourceStore: ObservableObject {
             db.execute("UPDATE content_source SET config = ? WHERE id = ?", params: [str, id])
         }
         reload()
+    }
+
+    /// 文件夹级批量设置保留数量。文件夹仅作为批量入口，最终值仍写入每个订阅源。
+    func setFolderMaxKeep(folderId: Int64, count: Int) {
+        let ids = db.queryRows(
+            "SELECT id FROM content_source WHERE folder_id = ?",
+            params: [folderId])
+            .compactMap { $0["id"].flatMap(Int64.init) }
+        for id in ids {
+            let current = db.scalarString(
+                "SELECT config FROM content_source WHERE id = ?",
+                params: [id]) ?? "{}"
+            var object = (try? JSONSerialization.jsonObject(
+                with: Data(current.utf8)) as? [String: Any]) ?? [:]
+            object["max_keep"] = count
+            if let data = try? JSONSerialization.data(withJSONObject: object),
+               let value = String(data: data, encoding: .utf8) {
+                db.execute(
+                    "UPDATE content_source SET config = ? WHERE id = ?",
+                    params: [value, id])
+            }
+        }
+        reload()
+        if count > 0 {
+            for id in ids { _ = enforceMaxKeep(sourceId: id) }
+        }
     }
 
     /// 执行源级保留策略：超出 max_keep 的最旧内容自动软删除。
@@ -770,10 +833,12 @@ public final class SourceStore: ObservableObject {
         // B3: 媒体板块总开关——关掉后 podcast/youtube 等媒体源整组不抓（rss 文章不受影响）
         let mediaOn = FeatureBoard.media.enabled
         var mediaSkipped = 0
-        var externalQueued = 0
+        var externalCandidates: [FeedSource] = []
         for src in sources where src.enabled {
             if isExternalSource(src) {
-                if manual || src.isDue { externalQueued += 1 }
+                if await shouldScheduleExternalSource(src, manual: manual) {
+                    externalCandidates.append(src)
+                }
                 else { skipped += 1 }
                 continue
             }
@@ -797,16 +862,20 @@ public final class SourceStore: ObservableObject {
         var msg = failed > 0 ? "完成：新增 \(total) 条，\(failed) 个源失败" : "完成：新增 \(total) 条"
         if skipped > 0 { msg += "（跳过未到期 \(skipped)）" }
         if mediaSkipped > 0 { msg += "（媒体板块已关闭，跳过 \(mediaSkipped) 个媒体源）" }
-        if externalQueued > 0 { msg += "（\(externalQueued) 个外部平台源已后台排队）" }
+        if !externalCandidates.isEmpty {
+            msg += "（\(externalCandidates.count) 个外部平台源已进入智能调度）"
+        }
         lastSyncMessage = msg
-        if externalQueued > 0 {
-            Task { await self.syncExternalSources(manual: manual) }
+        if !externalCandidates.isEmpty {
+            Task { await self.syncExternalSources(
+                candidates: externalCandidates,
+                manual: manual) }
         }
     }
 
     /// 外部平台源的独立慢速通道。微信等平台不能占用普通 RSS 的全局同步锁；
     /// 同一 source_id 仍由 activeSyncSourceIDs 防止手动刷新/自动调度重叠。
-    private func syncExternalSources(manual: Bool) async {
+    private func syncExternalSources(candidates: [FeedSource], manual: Bool) async {
         guard !isExternalSyncing else { return }
         isExternalSyncing = true
         NotificationCenter.default.post(name: .sourceCatalogUpdated, object: nil)
@@ -814,25 +883,31 @@ public final class SourceStore: ObservableObject {
             isExternalSyncing = false
             reload()
         }
-        let candidates = sources.filter {
-            $0.enabled && isExternalSource($0) && (manual || $0.isDue)
-        }
         var pausedTypes = Set<String>()
         for (index, src) in candidates.enumerated() {
             guard !pausedTypes.contains(src.stype) else { continue }
+            guard await shouldScheduleExternalSource(src, manual: manual) else { continue }
             let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: src.stype)
             do {
                 _ = try await syncOneUnlocked(src)
             } catch {
                 let message = error.localizedDescription
+                let automaticallyRecovers = connector?.automaticallyRecovers(after: error) == true
+                let storedMessage = automaticallyRecovers
+                    ? readBoardAutomaticRecoveryErrorPrefix + message
+                    : message
                 db.execute("UPDATE content_source SET error = ? WHERE id = ?",
-                           params: [message, src.id])
+                           params: [storedMessage, src.id])
+                if automaticallyRecovers {
+                    // 错误落盘后连接器已持久化 restrictedUntil；立即读取并安排精确唤醒。
+                    _ = await shouldScheduleExternalSource(src, manual: false)
+                }
                 if connector?.shouldPauseBatch(after: error) == true {
                     pausedTypes.insert(src.stype)
                     // 同一授权根因影响整个平台；停止继续请求，并让问题中心按影响数量聚合。
                     for remaining in candidates.dropFirst(index + 1) where remaining.stype == src.stype {
                         db.execute("UPDATE content_source SET error = ? WHERE id = ?",
-                                   params: [message, remaining.id])
+                                   params: [storedMessage, remaining.id])
                     }
                 }
             }
@@ -841,6 +916,45 @@ public final class SourceStore: ObservableObject {
                 try? await Task.sleep(nanoseconds: UInt64(spacing * 1_000_000_000))
             }
         }
+    }
+
+    private func shouldScheduleExternalSource(_ source: FeedSource, manual: Bool) async -> Bool {
+        guard let connector = ReadBoardSourceConnectorRegistry.shared.connector(for: source.stype) else {
+            return manual || source.isDue
+        }
+        let context = ReadBoardAutomaticFetchContext(
+            sourceID: source.id,
+            identifier: source.identifier,
+            configuredIntervalMinutes: source.fetchIntervalMin,
+            lastFetchedAt: source.lastFetchedDate,
+            recentPublishedAt: recentPublishedDates(sourceID: source.id),
+            now: Date(),
+            manual: manual)
+        switch await connector.automaticFetchDecision(for: context) {
+        case .useDefault:
+            return manual || source.isDue
+        case .fetch:
+            return true
+        case .skip(let nextCheckAt):
+            scheduleAdaptiveSync(at: nextCheckAt)
+            return false
+        }
+    }
+
+    private func recentPublishedDates(sourceID: Int64, limit: Int = 40) -> [Date] {
+        db.queryRows("""
+            SELECT published_at FROM content
+            WHERE source_id = ? AND published_at IS NOT NULL AND deleted_at IS NULL
+            ORDER BY published_at DESC LIMIT ?;
+            """, params: [sourceID, limit]).compactMap { row in
+                guard let raw = row["published_at"] else { return nil }
+                if let date = ISO8601DateFormatter().date(from: raw) { return date }
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+                formatter.timeZone = TimeZone(identifier: "UTC")
+                return formatter.date(from: raw)
+            }
     }
 
     private func isExternalSource(_ src: FeedSource) -> Bool {
@@ -999,7 +1113,10 @@ public final class SourceStore: ObservableObject {
             }
             let newId = await Task.detached(priority: .utility) {
                 Self.upsertContent(source: source, sourceId: sourceId,
-                                   entry: importEntry, pipeline: pipeline)
+                                   entry: importEntry, pipeline: pipeline,
+                                   visibilityState: Self.initialVisibilityState(
+                                       entry: importEntry,
+                                       requiresExternalFulltext: externalConnector != nil))
             }.value
             if let newId {
                 added += 1
@@ -1099,7 +1216,8 @@ public final class SourceStore: ObservableObject {
     /// 把一条 feed entry 写进 content（按 source+guid 去重 + 跨源内容去重），返回新插入的 content id（已存在返回 nil）
     /// R3: 判重+插入包进事务——Timer 调度与手动同步并发时，原来的"先 SELECT 再 INSERT"两条语句间存在竞态会重复插入。
     nonisolated private static func upsertContent(source: String, sourceId: Int64, entry: ParsedEntry,
-                                                  pipeline: PipelinePolicy = PipelinePolicy()) -> Int64? {
+                                                  pipeline: PipelinePolicy = PipelinePolicy(),
+                                                  visibilityState: String = ContentVisibilityState.visible) -> Int64? {
         let db = Database.shared
         let ctype = contentType(source: source, meta: entry.meta)
 
@@ -1127,6 +1245,16 @@ public final class SourceStore: ObservableObject {
                 var mergedMeta = (existing["meta"]?.data(using: .utf8))
                     .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
                 for (key, value) in entry.meta { mergedMeta[key] = value }
+                if entry.meta["bilibili_access_state"] == BilibiliAccessState.open.rawValue {
+                    // 临时抢先看转为免费时，保留历史转录是否完整的事实，但移除已经
+                    // 失效的付费提示信息。access_state=open 会让 Core/Go 同时撤销标签。
+                    for key in [
+                        "bilibili_access_label", "bilibili_access_toast",
+                        "bilibili_access_privilege_type", "bilibili_access_jump_url"
+                    ] {
+                        mergedMeta.removeValue(forKey: key)
+                    }
+                }
                 let mergedMetaJson = (try? JSONSerialization.data(withJSONObject: mergedMeta))
                     .flatMap { String(data: $0, encoding: .utf8) } ?? metaJson
                 guard db.execute("""
@@ -1159,8 +1287,8 @@ public final class SourceStore: ObservableObject {
             let excerptForInsert: String? = nil
             let ok = db.execute(
                 """
-                INSERT INTO content (ctype, guid, source, source_id, title, author, url, language, published_at, content_html, first_image_url, excerpt, fetch_status, meta, content_hash, is_duplicate, duplicate_of, auto_score, auto_translate, auto_summarize, auto_transcribe)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)
+                INSERT INTO content (ctype, guid, source, source_id, title, author, url, language, published_at, content_html, first_image_url, excerpt, fetch_status, meta, content_hash, is_duplicate, duplicate_of, auto_score, auto_translate, auto_summarize, auto_transcribe, visibility_state)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?)
                 """,
                 params: [ctype, entry.guid, source, sourceId, entry.title, entry.author, entry.url,
                          language, published, entry.html, Database.firstImageUrl(in: entry.html),
@@ -1169,7 +1297,8 @@ public final class SourceStore: ObservableObject {
                          pipeline.autoScore ? 1 : 0,
                          pipeline.autoTranslate ? 1 : 0,
                          pipeline.autoSummarize ? 1 : 0,
-                         pipeline.autoTranscribe ? 1 : 0]
+                         pipeline.autoTranscribe ? 1 : 0,
+                         visibilityState]
             )
             if ok { newId = db.lastInsertId() }
             return ok
@@ -1188,6 +1317,21 @@ public final class SourceStore: ObservableObject {
         if meta["video_id"] != nil || meta["video_url"] != nil { return "video" }
         if meta["audio_url"] != nil { return "podcast" }
         return "article"
+    }
+
+    /// 外部平台没有交付摘要或预置正文时，先保留元数据供后台补抓；正文成功后
+    /// FullTextFetcher 会自动把它切回 visible。普通 RSS 不使用这一门槛。
+    nonisolated private static func initialVisibilityState(
+        entry: ParsedEntry,
+        requiresExternalFulltext: Bool
+    ) -> String {
+        guard requiresExternalFulltext else { return ContentVisibilityState.visible }
+        let hasPreview = !entry.html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasMarkdown = entry.contentMarkdown?
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        return hasPreview || hasMarkdown
+            ? ContentVisibilityState.visible
+            : ContentVisibilityState.awaitingContent
     }
 
     /// 从 content_source.config JSON 提取 B站历史回溯范围

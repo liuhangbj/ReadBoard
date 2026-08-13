@@ -19,21 +19,21 @@ public struct ReadBoardOperationsFeatureView: View {
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: ReadBoardDesign.Space.xl) {
-                header
-                sourceHealthCard
-                engineCard
-                queueMetrics
-                if !model.runtime.activeItems.isEmpty { activeItemsCard }
-                if !model.recentProcessing.isEmpty { recentProcessingCard }
-                if !model.processingFailures.isEmpty { processingFailuresCard }
-                if !model.fullTextFailures.isEmpty { fullTextFailuresCard }
-                if !model.authentications.isEmpty { authenticationCard }
-                statisticsCard
+            ReadBoardFeaturePageContainer {
+                VStack(alignment: .leading, spacing: ReadBoardDesign.Space.xl) {
+                    header
+                    sourceHealthCard
+                    engineCard
+                    queueMetrics
+                    if !model.runtime.activeItems.isEmpty { activeItemsCard }
+                    if !model.recentProcessing.isEmpty { recentProcessingCard }
+                    if !model.processingFailures.isEmpty { processingFailuresCard }
+                    if !model.fullTextFailures.isEmpty { fullTextFailuresCard }
+                    if !model.authentications.isEmpty { authenticationCard }
+                    statisticsCard
+                }
+                .padding(ReadBoardDesign.Space.xl)
             }
-            .padding(ReadBoardDesign.Space.xl)
-            .frame(maxWidth: 1120, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .top)
         }
         .background(ReadBoardDesign.C.bg)
         .task { await model.monitor() }
@@ -82,7 +82,10 @@ public struct ReadBoardOperationsFeatureView: View {
                     icon: "checkmark.circle", color: ReadBoardDesign.C.scoreHigh)
                 ReadBoardMetricTile(title: "问题", value: "\(problemSources.count)",
                     icon: "exclamationmark.triangle",
-                    color: problemSources.isEmpty ? ReadBoardDesign.C.text3 : ReadBoardDesign.C.scoreLow)
+                    color: problemSources.isEmpty
+                        ? ReadBoardDesign.C.text3
+                        : (problemSources.allSatisfy(\.isRecovering)
+                            ? ReadBoardDesign.C.scoreMid : ReadBoardDesign.C.scoreLow))
                 Spacer(minLength: 8)
                 if model.permissions.allows(.runProcessing, capability: .sourceManagement) {
                     Button { Task { await model.syncAllSources() } } label: {
@@ -95,25 +98,32 @@ public struct ReadBoardOperationsFeatureView: View {
             if problemSources.isEmpty {
                 ReadBoardHairline()
                 Label("当前没有抓取失败或长期未更新的订阅源", systemImage: "checkmark.circle")
-                    .font(.system(size: 11))
+                    .readBoardInterfaceFont(size: 11)
                     .foregroundStyle(ReadBoardDesign.C.scoreHigh)
                     .padding(.vertical, 10)
             } else {
                 ForEach(Array(problemSources.prefix(12).enumerated()), id: \.element.id) { index, source in
                     ReadBoardHairline()
                     HStack(spacing: ReadBoardDesign.Space.md) {
-                        Image(systemName: source.hasError
-                            ? "exclamationmark.triangle.fill" : "clock.badge.exclamationmark")
-                            .foregroundStyle(source.hasError
-                                ? ReadBoardDesign.C.scoreLow : ReadBoardDesign.C.scoreMid)
+                        Image(systemName: source.isRecovering
+                            ? "arrow.triangle.2.circlepath"
+                            : (source.hasError
+                                ? "exclamationmark.triangle.fill" : "clock.badge.exclamationmark"))
+                            .foregroundStyle(source.isRecovering
+                                ? ReadBoardDesign.C.scoreMid
+                                : (source.hasError ? ReadBoardDesign.C.scoreLow : ReadBoardDesign.C.scoreMid))
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(source.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                            Text(source.name).readBoardInterfaceFont(size: 12, weight: .medium).lineLimit(1)
                             Text(source.error ?? sourceHealthText(source))
-                                .font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.text3)
+                                .readBoardInterfaceFont(size: 10).foregroundStyle(ReadBoardDesign.C.text3)
                                 .lineLimit(2)
                         }
                         Spacer()
-                        if model.permissions.allows(.runProcessing, capability: .sourceManagement) {
+                        if source.isRecovering {
+                            Text("自动重试")
+                                .readBoardInterfaceFont(size: 10, weight: .medium)
+                                .foregroundStyle(ReadBoardDesign.C.scoreMid)
+                        } else if model.permissions.allows(.runProcessing, capability: .sourceManagement) {
                             Button("重试") { Task { await model.retrySource(id: source.id) } }
                                 .buttonStyle(ReadBoardQuietButtonStyle())
                                 .disabled(model.activeOperations.contains("source:\(source.id)"))
@@ -122,7 +132,7 @@ public struct ReadBoardOperationsFeatureView: View {
                     .padding(.vertical, 8)
                     if index == 11, problemSources.count > 12 {
                         Text("另有 \(problemSources.count - 12) 个问题源")
-                            .font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.text3)
+                            .readBoardInterfaceFont(size: 10).foregroundStyle(ReadBoardDesign.C.text3)
                     }
                 }
             }
@@ -135,15 +145,16 @@ public struct ReadBoardOperationsFeatureView: View {
                 HStack(spacing: ReadBoardDesign.Space.md) {
                     processingActivityIcon(activity.snapshot.state)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(activity.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        Text(activity.title).readBoardInterfaceFont(size: 12, weight: .medium).lineLimit(1)
                         Text("\(jobTitle(activity.snapshot.operation.rawValue)) · \(activity.snapshot.message)")
-                            .font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.text3)
+                            .readBoardInterfaceFont(size: 10).foregroundStyle(ReadBoardDesign.C.text3)
                             .lineLimit(2)
                     }
                     Spacer()
                     Text(Date(timeIntervalSince1970: TimeInterval(activity.snapshot.updatedAt))
                         .formatted(date: .omitted, time: .shortened))
-                        .font(.system(size: 10).monospacedDigit())
+                        .readBoardInterfaceFont(size: 10)
+                        .monospacedDigit()
                         .foregroundStyle(ReadBoardDesign.C.text3)
                 }
                 .padding(.vertical, 8)
@@ -224,7 +235,7 @@ public struct ReadBoardOperationsFeatureView: View {
                     RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.lg)
                         .fill(phaseColor.opacity(0.10))
                     Image(systemName: phaseIcon)
-                        .font(.system(size: 18, weight: .medium))
+                        .readBoardInterfaceFont(size: 18, weight: .medium)
                         .foregroundStyle(phaseColor)
                 }
                 .frame(width: 48, height: 48)
@@ -232,22 +243,23 @@ public struct ReadBoardOperationsFeatureView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ReadBoardSectionLabel(text: "AI 内容处理")
                     Text(phaseTitle)
-                        .font(.system(size: 16, weight: .semibold, design: .serif))
+                        .readBoardInterfaceFont(size: 16, weight: .semibold)
                         .foregroundStyle(ReadBoardDesign.C.text)
                     Text(model.runtime.lastSummary.isEmpty
                         ? "处理引擎等待新的任务"
                         : model.runtime.lastSummary)
-                        .font(.system(size: 11))
+                        .readBoardInterfaceFont(size: 11)
                         .foregroundStyle(ReadBoardDesign.C.text3)
                         .lineLimit(2)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("\(model.runtime.queue.items)")
-                        .font(.system(size: 30, weight: .semibold).monospacedDigit())
+                        .readBoardInterfaceFont(size: 30, weight: .semibold)
+                        .monospacedDigit()
                         .foregroundStyle(ReadBoardDesign.C.text)
                     Text("队列项目")
-                        .font(.system(size: 10))
+                        .readBoardInterfaceFont(size: 10)
                         .foregroundStyle(ReadBoardDesign.C.text3)
                 }
             }
@@ -280,8 +292,8 @@ public struct ReadBoardOperationsFeatureView: View {
                 HStack(spacing: ReadBoardDesign.Space.md) {
                     ProgressView().controlSize(.small).tint(ReadBoardDesign.C.accent)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(item.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                        Text(item.stage).font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.text3)
+                        Text(item.title).readBoardInterfaceFont(size: 12, weight: .medium).lineLimit(1)
+                        Text(item.stage).readBoardInterfaceFont(size: 10).foregroundStyle(ReadBoardDesign.C.text3)
                     }
                     Spacer()
                 }
@@ -298,11 +310,11 @@ public struct ReadBoardOperationsFeatureView: View {
                     Image(systemName: "exclamationmark.circle.fill")
                         .foregroundStyle(ReadBoardDesign.C.scoreLow)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(item.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        Text(item.title).readBoardInterfaceFont(size: 12, weight: .medium).lineLimit(1)
                         Text("\(item.sourceName) · \(jobTitle(item.jobType)) · 连续失败 \(item.consecutiveFailures) 次")
-                            .font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.text3)
+                            .readBoardInterfaceFont(size: 10).foregroundStyle(ReadBoardDesign.C.text3)
                         if let error = item.error, !error.isEmpty {
-                            Text(error).font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.scoreLow)
+                            Text(error).readBoardInterfaceFont(size: 10).foregroundStyle(ReadBoardDesign.C.scoreLow)
                                 .lineLimit(2)
                         }
                     }
@@ -325,10 +337,10 @@ public struct ReadBoardOperationsFeatureView: View {
                     Image(systemName: "doc.text.magnifyingglass")
                         .foregroundStyle(ReadBoardDesign.C.scoreMid)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(item.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        Text(item.title).readBoardInterfaceFont(size: 12, weight: .medium).lineLimit(1)
                         Text("\(item.sourceName) · \(item.sourceType)")
-                            .font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.text3)
-                        Text(item.error).font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.scoreLow)
+                            .readBoardInterfaceFont(size: 10).foregroundStyle(ReadBoardDesign.C.text3)
+                        Text(item.error).readBoardInterfaceFont(size: 10).foregroundStyle(ReadBoardDesign.C.scoreLow)
                             .lineLimit(2)
                     }
                     Spacer(minLength: 8)
@@ -347,9 +359,9 @@ public struct ReadBoardOperationsFeatureView: View {
                 HStack(spacing: ReadBoardDesign.Space.md) {
                     Circle().fill(authenticationColor(item.phase)).frame(width: 7, height: 7)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(item.displayName).font(.system(size: 12, weight: .medium))
+                        Text(item.displayName).readBoardInterfaceFont(size: 12, weight: .medium)
                         Text(item.accountName ?? item.message ?? authenticationTitle(item.phase))
-                            .font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.text3)
+                            .readBoardInterfaceFont(size: 10).foregroundStyle(ReadBoardDesign.C.text3)
                             .lineLimit(1)
                     }
                     Spacer()
@@ -457,7 +469,7 @@ public struct ReadBoardOperationsFeatureView: View {
                 Button { model.clearStatus() } label: { Image(systemName: "xmark") }
                     .buttonStyle(.plain)
             }
-            .font(.system(size: 11))
+            .readBoardInterfaceFont(size: 11)
             .foregroundStyle(ReadBoardDesign.C.text)
             .padding(.horizontal, 12).padding(.vertical, 8)
             .background(.regularMaterial).clipShape(Capsule())
@@ -468,13 +480,16 @@ public struct ReadBoardOperationsFeatureView: View {
 
 public struct ReadBoardServiceHealthButton: View {
     @State private var model: ReadBoardServiceHealthMonitorModel
+    private let scale: Double
     private let action: () -> Void
 
     public init(
         environment: ReadBoardFeatureEnvironment,
+        scale: Double = 1,
         action: @escaping () -> Void
     ) {
         _model = State(initialValue: ReadBoardServiceHealthMonitorModel(environment: environment))
+        self.scale = scale
         self.action = action
     }
 
@@ -483,11 +498,11 @@ public struct ReadBoardServiceHealthButton: View {
             ZStack {
                 Circle()
                     .fill(color.opacity(0.16))
-                    .frame(width: 24, height: 24)
+                    .frame(width: 24 * scale, height: 24 * scale)
                 Image(systemName: icon)
-                    .font(.system(size: 12, weight: .semibold))
+                    .readBoardInterfaceFont(size: 12 * scale, weight: .semibold)
                     .foregroundStyle(color)
-                    .frame(width: 24, height: 24)
+                    .frame(width: 24 * scale, height: 24 * scale)
             }
         }
         .buttonStyle(.plain)
@@ -528,7 +543,7 @@ private struct ReadBoardAuthenticationChallengeView: View {
     var body: some View {
         VStack(spacing: ReadBoardDesign.Space.lg) {
             Text("平台登录")
-                .font(.system(size: 18, weight: .semibold, design: .serif))
+                .readBoardInterfaceFont(size: 18, weight: .semibold)
             if let challenge = model.authenticationChallenge {
                 if let image = qrImage(challenge.qrPayload) {
                     image.resizable().interpolation(.none).scaledToFit()
@@ -537,9 +552,9 @@ private struct ReadBoardAuthenticationChallengeView: View {
                         .clipShape(RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.lg))
                 }
                 Text("使用对应平台 App 扫描二维码并确认登录")
-                    .font(.system(size: 12)).foregroundStyle(ReadBoardDesign.C.text2)
+                    .readBoardInterfaceFont(size: 12).foregroundStyle(ReadBoardDesign.C.text2)
                 Text("二维码将在 \(Date(timeIntervalSince1970: challenge.expiresAt).formatted(date: .omitted, time: .shortened)) 失效")
-                    .font(.system(size: 10)).foregroundStyle(ReadBoardDesign.C.text3)
+                    .readBoardInterfaceFont(size: 10).foregroundStyle(ReadBoardDesign.C.text3)
             }
             Button("取消") {
                 model.dismissAuthentication()

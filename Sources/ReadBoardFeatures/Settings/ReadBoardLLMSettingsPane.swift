@@ -42,13 +42,9 @@ public struct ReadBoardLLMSettingsPane: View {
     public var body: some View {
         VStack(spacing: 0) {
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("LLM 模型")
-                        .font(.system(size: 18, weight: .semibold, design: .serif))
-                    Text("从上到下依次尝试；空模型会自动跳过。密钥只写入服务端，永不回传明文。")
-                        .font(.caption)
-                        .foregroundStyle(ReadBoardDesign.C.text3)
-                }
+                Text("从上到下依次尝试；空模型会自动跳过。密钥默认掩码显示，点击眼睛可按需查看。")
+                    .readBoardTextRole(.detail)
+                    .foregroundStyle(ReadBoardDesign.C.text3)
                 Spacer()
                 Button {
                     Task {
@@ -59,6 +55,7 @@ public struct ReadBoardLLMSettingsPane: View {
                     Label("添加模型", systemImage: "plus")
                 }
                 .buttonStyle(ReadBoardSecondaryButtonStyle())
+                .readBoardSettingsButton()
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
@@ -73,21 +70,19 @@ public struct ReadBoardLLMSettingsPane: View {
                     systemImage: "brain.head.profile",
                     description: Text("添加一个 OpenAI 兼容模型后即可启用评分、摘要和翻译。"))
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(Array(profiles.enumerated()), id: \.element.id) { index, profile in
-                            ReadBoardLLMProfileCard(
-                                index: index,
-                                profile: profile,
-                                canMoveUp: index > 0,
-                                canMoveDown: index < profiles.count - 1,
-                                configuration: configuration,
-                                onReload: { await reload() })
-                                .id("\(profile.id)|\(profile.baseURL)|\(profile.model)|\(profile.hasAPIKey)")
-                        }
+                Form {
+                    ForEach(Array(profiles.enumerated()), id: \.element.id) { index, profile in
+                        ReadBoardLLMProfileCard(
+                            index: index,
+                            profile: profile,
+                            canMoveUp: index > 0,
+                            canMoveDown: index < profiles.count - 1,
+                            configuration: configuration,
+                            onReload: { await reload() })
+                            .id("\(profile.id)|\(profile.baseURL)|\(profile.model)|\(profile.hasAPIKey)")
                     }
-                    .padding(20)
                 }
+                .formStyle(.grouped)
             }
         }
         .task { await reload() }
@@ -137,6 +132,7 @@ private struct ReadBoardLLMProfileCard: View {
         self.canMoveDown = canMoveDown
         self.configuration = configuration
         self.onReload = onReload
+        _presetID = State(initialValue: Self.presetID(for: profile.baseURL))
         _baseURL = State(initialValue: profile.baseURL)
         _model = State(initialValue: profile.model)
         _temperature = State(initialValue: profile.temperature)
@@ -144,13 +140,91 @@ private struct ReadBoardLLMProfileCard: View {
     }
 
     var body: some View {
-        ReadBoardPanel {
-            VStack(alignment: .leading, spacing: 12) {
+        Section {
+            ReadBoardSettingsInputRow("API 地址") {
+                TextField("https://…/v1/chat/completions", text: $baseURL)
+                    .readBoardSettingsInput()
+            }
+
+            ReadBoardSettingsInputRow("API Key") {
+                ReadBoardSettingsPasswordField(
+                    "输入 API Key",
+                    text: $apiKey,
+                    hasStoredSecret: profile.hasAPIKey,
+                    loadStoredSecret: { await loadStoredAPIKey() })
+            }
+
+            ReadBoardSettingsInputRow("模型") {
                 HStack(spacing: 8) {
+                    if presetID == "custom" {
+                        TextField("模型 ID", text: $model)
+                            .readBoardSettingsInput(.fill)
+                    } else {
+                        Picker("", selection: $model) {
+                            if modelChoices.isEmpty {
+                                Text("请先获取模型").tag("")
+                            } else {
+                                ForEach(modelChoices, id: \.self) { Text($0).tag($0) }
+                            }
+                        }
+                        .readBoardSettingsPicker(.fill)
+                    }
+                    Button {
+                        Task { await fetchModels() }
+                    } label: {
+                        if isFetchingModels { ProgressView().controlSize(.small) }
+                        else { Text("获取模型") }
+                    }
+                    .buttonStyle(ReadBoardSecondaryButtonStyle())
+                    .disabled(baseURL.isEmpty || isFetchingModels)
+                    .readBoardSettingsButton(.inline)
+                }
+            }
+
+            ReadBoardSettingsSliderRow(
+                "温度",
+                value: $temperature,
+                range: 0...2,
+                step: 0.1,
+                displayValue: String(format: "%.1f", temperature))
+            ReadBoardSettingsToggleRow("结构化任务关闭模型思考", isOn: $disableThinking)
+
+            if let resultMessage {
+                Label(resultMessage, systemImage: resultSucceeded
+                      ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .readBoardTextRole(.detail)
+                    .foregroundStyle(resultSucceeded
+                        ? ReadBoardDesign.C.scoreHigh : ReadBoardDesign.C.scoreLow)
+            }
+
+            ReadBoardSettingsActionRow {
+                Button {
+                    Task { await testConnection() }
+                } label: {
+                    if isTesting { ProgressView().controlSize(.small) }
+                    else { Text("测试连接") }
+                }
+                .buttonStyle(ReadBoardSecondaryButtonStyle())
+                .disabled(baseURL.isEmpty || model.isEmpty || isTesting)
+                .readBoardSettingsButton(.inline)
+                if profile.hasAPIKey {
+                    Button("清除已保存密钥", role: .destructive) {
+                        Task { await save(apiKeyOverride: "") }
+                    }
+                    .buttonStyle(ReadBoardDestructiveButtonStyle())
+                    .readBoardSettingsButton(.inline)
+                }
+                Button("保存") { Task { await save(apiKeyOverride: nil) } }
+                    .buttonStyle(ReadBoardPrimaryButtonStyle())
+                    .readBoardSettingsButton(.inline)
+                    .disabled(baseURL.isEmpty || model.isEmpty)
+            }
+        } header: {
+            HStack(spacing: 6) {
                     Image(systemName: "line.3.horizontal")
                         .foregroundStyle(ReadBoardDesign.C.text3)
                     Text("模型 \(index + 1)")
-                        .font(.system(size: 14, weight: .semibold))
+                        .readBoardTextRole(.itemTitle)
                     if profile.hasAPIKey {
                         ReadBoardBadge(text: "密钥已保存", color: ReadBoardDesign.C.scoreHigh)
                     }
@@ -160,86 +234,18 @@ private struct ReadBoardLLMProfileCard: View {
                             Text(preset.title).tag(preset.id)
                         }
                     }
-                    .frame(width: 190)
+                    .pickerStyle(.menu)
+                    .fixedSize()
                     .onChange(of: presetID) { _, value in applyPreset(value) }
                     Button { move(to: index - 1) } label: { Image(systemName: "arrow.up") }
-                        .buttonStyle(ReadBoardQuietButtonStyle()).disabled(!canMoveUp)
+                        .buttonStyle(ReadBoardQuietButtonStyle())
+                        .readBoardSettingsButton(.icon).disabled(!canMoveUp)
                     Button { move(to: index + 1) } label: { Image(systemName: "arrow.down") }
-                        .buttonStyle(ReadBoardQuietButtonStyle()).disabled(!canMoveDown)
+                        .buttonStyle(ReadBoardQuietButtonStyle())
+                        .readBoardSettingsButton(.icon).disabled(!canMoveDown)
                     Button(role: .destructive) { remove() } label: { Image(systemName: "trash") }
-                        .buttonStyle(ReadBoardQuietButtonStyle())
-                }
-
-                LabeledContent("API 地址") {
-                    TextField("https://…/v1/chat/completions", text: $baseURL)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 520)
-                }
-
-                LabeledContent("API Key") {
-                    SecureField(profile.hasAPIKey ? "留空则保留已保存密钥" : "输入 API Key", text: $apiKey)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 520)
-                }
-
-                LabeledContent("模型") {
-                    HStack(spacing: 8) {
-                        if availableModels.isEmpty {
-                            TextField("模型 ID", text: $model)
-                                .textFieldStyle(.roundedBorder)
-                        } else {
-                            Picker("", selection: $model) {
-                                if !model.isEmpty, !availableModels.contains(model) {
-                                    Text(model).tag(model)
-                                }
-                                ForEach(availableModels, id: \.self) { Text($0).tag($0) }
-                            }
-                            .labelsHidden()
-                        }
-                        Button {
-                            Task { await fetchModels() }
-                        } label: {
-                            if isFetchingModels { ProgressView().controlSize(.small) }
-                            else { Text("获取模型") }
-                        }
-                        .disabled(baseURL.isEmpty || isFetchingModels)
-                    }
-                    .frame(maxWidth: 520)
-                }
-
-                LabeledContent("温度 \(temperature, specifier: "%.1f")") {
-                    Slider(value: $temperature, in: 0...2, step: 0.1)
-                        .frame(maxWidth: 320)
-                }
-                Toggle("结构化任务关闭模型思考", isOn: $disableThinking)
-
-                if let resultMessage {
-                    Label(resultMessage, systemImage: resultSucceeded
-                          ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(resultSucceeded
-                            ? ReadBoardDesign.C.scoreHigh : ReadBoardDesign.C.scoreLow)
-                }
-
-                HStack {
-                    Button {
-                        Task { await testConnection() }
-                    } label: {
-                        if isTesting { ProgressView().controlSize(.small) }
-                        else { Text("测试连接") }
-                    }
-                    .disabled(baseURL.isEmpty || model.isEmpty || isTesting)
-                    if profile.hasAPIKey {
-                        Button("清除已保存密钥", role: .destructive) {
-                            Task { await save(apiKeyOverride: "") }
-                        }
-                        .buttonStyle(ReadBoardQuietButtonStyle())
-                    }
-                    Spacer()
-                    Button("保存") { Task { await save(apiKeyOverride: nil) } }
-                        .buttonStyle(ReadBoardPrimaryButtonStyle())
-                        .disabled(baseURL.isEmpty || model.isEmpty)
-                }
+                        .buttonStyle(ReadBoardDestructiveButtonStyle())
+                        .readBoardSettingsButton(.icon)
             }
         }
     }
@@ -264,6 +270,30 @@ private struct ReadBoardLLMProfileCard: View {
         availableModels = []
     }
 
+    private var modelChoices: [String] {
+        var values = availableModels
+        if let preset = ReadBoardLLMPreset.all.first(where: { $0.id == presetID }),
+           !preset.model.isEmpty {
+            values.insert(preset.model, at: 0)
+        }
+        if !model.isEmpty { values.insert(model, at: 0) }
+        var seen = Set<String>()
+        return values.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    private static func presetID(for baseURL: String) -> String {
+        let normalized = normalize(baseURL)
+        return ReadBoardLLMPreset.all.first {
+            $0.id != "custom" && normalize($0.baseURL) == normalized
+        }?.id ?? "custom"
+    }
+
+    private static func normalize(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .lowercased()
+    }
+
     private func save(apiKeyOverride: String?) async {
         var payload = update
         if let apiKeyOverride {
@@ -275,6 +305,17 @@ private struct ReadBoardLLMProfileCard: View {
         if ok {
             apiKey = ""
             await onReload()
+        }
+    }
+
+    @MainActor
+    private func loadStoredAPIKey() async -> String? {
+        do {
+            return try await configuration.llmAPIKey(profileID: profile.id)
+        } catch {
+            resultSucceeded = false
+            resultMessage = "无法读取已保存密钥：\(error.localizedDescription)"
+            return nil
         }
     }
 

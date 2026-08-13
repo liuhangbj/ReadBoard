@@ -209,3 +209,112 @@ public enum ReadBoardReadingFont {
         return candidates.first(where: available.contains)
     }
 }
+
+/// 阅读器界面字体与正文阅读字体使用同一套可用字体解析，但保存为独立设置。
+/// 默认 system 在中文环境下由 macOS 使用苹方回退；不得为标题额外指定 serif。
+public enum ReadBoardInterfaceFont {
+    public static let presets: [(key: String, title: String)] = [
+        ("system", "系统默认（苹方）"),
+        ("heiti", "黑体"),
+        ("kaiti", "楷体"),
+        ("fangsong", "仿宋"),
+    ]
+
+    public static var availableFontFamilies: [String] {
+        ReadBoardReadingFont.availableFontFamilies
+    }
+
+    public static func font(
+        rawValue: String,
+        size: CGFloat,
+        weight: Font.Weight = .regular,
+        design: Font.Design = .default
+    ) -> Font {
+        ReadBoardReadingFont.font(
+            rawValue: rawValue, size: size, weight: weight, design: design)
+    }
+
+    #if os(macOS)
+    public static func nsFont(
+        rawValue: String,
+        size: CGFloat,
+        weight: NSFont.Weight = .regular
+    ) -> NSFont {
+        let fallback = NSFont.systemFont(ofSize: size, weight: weight)
+        let family: String?
+        if rawValue.hasPrefix("custom:") {
+            family = String(rawValue.dropFirst(7))
+        } else {
+            let candidates: [String]
+            switch rawValue {
+            case "heiti", "sansSerif": candidates = ["Heiti SC", "STHeiti", "PingFang SC"]
+            case "kaiti": candidates = ["Kaiti SC", "STKaiti", "Kai"]
+            case "fangsong", "serif": candidates = ["STFangsong", "FangSong", "FangSong_GB2312"]
+            case "mono": candidates = ["Menlo"]
+            default: candidates = []
+            }
+            let available = Set(NSFontManager.shared.availableFontFamilies)
+            family = candidates.first(where: available.contains)
+        }
+        guard let family,
+              let base = NSFontManager.shared.font(
+                withFamily: family,
+                traits: [],
+                weight: 5,
+                size: size) else { return fallback }
+        guard weight.rawValue >= NSFont.Weight.semibold.rawValue else { return base }
+        return NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask)
+    }
+    #endif
+}
+
+private struct ReadBoardInterfaceFontRawKey: EnvironmentKey {
+    static let defaultValue = "system"
+}
+
+private struct ReadBoardInterfaceScaleKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 1
+}
+
+public extension EnvironmentValues {
+    var readBoardInterfaceFontRaw: String {
+        get { self[ReadBoardInterfaceFontRawKey.self] }
+        set { self[ReadBoardInterfaceFontRawKey.self] = newValue }
+    }
+
+
+    var readBoardInterfaceScale: CGFloat {
+        get { self[ReadBoardInterfaceScaleKey.self] }
+        set { self[ReadBoardInterfaceScaleKey.self] = newValue }
+    }
+}
+
+private struct ReadBoardInterfaceFontModifier: ViewModifier {
+    @Environment(\.readBoardInterfaceFontRaw) private var rawValue
+    let size: CGFloat
+    let weight: Font.Weight
+    let design: Font.Design
+
+    func body(content: Content) -> some View {
+        content.font(ReadBoardInterfaceFont.font(
+            rawValue: rawValue, size: size, weight: weight, design: design))
+    }
+}
+
+public extension View {
+    func readBoardInterfaceFont(
+        size: CGFloat,
+        weight: Font.Weight = .regular,
+        design: Font.Design = .default
+    ) -> some View {
+        modifier(ReadBoardInterfaceFontModifier(size: size, weight: weight, design: design))
+    }
+
+    func readBoardInterfaceFontFamily(_ rawValue: String) -> some View {
+        environment(\.readBoardInterfaceFontRaw, rawValue)
+    }
+
+    func readBoardInterfaceScale(_ scale: CGFloat) -> some View {
+        environment(\.readBoardInterfaceScale, scale)
+    }
+}

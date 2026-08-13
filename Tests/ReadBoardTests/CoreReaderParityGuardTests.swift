@@ -26,6 +26,22 @@ final class CoreReaderParityGuardTests: XCTestCase {
             ".keyboardShortcut(.space, modifiers: [])",
             "await model.selectAdjacent(offset: 1)",
             "ReadBoardArticleDetailFeatureView",
+            "@AppStorage(\"reading.uiFontScale\")",
+            "ReadBoardLibraryColumnMetrics.sidebarScale(for: uiFontScale)",
+            "Menu(\"内容处理\", systemImage: \"gearshape.2\")",
+            "Menu(\"抓取设置\", systemImage: \"arrow.down.circle\")",
+            "重新处理本源全部",
+            "重新处理本夹全部",
+            "重新提取全文",
+            "移动到文件夹",
+            "处理所有历史内容",
+            "重提所有历史全文",
+            "永久删除此源",
+            "删除文件夹",
+            "processingButton(\"重新处理\"",
+            "processingButton(\"删除转录稿\"",
+            "operation: .deleteTranscript",
+            "触发导出规则",
         ]
 
         for sentinel in requiredSentinels {

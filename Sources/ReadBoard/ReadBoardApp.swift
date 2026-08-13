@@ -27,6 +27,7 @@ public struct ReadBoardApp: App {
         // 必须先配置运行目录，再创建 live services。LocalReaderGateway 会首次访问
         // Database.shared；若顺序相反，Pro 会把数据库静态路径锁定到社区版目录。
         self.services = services()
+        InboxURLHandler.shared.configure(inbox: self.services.inbox)
         self.runtime = ServiceRuntime(configuration: configuration, services: self.services)
         // SIGPIPE：URLSession 在受限网络环境（沙箱/VPN/proxy）下写已断开的 socket 会触发，
         // 默认信号处理直接杀进程。设为 SIG_IGN 让系统调用返回 EPIPE 错误码而非崩溃。
@@ -45,6 +46,7 @@ public struct ReadBoardApp: App {
             RootView(configuration: configuration, services: services, onTerminate: { runtime.stop() })
                 .environment(\.readBoardConfiguration, configuration)
                 .frame(minWidth: 900, minHeight: 600)
+                .onOpenURL { InboxURLHandler.shared.handle($0) }
         }
         .windowStyle(.automatic)
         .defaultSize(width: 1200, height: 780)

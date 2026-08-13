@@ -120,10 +120,28 @@ private actor ExportRuleRunGate {
     }
 }
 
+/// 保证持久化 ready 队列只有一个消费者。事件本身在 SQLite 中，actor 只负责
+/// 避免“实时唤醒”和后台轮询同时消费同一批任务。
+private actor ExportReadyDrainGate {
+    private var draining = false
+
+    func begin() -> Bool {
+        guard !draining else { return false }
+        draining = true
+        return true
+    }
+
+    func finish() {
+        draining = false
+    }
+}
+
 public final class ExportService: @unchecked Sendable {
     static let shared = ExportService(); private let db = Database.shared
     private let sLock=NSLock(); private var sTask: Task<Void,Never>?
+    private var readyTask: Task<Void,Never>?
     private let runGate = ExportRuleRunGate()
+    private let readyDrainGate = ExportReadyDrainGate()
     private let webhookSessionLock = NSLock(); private var webhookSession = URLSession.shared
     private init() {}
 
@@ -151,20 +169,63 @@ public final class ExportService: @unchecked Sendable {
         return (delivered, failed)
     }
 
-    func runPending(trigger: String, contentId: Int64?=nil) async { guard FeatureBoard.export.enabled else {return}; let nt=ExportRule.normalizedTrigger(trigger); for rule in listRules() where rule.enabled && ExportRule.normalizedTrigger(rule.triggerOn)==nt { if nt=="scheduled",!isDue(rule){continue}; await run(rule:rule,contentId:contentId)} }
-    func runFor(ruleId: Int64) async { guard let rule=listRules().first(where:{$0.id==ruleId}) else {return}; await run(rule:rule,contentId:nil) }
+    func runPending(trigger: String, contentId: Int64?=nil) async {
+        let normalizedTrigger = ExportRule.normalizedTrigger(trigger)
+        if normalizedTrigger == "ready", let contentId {
+            enqueueReady(contentId: contentId)
+            await drainReadyQueue()
+            return
+        }
+        guard FeatureBoard.export.enabled else { return }
+        for rule in listRules()
+        where rule.enabled && ExportRule.normalizedTrigger(rule.triggerOn) == normalizedTrigger {
+            if normalizedTrigger == "scheduled", !isDue(rule) { continue }
+            _ = await run(rule: rule, contentId: contentId)
+        }
+    }
+    func runFor(ruleId: Int64) async { guard let rule=listRules().first(where:{$0.id==ruleId}) else {return}; _ = await run(rule:rule,contentId:nil) }
 
     /// 强制导出：忽略触发时机，对所有启用的规则逐条评估并导出该篇。
     func forceExport(contentId: Int64) async -> Int {
         var done = 0
         for rule in listRules() where rule.enabled {
-            await run(rule: rule, contentId: contentId)
+            _ = await run(rule: rule, contentId: contentId, allowInboxOverride: true)
             done += 1
         }
         return done
     }
-    func startScheduler(intervalSeconds: TimeInterval=300) { sLock.lock();defer{sLock.unlock()}; guard sTask==nil else{return}; sTask=Task{[weak self] in do{try await Task.sleep(nanoseconds:5_000_000_000)}catch{return}; while !Task.isCancelled{guard !Task.isCancelled,let self else{break}; await self.runPending(trigger:"scheduled"); do{try await Task.sleep(nanoseconds:UInt64(max(30,intervalSeconds)*1_000_000_000))}catch{break}} } }
-    func stopScheduler() { sLock.lock();let t=sTask;sTask=nil;sLock.unlock();t?.cancel() }
+    func startScheduler(intervalSeconds: TimeInterval=300) {
+        sLock.lock()
+        defer { sLock.unlock() }
+        guard sTask == nil, readyTask == nil else { return }
+        sTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            while !Task.isCancelled {
+                guard let self else { break }
+                await self.runPending(trigger: "scheduled")
+                do { try await Task.sleep(for: .seconds(max(30, intervalSeconds))) }
+                catch { break }
+            }
+        }
+        readyTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { break }
+                await self.drainReadyQueue()
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { break }
+            }
+        }
+    }
+    func stopScheduler() {
+        sLock.lock()
+        let scheduled = sTask
+        let ready = readyTask
+        sTask = nil
+        readyTask = nil
+        sLock.unlock()
+        scheduled?.cancel()
+        ready?.cancel()
+    }
 
     func preview(rule: ExportRule, maxSamples: Int=3) -> ExportRulePreview {
         var beforeId: Int64?
@@ -228,35 +289,136 @@ public final class ExportService: @unchecked Sendable {
     func setWebhookSessionForTesting(_ session: URLSession?) {
         webhookSessionLock.lock(); webhookSession = session ?? .shared; webhookSessionLock.unlock()
     }
+    func drainReadyQueueForTesting() async { await drainReadyQueue() }
+    func queuedReadyCountForTesting(contentId: Int64? = nil) -> Int {
+        if let contentId {
+            return db.scalarInt("SELECT COUNT(*) FROM export_ready_queue WHERE content_id=?",
+                                params: [contentId]) ?? 0
+        }
+        return db.scalarInt("SELECT COUNT(*) FROM export_ready_queue") ?? 0
+    }
     #endif
 
     // MARK: internal
-    private func run(rule: ExportRule, contentId: Int64?) async {
+    private struct ReadyQueueItem {
+        let contentId: Int64
+        let generation: Int
+        let attempts: Int
+    }
+
+    /// 显式 ready 信号用于立即唤醒；内容字段变化本身已由 v33 数据库触发器原子入队。
+    /// 冲突时不增加 generation，避免同一次变化被“写库触发器 + 上层通知”计算两次。
+    private func enqueueReady(contentId: Int64) {
+        db.execute("""
+            INSERT INTO export_ready_queue
+                (content_id, generation, attempts, available_at, last_error, created_at, updated_at)
+            VALUES (?, 1, 0, datetime('now'), NULL, datetime('now'), datetime('now'))
+            ON CONFLICT(content_id) DO UPDATE SET
+                available_at = datetime('now'), last_error = NULL, updated_at = datetime('now')
+            """, params: [contentId])
+    }
+
+    private func drainReadyQueue() async {
+        guard await readyDrainGate.begin() else { return }
+        while !Task.isCancelled {
+            let items = db.queryRows("""
+                SELECT content_id, generation, attempts
+                FROM export_ready_queue
+                WHERE available_at <= datetime('now')
+                ORDER BY available_at, content_id
+                LIMIT 50
+                """).map {
+                    ReadyQueueItem(
+                        contentId: Int64($0["content_id"] ?? "") ?? 0,
+                        generation: Int($0["generation"] ?? "") ?? 1,
+                        attempts: Int($0["attempts"] ?? "") ?? 0)
+                }
+            guard !items.isEmpty else { break }
+            for item in items where !Task.isCancelled {
+                if let error = await processReady(item) {
+                    let delay = min(3_600, 15 * (1 << min(item.attempts, 8)))
+                    db.execute("""
+                        UPDATE export_ready_queue
+                        SET attempts=attempts+1, available_at=datetime('now', ?),
+                            last_error=?, updated_at=datetime('now')
+                        WHERE content_id=? AND generation=?
+                        """, params: ["+\(delay) seconds", error, item.contentId, item.generation])
+                } else {
+                    db.execute(
+                        "DELETE FROM export_ready_queue WHERE content_id=? AND generation=?",
+                        params: [item.contentId, item.generation])
+                }
+            }
+        }
+        await readyDrainGate.finish()
+    }
+
+    /// nil 表示该 generation 已完整评估；返回错误则保留事件并指数退避。
+    private func processReady(_ item: ReadyQueueItem) async -> String? {
+        guard FeatureBoard.export.enabled else { return "导出功能未启用" }
+        let rules = listRules().filter {
+            $0.enabled && ExportRule.normalizedTrigger($0.triggerOn) == "ready"
+        }
+        guard !rules.isEmpty else { return nil }
+
+        var retryErrors: [String] = []
+        for rule in rules {
+            // 当前不匹配即完成本次评估；后续任一相关字段变化会产生新 generation。
+            guard !matching(rule: rule, contentId: item.contentId, beforeId: nil).isEmpty else {
+                continue
+            }
+            guard platformIsEnabled(rule.target) else {
+                retryErrors.append("\(rule.name)：\(platformDisabledMessage(rule.target))")
+                continue
+            }
+            guard await run(rule: rule, contentId: item.contentId) else {
+                retryErrors.append("\(rule.name)：导出任务繁忙或被取消")
+                continue
+            }
+            let status = db.queryRows("""
+                SELECT status, error FROM export_record
+                WHERE rule_id=? AND content_id=? AND artifact=? AND revision=?
+                LIMIT 1
+                """, params: [rule.id, item.contentId, rule.effectiveArtifact, rule.revision]).first
+            if status?["status"] == "failed" {
+                retryErrors.append("\(rule.name)：\(status?["error"] ?? "导出失败")")
+            } else if status == nil {
+                retryErrors.append("\(rule.name)：未生成导出记录")
+            }
+        }
+        return retryErrors.isEmpty ? nil : retryErrors.joined(separator: "；")
+    }
+
+    @discardableResult
+    private func run(rule: ExportRule, contentId: Int64?, allowInboxOverride: Bool = false) async -> Bool {
         // 平台总开关用于暂停整个平台；暂停不记失败，也不更新规则执行时间。
-        guard platformIsEnabled(rule.target) else { return }
-        guard await runGate.begin(ruleID: rule.id, contentID: contentId) else { return }
+        guard platformIsEnabled(rule.target) else { return false }
+        guard await runGate.begin(ruleID: rule.id, contentID: contentId) else { return false }
 
         var pendingContentID = contentId
         while true {
-            await execute(rule: rule, contentId: pendingContentID)
+            await execute(rule: rule, contentId: pendingContentID,
+                          allowInboxOverride: allowInboxOverride)
             if Task.isCancelled {
                 await runGate.finish(ruleID: rule.id)
-                return
+                return false
             }
             switch await runGate.next(ruleID: rule.id) {
             case .run(let contentID):
                 pendingContentID = contentID
             case .finished:
-                return
+                return true
             }
         }
     }
 
-    private func execute(rule: ExportRule, contentId: Int64?) async {
+    private func execute(rule: ExportRule, contentId: Int64?,
+                         allowInboxOverride: Bool = false) async {
 
         var beforeId: Int64?
         exportPages: while !Task.isCancelled {
-            let candidates = matching(rule: rule, contentId: contentId, beforeId: beforeId)
+            let candidates = matching(rule: rule, contentId: contentId, beforeId: beforeId,
+                                      allowInboxOverride: allowInboxOverride)
             guard !candidates.isEmpty else { break }
 
             for content in candidates {
@@ -278,8 +440,12 @@ public final class ExportService: @unchecked Sendable {
         db.execute("UPDATE export_rule SET last_run_at=datetime('now') WHERE id=?", params: [rule.id])
     }
 
-    private func matching(rule: ExportRule, contentId: Int64?, beforeId: Int64?) -> [EC] {
-        var w:[String]=["is_duplicate=0","deleted_at IS NULL"];var p:[Any?]=[]; if let cid=contentId{w.append("id=?");p.append(cid)}; if let bid=beforeId{w.append("id<?");p.append(bid)}
+    private func matching(rule: ExportRule, contentId: Int64?, beforeId: Int64?,
+                          allowInboxOverride: Bool = false) -> [EC] {
+        var w:[String]=["is_duplicate=0","deleted_at IS NULL","visibility_state='visible'"];var p:[Any?]=[]; if let cid=contentId{w.append("id=?");p.append(cid)}; if let bid=beforeId{w.append("id<?");p.append(bid)}
+        if !allowInboxOverride {
+            w.append("(ingest_origin!='inbox' OR json_extract(meta,'$.inbox_allow_export')='true')")
+        }
         if let ms=rule.criteria.minScore{w.append("llm_score>=?");p.append(ms)}; if rule.criteria.requireScored{w.append("llm_score IS NOT NULL")}
         if let ids=rule.criteria.sourceIds,!ids.isEmpty{w.append("source_id IN (\(ids.map{String($0)}.joined(separator:",")))")}
         if rule.criteria.requireTranslated{w.append("llm_translated_md IS NOT NULL AND llm_translated_md!=''")}

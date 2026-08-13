@@ -75,6 +75,12 @@ public struct LocalConfigurationGateway: ConfigurationGateway {
     public func removeLLMProfile(id: Int) async { LLMSettings.removeSlot(at: id) }
     public func moveLLMProfile(from: Int, to: Int) async { LLMSettings.moveSlot(from: from, to: to) }
 
+    public func llmAPIKey(profileID: Int) async -> String? {
+        guard profileID >= 0, profileID < LLMSettings.slotCount else { return nil }
+        let value = LLMSettings.profile(profileID).apiKey
+        return value.isEmpty ? nil : value
+    }
+
     public func testLLMProfile(_ update: LLMProfileUpdate) async -> ConnectionTestResult {
         let old = update.id < LLMSettings.slotCount ? LLMSettings.profile(update.id) : nil
         let value = LLMSettings(baseURL: update.baseURL, apiKey: update.apiKey ?? old?.apiKey ?? "",

@@ -16,6 +16,7 @@ public struct ContentFilter: Codable, Equatable, Sendable {
     public var keyword: String?
     public var processing: [ProcessingCriterion]
     public var unmetProcessingOnly: Bool
+    public var inboxOnly: Bool?
 
     public init(
         sourceID: Int64? = nil,
@@ -28,7 +29,8 @@ public struct ContentFilter: Codable, Equatable, Sendable {
         exportedOnly: Bool = false,
         keyword: String? = nil,
         processing: [ProcessingCriterion] = [],
-        unmetProcessingOnly: Bool = false
+        unmetProcessingOnly: Bool = false,
+        inboxOnly: Bool = false
     ) {
         self.sourceID = sourceID
         self.folderID = folderID
@@ -41,6 +43,7 @@ public struct ContentFilter: Codable, Equatable, Sendable {
         self.keyword = keyword
         self.processing = processing
         self.unmetProcessingOnly = unmetProcessingOnly
+        self.inboxOnly = inboxOnly
     }
 }
 
@@ -269,6 +272,14 @@ public struct LibraryCountsSnapshot: Codable, Equatable, Sendable {
     public let podcastUnread: Int
     public let videos: Int
     public let videoUnread: Int
+    public let inbox: Int?
+    public let inboxUnread: Int?
+    public let inboxArticles: Int?
+    public let inboxArticleUnread: Int?
+    public let inboxPodcasts: Int?
+    public let inboxPodcastUnread: Int?
+    public let inboxVideos: Int?
+    public let inboxVideoUnread: Int?
 
     public init(
         total: Int,
@@ -282,7 +293,15 @@ public struct LibraryCountsSnapshot: Codable, Equatable, Sendable {
         podcasts: Int,
         podcastUnread: Int,
         videos: Int,
-        videoUnread: Int
+        videoUnread: Int,
+        inbox: Int = 0,
+        inboxUnread: Int = 0,
+        inboxArticles: Int = 0,
+        inboxArticleUnread: Int = 0,
+        inboxPodcasts: Int = 0,
+        inboxPodcastUnread: Int = 0,
+        inboxVideos: Int = 0,
+        inboxVideoUnread: Int = 0
     ) {
         self.total = total
         self.unread = unread
@@ -296,6 +315,14 @@ public struct LibraryCountsSnapshot: Codable, Equatable, Sendable {
         self.podcastUnread = podcastUnread
         self.videos = videos
         self.videoUnread = videoUnread
+        self.inbox = inbox
+        self.inboxUnread = inboxUnread
+        self.inboxArticles = inboxArticles
+        self.inboxArticleUnread = inboxArticleUnread
+        self.inboxPodcasts = inboxPodcasts
+        self.inboxPodcastUnread = inboxPodcastUnread
+        self.inboxVideos = inboxVideos
+        self.inboxVideoUnread = inboxVideoUnread
     }
 }
 

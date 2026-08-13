@@ -407,7 +407,7 @@ public final class PipelineWorker: ObservableObject {
         result.succeededContents = (result.scored + result.translated + result.summarized + result.transcribed) > 0 ? 1 : 0
 
         // 一篇只触发一次 ready，避免评分/翻译/转录分别导出同一份内容。
-        if result.succeededContents == 1, !Task.isCancelled {
+        if result.succeededContents == 1 {
             await ExportService.shared.runPending(trigger: "ready", contentId: task.id)
         }
         return result
@@ -543,7 +543,7 @@ public final class PipelineWorker: ObservableObject {
 
     private struct PendingTask: Sendable {
         let id: Int64
-        let sourceId: Int64
+        let sourceId: Int64?
         let title: String
         let url: String
         let body: String
@@ -560,7 +560,7 @@ public final class PipelineWorker: ObservableObject {
     private enum CandidateOrder { case newest, oldest }
 
     private struct PendingRow {
-        let id: Int64, sourceId: Int64
+        let id: Int64, sourceId: Int64?
         let ctype: String, title: String, url: String, language: String?
         let md: String?, html: String?, excerpt: String?
         let hasScore: Bool, hasSummary: Bool, hasTranslated: Bool, hasTranscript: Bool
@@ -629,7 +629,9 @@ public final class PipelineWorker: ObservableObject {
         let media = "(c.ctype IN ('podcast','video','youtube') OR c.meta LIKE '%audio_url%' OR c.meta LIKE '%video_url%')"
         let body = "(LENGTH(TRIM(COALESCE(c.content_md,'')))>0 OR LENGTH(TRIM(COALESCE(c.content_html,'')))>0 OR LENGTH(TRIM(COALESCE(c.excerpt,'')))>0)"
         let articleOrMedia = "(\(media) OR c.fetch_status IN (2,4))"
-        var branchBaseParts = ["c.deleted_at IS NULL", "c.is_duplicate=0"]
+        var branchBaseParts = [
+            "c.deleted_at IS NULL", "c.is_duplicate=0", "c.visibility_state='visible'"
+        ]
         if let sid = onlySourceId { branchBaseParts.append("c.source_id=\(sid)") }
         if let cid = onlyContentId { branchBaseParts.append("c.id=\(cid)") }
         if let afterId, afterId > 0 { branchBaseParts.append("c.id>\(afterId)") }
@@ -667,7 +669,6 @@ public final class PipelineWorker: ObservableObject {
             extra: "\(media) AND (LENGTH(TRIM(c.url))>0 OR c.meta LIKE '%audio_url%' OR c.meta LIKE '%video_url%')",
             fallbackIds: sourceIds { $0.autoTranscribe })
 
-        let whereParts = ["s.enabled=1"]
         let bodyColumns = lightweight
             ? "SUBSTR(COALESCE(NULLIF(TRIM(c.content_md),''),NULLIF(TRIM(c.content_html),''),c.excerpt,''),1,1200) AS content_md, NULL AS content_html"
             : "c.content_md, c.content_html"
@@ -683,18 +684,19 @@ public final class PipelineWorker: ObservableObject {
                c.auto_transcribe,c.meta,c.read_at
         FROM pending_ids p
         JOIN content c ON c.id=p.id
-        JOIN content_source s ON s.id=c.source_id
-        WHERE \(whereParts.joined(separator: " AND "))
+        LEFT JOIN content_source s ON s.id=c.source_id
+        WHERE (c.ingest_origin='inbox' OR s.enabled=1)
         ORDER BY c.id \(orderSQL)
         \(limitSQL);
         """
         return db.queryRows(sql).compactMap { row in
-            guard let id = Int64(row["id"] ?? ""), let sourceId = Int64(row["source_id"] ?? "") else {
+            guard let id = Int64(row["id"] ?? "") else {
                 return nil
             }
             let meta = row["meta"] ?? "{}"
             return PendingRow(
-                id: id, sourceId: sourceId, ctype: row["ctype"] ?? "article",
+                id: id, sourceId: row["source_id"].flatMap(Int64.init),
+                ctype: row["ctype"] ?? "article",
                 title: row["title"] ?? "", url: row["url"] ?? "", language: row["language"],
                 md: row["content_md"], html: row["content_html"], excerpt: row["excerpt"],
                 hasScore: row["llm_score"] != nil,
@@ -714,7 +716,13 @@ public final class PipelineWorker: ObservableObject {
         row: PendingRow, policies: [Int64: SrcPolicy], ignoreWatermark: Bool,
         skip: [String: Bool], writeBackExtractedBody: Bool
     ) -> PendingTask? {
-        guard let source = policies[row.sourceId], source.enabled else { return nil }
+        let source: SrcPolicy
+        if let sourceId = row.sourceId {
+            guard let value = policies[sourceId], value.enabled else { return nil }
+            source = value
+        } else {
+            source = SrcPolicy(enabled: true, policy: PipelinePolicy(), fetchMode: .defuddle)
+        }
         let body = Self.resolveBody(md: row.md, html: row.html, excerpt: row.excerpt)
         if writeBackExtractedBody,
            (row.md == nil || row.md?.isEmpty == true), let html = row.html, !html.isEmpty {
@@ -902,43 +910,69 @@ public final class PipelineWorker: ObservableObject {
         }
     }
 
+    /// 新入库或历史目标调整后立即唤醒全文恢复，不必等待下一轮定时器。
+    func requestFullTextRecovery() {
+        scheduleFullTextRecovery()
+    }
+
     /// 全文回填：水位线后抓取失败/未抓的文章(fetch_status 0/3, 非媒体)，按源 fetch_mode 重试。
     /// 返回本轮成功补到全文的条数。每轮限 10 条防一轮跑太久。
     private func backfillFullText() async -> Int {
         let policies = fetchEffectivePolicies()
         guard db.open() else { return 0 }
         var stmt: OpaquePointer?
-        // (id, source_id, url, content_html, source_type)
+        // 订阅内容按源策略；收件箱没有 source_id，按条目持久化的全文目标与平台类型恢复。
         // fetch_status IN (0,1,3)：0=未抓 3=失败 1=抓取中卡死（修 P1-9——
         // 历史 PG 数据或异常中断可能带 1，卡中间态两边都不管，一并捞出来重试）
         let sql = """
-        SELECT c.id, c.source_id, c.url, c.content_html, s.stype
+        SELECT c.id, c.source_id, c.url,
+               COALESCE(c.content_html, c.excerpt),
+               COALESCE(s.stype, c.source, 'web') AS source_type,
+               c.ingest_origin
         FROM content c
-        JOIN content_source s ON s.id=c.source_id
-        WHERE c.id > \(watermark)
+        LEFT JOIN content_source s ON s.id=c.source_id
+        WHERE (c.id > \(watermark) OR c.ingest_origin='inbox')
           AND c.is_duplicate = 0
           AND c.deleted_at IS NULL
           AND c.fetch_status IN (0, 1, 3)
           AND (c.fetch_status != 3 OR c.updated_at <= datetime('now', '-15 minutes'))
           AND c.ctype IN ('article', 'podcast', 'video')
+          AND (
+              (c.ingest_origin='inbox'
+               AND json_extract(
+                   CASE WHEN json_valid(c.meta) THEN c.meta ELSE '{}' END,
+                   '$.inbox_fulltext_target'
+               ) IN ('true', 1))
+              OR (c.ingest_origin!='inbox' AND s.enabled=1)
+          )
         ORDER BY c.id DESC LIMIT 10;
         """
         guard db.prepare(sql, &stmt) else { return 0 }
-        var rows: [(Int64, Int64, String, String?, String)] = []
+        var rows: [(Int64, Int64?, String, String?, String, Bool)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
-            let sid = sqlite3_column_int64(stmt, 1)
+            let sid = sqlite3_column_type(stmt, 1) == SQLITE_NULL
+                ? nil : sqlite3_column_int64(stmt, 1)
             let url = colText(stmt, 2) ?? ""
             let html = colText(stmt, 3)
             let sourceType = colText(stmt, 4) ?? "rss"
-            rows.append((id, sid, url, html, sourceType))
+            let isInbox = colText(stmt, 5) == "inbox"
+            rows.append((id, sid, url, html, sourceType, isInbox))
         }
         sqlite3_finalize(stmt)
 
         var ok = 0
-        for (id, sid, url, html, sourceType) in rows {
+        for (id, sid, url, html, sourceType, isInbox) in rows {
             guard !Task.isCancelled else { break }
-            guard let pol = policies[sid], pol.enabled else { continue }
+            if isInbox {
+                let mode = FetchMode.platformDefault(for: sourceType)
+                    ?? (sourceType == "podcast" ? .summary : .defuddle)
+                let success = await FullTextFetcher.shared.fetchAndStore(
+                    contentId: id, url: url, feedHtml: html, mode: mode)
+                if success { ok += 1 }
+                continue
+            }
+            guard let sid, let pol = policies[sid], pol.enabled else { continue }
             // summary 模式不需要抓(本来就没全文), 跳过避免来回置状态
             if pol.fetchMode == .summary { continue }
             let success: Bool

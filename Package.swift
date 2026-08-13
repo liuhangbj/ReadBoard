@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "ReadBoardRemote", targets: ["ReadBoardRemote"]),
         .library(name: "ReadBoardUI", targets: ["ReadBoardUI"]),
         .library(name: "ReadBoardFeatures", targets: ["ReadBoardFeatures"]),
+        .library(name: "ReadBoardShareExtensionKit", targets: ["ReadBoardShareExtensionKit"]),
         .library(name: "ReadBoardCore", targets: ["ReadBoard"]),
         .executable(name: "ReadBoardMain", targets: ["ReadBoardMain"])
     ],
@@ -31,6 +32,10 @@ let package = Package(
             name: "ReadBoardFeatures",
             dependencies: ["ReadBoardContract", "ReadBoardUI"],
             path: "Sources/ReadBoardFeatures"
+        ),
+        .target(
+            name: "ReadBoardShareExtensionKit",
+            path: "Sources/ReadBoardShareExtension"
         ),
         .target(
             name: "ReadBoard",

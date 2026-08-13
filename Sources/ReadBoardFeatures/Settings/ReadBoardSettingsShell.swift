@@ -1,3 +1,4 @@
+import ReadBoardUI
 import SwiftUI
 
 #if os(macOS)
@@ -5,7 +6,7 @@ import AppKit
 #endif
 
 public enum ReadBoardSettingsPage: String, CaseIterable, Identifiable, Sendable {
-    case general, remote, reader, llm, deps, boards, sources, fetch, content, export, pipeline, cleanup
+    case general, remote, reader, inbox, llm, deps, boards, sources, fetch, content, export, pipeline, cleanup
     public var id: String { rawValue }
 
     public var title: String {
@@ -13,6 +14,7 @@ public enum ReadBoardSettingsPage: String, CaseIterable, Identifiable, Sendable 
         case .general: "通用"
         case .remote: "远程访问"
         case .reader: "阅读器"
+        case .inbox: "收件箱"
         case .llm: "LLM模型"
         case .deps: "依赖"
         case .boards: "功能开关"
@@ -30,6 +32,7 @@ public enum ReadBoardSettingsPage: String, CaseIterable, Identifiable, Sendable 
         case .general: "gearshape"
         case .remote: "network"
         case .reader: "doc.text"
+        case .inbox: "tray.and.arrow.down"
         case .llm: "brain.head.profile"
         case .deps: "shippingbox"
         case .boards: "square.grid.2x2"
@@ -78,6 +81,8 @@ public final class ReadBoardSettingsNavigationStore: ObservableObject {
 /// Core 和 Go 共用的设置窗口骨架。宿主只负责为页面目的地提供内容，导航、尺寸、
 /// 路由定位和窗口标题栏行为保持一份实现。
 public struct ReadBoardSettingsShell: View {
+    @AppStorage("reading.interfaceFont") private var interfaceFontRaw = "system"
+    @AppStorage("reading.uiFontScale") private var uiFontScale: Double = 1
     @State private var selection: ReadBoardSettingsDestination
     private let pages: [ReadBoardSettingsPage]
     private let primaryItem: ReadBoardSettingsModuleDescriptor?
@@ -109,6 +114,9 @@ public struct ReadBoardSettingsShell: View {
             mobileBody
         #endif
         }
+        .readBoardInterfaceFont(size: 13 * uiFontScale)
+        .readBoardInterfaceFontFamily(interfaceFontRaw)
+        .readBoardInterfaceScale(uiFontScale)
         .onAppear { apply(route) }
         .onChange(of: route) { _, value in apply(value) }
     }
@@ -140,11 +148,13 @@ public struct ReadBoardSettingsShell: View {
                 .tag(ReadBoardSettingsDestination.page(page))
         }
         if !modules.isEmpty {
-            Section("Pro 功能") {
+            Section {
                 ForEach(modules) { module in
                     Label(module.title, systemImage: module.icon)
                         .tag(ReadBoardSettingsDestination.module(module.id))
                 }
+            } header: {
+                ReadBoardSettingsSectionTitle("Pro 功能")
             }
         }
     }
@@ -162,13 +172,15 @@ public struct ReadBoardSettingsShell: View {
                     mobileNavigationLink(.page(page), title: page.title, icon: page.icon)
                 }
                 if !modules.isEmpty {
-                    Section("Pro 功能") {
+                    Section {
                         ForEach(modules) { module in
                             mobileNavigationLink(
                                 .module(module.id),
                                 title: module.title,
                                 icon: module.icon)
                         }
+                    } header: {
+                        ReadBoardSettingsSectionTitle("Pro 功能")
                     }
                 }
             }
@@ -191,10 +203,17 @@ public struct ReadBoardSettingsShell: View {
     }
     #endif
 
+    @ViewBuilder
     private func detail(_ destination: ReadBoardSettingsDestination) -> some View {
+        #if os(macOS)
+        ReadBoardSettingsPageContainer(title: title(for: destination)) {
+            content(destination)
+        }
+        .padding()
+        #else
         content(destination)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding()
+        #endif
     }
 
     private func title(for destination: ReadBoardSettingsDestination) -> String {

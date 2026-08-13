@@ -145,9 +145,9 @@ public struct RemoteSourceManagementGateway: SourceManagementGateway {
             as: RemoteAcknowledgement.self)
     }
 
-    public func setMaximumRetainedContent(sourceID: Int64, count: Int) async throws {
+    public func setMaximumRetainedContent(scope: SourceScope, count: Int) async throws {
         let _: RemoteAcknowledgement = try await client.post("api/v1/sources/retention",
-            body: RemoteSourceRetentionRequest(sourceID: sourceID, count: count),
+            body: RemoteSourceRetentionRequest(scope: scope, count: count),
             as: RemoteAcknowledgement.self)
     }
 

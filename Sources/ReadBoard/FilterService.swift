@@ -63,10 +63,12 @@ public final class FilterService: @unchecked Sendable {
     // MARK: 应用
 
     /// 对一条新内容应用所有命中规则。在 upsertContent 插入后调用。
-    func applyRules(contentId: Int64, sourceId: Int64, title: String, content: String, author: String, url: String) {
+    func applyRules(contentId: Int64, sourceId: Int64?, title: String, content: String, author: String, url: String) {
         for rule in allRules() where rule.enabled {
             // 源限定：规则有 source_id 且不匹配则跳过
-            if let rsid = rule.sourceId, rsid != sourceId { continue }
+            if let rsid = rule.sourceId {
+                guard let sourceId, rsid == sourceId else { continue }
+            }
             let target: String
             switch rule.field {
             case "content": target = content

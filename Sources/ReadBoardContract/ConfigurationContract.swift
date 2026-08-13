@@ -130,9 +130,15 @@ public protocol ConfigurationGateway: Sendable {
     func addLLMProfile() async
     func removeLLMProfile(id: Int) async
     func moveLLMProfile(from: Int, to: Int) async
+    /// 仅供拥有配置管理权限的设置界面按需显示已保存密钥；普通快照仍不得包含明文。
+    func llmAPIKey(profileID: Int) async throws -> String?
     func testLLMProfile(_ update: LLMProfileUpdate) async -> ConnectionTestResult
     func fetchLLMModels(profileID: Int, endpoint: String, apiKey: String?) async throws -> [String]
     func setDependencyPath(id: String, path: String) async
     func updateExportPlatforms(_ configuration: ExportPlatformConfiguration) async
     func updateAIPrompts(_ configuration: AIPromptConfiguration) async
+}
+
+public extension ConfigurationGateway {
+    func llmAPIKey(profileID: Int) async throws -> String? { nil }
 }

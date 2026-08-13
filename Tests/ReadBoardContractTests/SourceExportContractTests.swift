@@ -16,6 +16,27 @@ final class SourceExportContractTests: XCTestCase {
         XCTAssertEqual(SourceFetchMode(rawValue: "bilibili_subtitle"), .bilibiliSubtitle)
     }
 
+    func testFolderRetentionRequestRoundTrips() throws {
+        let value = RemoteSourceRetentionRequest(
+            scope: SourceScope(kind: .folder, id: 42),
+            count: 200)
+        let decoded = try JSONDecoder().decode(
+            RemoteSourceRetentionRequest.self,
+            from: JSONEncoder().encode(value))
+
+        XCTAssertEqual(decoded, value)
+        XCTAssertEqual(decoded.scope, SourceScope(kind: .folder, id: 42))
+    }
+
+    func testLegacyRetentionSourceIDPayloadStillDecodes() throws {
+        let decoded = try JSONDecoder().decode(
+            RemoteSourceRetentionRequest.self,
+            from: Data(#"{"sourceID":7,"count":50}"#.utf8))
+
+        XCTAssertEqual(decoded.scope, SourceScope(kind: .source, id: 7))
+        XCTAssertEqual(decoded.count, 50)
+    }
+
     func testExportRuleRoundTripPreservesTypedConfiguration() throws {
         let rule = ExportRuleDTO(
             id: 7,
@@ -53,7 +74,9 @@ final class SourceExportContractTests: XCTestCase {
             maximumRetainedContent: 200,
             contentCount: 18,
             hoursSinceFetch: 1.5,
-            transcribable: true)
+            transcribable: true,
+            adaptiveFetchDisplayName: "智能调度",
+            isRecovering: true)
         let catalog = SourceCatalogSnapshot(
             sources: [source],
             folders: [.init(id: 2, name: "视频")],
@@ -63,6 +86,7 @@ final class SourceExportContractTests: XCTestCase {
         XCTAssertEqual(
             try JSONDecoder().decode(SourceCatalogSnapshot.self, from: catalogData),
             catalog)
+        XCTAssertTrue(catalog.sources[0].isRecovering)
 
         let runtime = RuntimeStatusSnapshot(
             phase: .working,

@@ -28,9 +28,9 @@ public struct ReadBoardAddSourceSheet: View {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("添加订阅源")
-                        .font(.system(size: 18, weight: .semibold, design: .serif))
+                        .readBoardInterfaceFont(size: 18, weight: .semibold)
                     Text("先检测地址，再确认名称、分组和处理策略")
-                        .font(.system(size: 11))
+                        .readBoardInterfaceFont(size: 11)
                         .foregroundStyle(ReadBoardDesign.C.text3)
                 }
                 Spacer()
@@ -71,7 +71,7 @@ public struct ReadBoardAddSourceSheet: View {
                                     Text("· 预览 \(discovery.previewItemCount) 条")
                                 }
                             }
-                            .font(.system(size: 11))
+                            .readBoardInterfaceFont(size: 11)
                             .foregroundStyle(ReadBoardDesign.C.text2)
                         }
                     }
@@ -133,7 +133,7 @@ public struct ReadBoardAddSourceSheet: View {
 
                     if let localError {
                         Label(localError, systemImage: "exclamationmark.triangle.fill")
-                            .font(.system(size: 11))
+                            .readBoardInterfaceFont(size: 11)
                             .foregroundStyle(ReadBoardDesign.C.scoreLow)
                     }
                 }

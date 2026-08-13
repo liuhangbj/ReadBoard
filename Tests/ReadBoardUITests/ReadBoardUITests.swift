@@ -1,9 +1,69 @@
 import Foundation
 import ReadBoardContract
-import ReadBoardUI
+@testable import ReadBoardUI
 import XCTest
+#if os(macOS)
+import AppKit
+#endif
 
 final class ReadBoardUITests: XCTestCase {
+    #if os(macOS)
+    @MainActor
+    func testNativeArticleTitleRemainsSelectableAndWraps() {
+        let view = ReadBoardSelectableLinkTextView()
+        view.configure(
+            text: "这是一段足够长、需要随阅读器宽度自动换行的可选择文章标题",
+            destination: URL(string: "https://example.com/article")!,
+            font: .systemFont(ofSize: 24, weight: .semibold),
+            normalColor: .labelColor,
+            hoverColor: .controlAccentColor)
+
+        XCTAssertTrue(view.isSelectable)
+        XCTAssertFalse(view.isEditable)
+        XCTAssertGreaterThan(view.requiredHeight(for: 180), view.requiredHeight(for: 600))
+    }
+
+    @MainActor
+    func testDockIconAppearanceResolutionFollowsEffectiveAppearance() throws {
+        let light = try XCTUnwrap(NSAppearance(named: .aqua))
+        let dark = try XCTUnwrap(NSAppearance(named: .darkAqua))
+
+        XCTAssertEqual(ReadBoardDockIconController.resolveAppearance(light), .light)
+        XCTAssertEqual(ReadBoardDockIconController.resolveAppearance(dark), .dark)
+    }
+
+    @MainActor
+    func testDockIconChangesWhileApplicationKeepsRunning() async throws {
+        let application = NSApplication.shared
+        let originalAppearance = application.appearance
+        let originalIcon = application.applicationIconImage
+        defer {
+            application.appearance = originalAppearance
+            application.applicationIconImage = originalIcon
+        }
+
+        let light = try XCTUnwrap(NSAppearance(named: .aqua))
+        let dark = try XCTUnwrap(NSAppearance(named: .darkAqua))
+        let lightIcon = NSImage(size: NSSize(width: 16, height: 16))
+        let darkIcon = NSImage(size: NSSize(width: 16, height: 16))
+        let controller = ReadBoardDockIconController()
+
+        application.appearance = light
+        controller.start(
+            application: application,
+            icons: [.light: lightIcon, .dark: darkIcon])
+        XCTAssertEqual(controller.currentAppearance, .light)
+
+        application.appearance = dark
+        for _ in 0..<20 where controller.currentAppearance != .dark {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(controller.currentAppearance, .dark)
+        XCTAssertTrue(controller.appliedIcon === darkIcon)
+    }
+    #endif
+
     func testDesktopColumnsKeepAStableSystemSplitLayout() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -46,6 +106,16 @@ final class ReadBoardUITests: XCTestCase {
         }
         XCTAssertEqual(firstAlt, "one")
         XCTAssertEqual(secondAlt, "two")
+    }
+
+    func testMarkdownHardBreaksRemainVisibleInsideParagraphs() {
+        let blocks = ReadBoardMarkdownParser.parse("第一条字幕  \n第二条字幕")
+        XCTAssertEqual(blocks, [.paragraph(text: "第一条字幕\n第二条字幕")])
+    }
+
+    func testOrdinaryMarkdownLineWrappingStillUsesSpaces() {
+        let blocks = ReadBoardMarkdownParser.parse("first line\nsecond line")
+        XCTAssertEqual(blocks, [.paragraph(text: "first line second line")])
     }
 
     func testTextSelectionFlowStopsAtMediaBlocks() {

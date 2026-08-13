@@ -24,33 +24,41 @@ public struct ReadBoardExportPlatformSettingsPane: View {
 
     public var body: some View {
         Form {
-            Section("笔记软件") {
-                Toggle("Obsidian / Markdown 目录", isOn: $value.obsidianEnabled)
+            Section {
+                ReadBoardSettingsToggleRow("Obsidian / Markdown 目录", isOn: $value.obsidianEnabled)
                     .onChange(of: value.obsidianEnabled) { _, _ in scheduleSave() }
                 if value.obsidianEnabled { obsidianDirectoryRow }
+            } header: {
+                ReadBoardSettingsSectionTitle("笔记软件")
             }
 
             Section {
-                Toggle("Webhook", isOn: $value.webhookEnabled)
+                ReadBoardSettingsToggleRow("Webhook", isOn: $value.webhookEnabled)
                     .onChange(of: value.webhookEnabled) { _, _ in scheduleSave() }
                 if value.webhookEnabled {
-                    TextField("https://…", text: $value.webhookURL)
-                        .textFieldStyle(.roundedBorder)
-                        .onChange(of: value.webhookURL) { _, _ in scheduleSave() }
-                    Text("自定义 Header（每行 Key: Value）")
-                        .font(.caption)
-                        .foregroundStyle(ReadBoardDesign.C.text3)
-                    TextEditor(text: $webhookHeaders)
-                        .font(.system(size: 11, design: .monospaced))
-                        .frame(minHeight: 72)
-                        .overlay(RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.sm)
-                            .stroke(ReadBoardDesign.C.separator, lineWidth: 0.5))
-                        .onChange(of: webhookHeaders) { _, _ in scheduleSave() }
+                    ReadBoardSettingsInputRow("Webhook URL") {
+                        TextField("https://…", text: $value.webhookURL)
+                            .readBoardSettingsInput()
+                            .onChange(of: value.webhookURL) { _, _ in scheduleSave() }
+                    }
+                    ReadBoardSettingsInputRow(
+                        "自定义 Header",
+                        detail: "每行 Key: Value"
+                    ) {
+                        TextEditor(text: $webhookHeaders)
+                            .readBoardTextRole(.input, design: .monospaced)
+                            .frame(minHeight: 72)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .overlay(RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.sm)
+                                .stroke(ReadBoardDesign.C.separator, lineWidth: 0.5))
+                            .onChange(of: webhookHeaders) { _, _ in scheduleSave() }
+                    }
                 }
             } header: {
-                Text("通用")
+                ReadBoardSettingsSectionTitle("通用")
             } footer: {
                 Text("开启平台后，可在“导出规则”页面创建规则，将处理后的内容同步至目标平台。")
+                    .readBoardTextRole(.detail)
             }
         }
         .formStyle(.grouped)
@@ -73,7 +81,7 @@ public struct ReadBoardExportPlatformSettingsPane: View {
             Image(systemName: "folder")
                 .foregroundStyle(ReadBoardDesign.C.text3)
             Text(value.obsidianDirectory.isEmpty ? "未设置 Vault 目录" : value.obsidianDirectory)
-                .font(.caption)
+                .readBoardTextRole(.detail)
                 .foregroundStyle(ReadBoardDesign.C.text3)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -81,13 +89,15 @@ public struct ReadBoardExportPlatformSettingsPane: View {
             Spacer()
             #if os(macOS)
             if allowsServerPathEditing {
-                Button("选择…", action: pickDirectory).controlSize(.small)
+                Button("选择…", action: pickDirectory)
+                    .buttonStyle(ReadBoardSecondaryButtonStyle())
+                    .readBoardSettingsButton(.inline)
             }
             #endif
         }
         if !allowsServerPathEditing {
             Text("这是 ReadBoard 服务端目录，只能在 Core 主机修改。")
-                .font(.caption2)
+                .readBoardTextRole(.detail)
                 .foregroundStyle(ReadBoardDesign.C.text3)
         }
     }

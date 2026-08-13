@@ -2,12 +2,42 @@ import Foundation
 import Observation
 import ReadBoardContract
 
+struct ReadBoardSourceFolderGroup: Identifiable, Equatable, Sendable {
+    let folder: SourceFolderItem
+    let sources: [SourceCatalogItem]
+
+    var id: Int64 { folder.id }
+}
+
+struct ReadBoardSourceListPresentation: Equatable, Sendable {
+    var folderGroups: [ReadBoardSourceFolderGroup] = []
+    var ungroupedSources: [SourceCatalogItem] = []
+
+    init(snapshot: SourceCatalogSnapshot? = nil) {
+        guard let snapshot else { return }
+        var sourcesByFolder: [Int64: [SourceCatalogItem]] = [:]
+        for source in snapshot.sources {
+            if let folderID = source.folderID {
+                sourcesByFolder[folderID, default: []].append(source)
+            } else {
+                ungroupedSources.append(source)
+            }
+        }
+        folderGroups = snapshot.folders.map {
+            ReadBoardSourceFolderGroup(
+                folder: $0,
+                sources: sourcesByFolder[$0.id] ?? [])
+        }
+    }
+}
+
 /// Core 与 Go 共用的订阅管理状态机。界面只调用 Contract gateway，刷新、写回、
 /// 错误呈现和跨阅读器快照失效都在这里收口。
 @MainActor
 @Observable
 public final class ReadBoardSourcesFeatureModel {
     public private(set) var snapshot: SourceCatalogSnapshot?
+    private(set) var listPresentation = ReadBoardSourceListPresentation()
     public private(set) var syncSettings = SourceSyncSettings(
         enabled: false,
         intervalMinutes: 15)
@@ -38,7 +68,7 @@ public final class ReadBoardSourcesFeatureModel {
         async let settingsRequest = environment.sourceManagement.syncSettings()
         do {
             let values = try await (catalogRequest, settingsRequest)
-            snapshot = values.0
+            applySnapshot(values.0)
             syncSettings = values.1
             errorMessage = nil
         } catch is CancellationError {
@@ -169,10 +199,10 @@ public final class ReadBoardSourcesFeatureModel {
         }
     }
 
-    public func setMaximumRetainedContent(sourceID: Int64, count: Int) async {
-        await setting(key: "retention:\(sourceID)", message: "保留数量已更新") {
+    public func setMaximumRetainedContent(scope: SourceScope, count: Int) async {
+        await setting(key: operationKey("retention", scope), message: "保留数量已更新") {
             try await self.environment.sourceManagement.setMaximumRetainedContent(
-                sourceID: sourceID,
+                scope: scope,
                 count: count)
         }
     }
@@ -182,6 +212,14 @@ public final class ReadBoardSourcesFeatureModel {
             try await self.environment.sourceManagement.submitFulltextRefetch(
                 scope: scope,
                 fullHistory: fullHistory)
+        }
+    }
+
+    public func backfillProcessing(scope: SourceScope, key: SourcePolicyKey?) async {
+        await submitSourceJob(key: operationKey("backfill", scope)) {
+            try await self.environment.sourceManagement.submitBackfillProcessing(
+                scope: scope,
+                key: key)
         }
     }
 
@@ -322,7 +360,7 @@ public final class ReadBoardSourcesFeatureModel {
 
     private func refreshAfterMutation() async {
         do {
-            snapshot = try await environment.sourceCatalog.snapshot()
+            applySnapshot(try await environment.sourceCatalog.snapshot())
             syncSettings = try await environment.sourceManagement.syncSettings()
             NotificationCenter.default.post(
                 name: .readBoardLibrarySnapshotChanged,
@@ -336,5 +374,10 @@ public final class ReadBoardSourcesFeatureModel {
 
     private func operationKey(_ action: String, _ scope: SourceScope) -> String {
         "\(action):\(scope.kind.rawValue):\(scope.id)"
+    }
+
+    private func applySnapshot(_ value: SourceCatalogSnapshot) {
+        snapshot = value
+        listPresentation = ReadBoardSourceListPresentation(snapshot: value)
     }
 }

@@ -17,6 +17,7 @@ public struct ReadBoardServices: Sendable {
     public let configuration: any ConfigurationGateway
     public let authentication: any AuthenticationGateway
     public let maintenance: any MaintenanceGateway
+    public let inbox: any InboxGateway
     public let dependencyManagement: (any DependencyManagementGateway)?
     public let dataRevision: any DataRevisionGateway
     /// 仅宿主机能配置监听地址、配对和设备撤销。远程客户端传 nil，避免用假实现
@@ -39,6 +40,7 @@ public struct ReadBoardServices: Sendable {
         configuration: any ConfigurationGateway,
         authentication: any AuthenticationGateway,
         maintenance: any MaintenanceGateway,
+        inbox: any InboxGateway,
         dependencyManagement: (any DependencyManagementGateway)? = nil,
         dataRevision: any DataRevisionGateway = StaticDataRevisionGateway(),
         remoteAccess: (any RemoteAccessGateway)?,
@@ -58,6 +60,7 @@ public struct ReadBoardServices: Sendable {
         self.configuration = configuration
         self.authentication = authentication
         self.maintenance = maintenance
+        self.inbox = inbox
         self.dependencyManagement = dependencyManagement
         self.dataRevision = dataRevision
         self.remoteAccess = remoteAccess
@@ -84,6 +87,7 @@ public struct ReadBoardServices: Sendable {
             configuration: LocalConfigurationGateway(),
             authentication: LocalAuthenticationGateway(),
             maintenance: LocalMaintenanceGateway(),
+            inbox: LocalInboxGateway(),
             dependencyManagement: LocalDependencyManagementGateway(),
             dataRevision: LocalDataRevisionGateway(),
             remoteAccess: LocalRemoteAccessGateway()
@@ -106,6 +110,7 @@ public struct ReadBoardServices: Sendable {
             configuration: configuration,
             authentication: authentication,
             maintenance: maintenance,
+            inbox: inbox,
             dependencyManagement: dependencyManagement,
             dataRevision: dataRevision,
             permissions: permissions)

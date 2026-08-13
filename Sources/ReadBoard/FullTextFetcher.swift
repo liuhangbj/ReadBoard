@@ -269,7 +269,14 @@ public final class FullTextFetcher: @unchecked Sendable {
         db.execute(
             """
             UPDATE content
-            SET fetch_status = 3, fetch_engine = ?, fetch_error = ?, fetched_full_at = NULL
+            SET fetch_status = 3, fetch_engine = ?, fetch_error = ?, fetched_full_at = NULL,
+                visibility_state = CASE
+                    WHEN LENGTH(TRIM(COALESCE(content_md, ''))) = 0
+                     AND LENGTH(TRIM(COALESCE(content_html, ''))) = 0
+                     AND LENGTH(TRIM(COALESCE(excerpt, ''))) = 0
+                    THEN 'awaiting_content'
+                    ELSE visibility_state
+                END
             WHERE id = ?
             """,
             params: [engine, message, contentId]
@@ -287,7 +294,7 @@ public final class FullTextFetcher: @unchecked Sendable {
             """
             UPDATE content
             SET content_md = ?, fetch_status = 2, fetch_engine = ?, fetch_error = NULL,
-                fetched_full_at = datetime('now')
+                fetched_full_at = datetime('now'), visibility_state = 'visible'
             WHERE id = ?
             """,
             params: [md, engine, contentId]

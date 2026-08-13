@@ -52,7 +52,7 @@ final class ExportRuleEngineTests: XCTestCase {
     }
 
     func testV24SchemaAndRuleOptionsRoundTrip() throws {
-        XCTAssertEqual(db.scalarInt("PRAGMA user_version;"), 32)
+        XCTAssertEqual(db.scalarInt("PRAGMA user_version;"), 35)
         let ruleColumns = Set(db.queryRows("PRAGMA table_info(export_rule);").compactMap { $0["name"] })
         for column in ["revision", "artifact", "missing_policy", "output_format",
                        "subfolder_template", "filename_template", "write_policy",
@@ -62,6 +62,10 @@ final class ExportRuleEngineTests: XCTestCase {
         let recordColumns = Set(db.queryRows("PRAGMA table_info(export_record);").compactMap { $0["name"] })
         for column in ["artifact", "revision", "rendered_hash", "attempts", "updated_at"] {
             XCTAssertTrue(recordColumns.contains(column), "export_record 缺少 \(column)")
+        }
+        let queueColumns = Set(db.queryRows("PRAGMA table_info(export_ready_queue);").compactMap { $0["name"] })
+        for column in ["content_id", "generation", "attempts", "available_at", "last_error"] {
+            XCTAssertTrue(queueColumns.contains(column), "export_ready_queue 缺少 \(column)")
         }
 
         var rule = makeRule(name: "roundtrip")
@@ -86,6 +90,27 @@ final class ExportRuleEngineTests: XCTestCase {
         XCTAssertEqual(loaded.writePolicy, "versioned")
         XCTAssertEqual(loaded.historyScope, "all")
         XCTAssertEqual(loaded.frontmatterFields, ["id", "title", "url", "artifact"])
+    }
+
+    func testInboxExportIsOptInButManualOverrideRemainsPossible() throws {
+        let contentID: Int64 = 9_710_099
+        defer { db.execute("DELETE FROM content WHERE id=?", params: [contentID]) }
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content
+                (id, ctype, guid, source, title, url, content_md,
+                 visibility_state, ingest_origin, meta)
+            VALUES (?, 'article', ?, 'web', '收件箱导出测试', ?, '# 正文',
+                    'visible', 'inbox', '{"inbox_allow_export":"false"}')
+            """, params: [contentID, "inbox-export-\(contentID)",
+                           "https://example.com/inbox-export-\(contentID)"]))
+        let rule = makeRule(name: "inbox-export")
+        XCTAssertFalse(service.preview(rule: rule, maxSamples: 10)
+            .samples.contains(where: { $0.contentId == contentID }))
+        XCTAssertTrue(db.execute("""
+            UPDATE content SET meta=json_set(meta,'$.inbox_allow_export','true') WHERE id=?
+            """, params: [contentID]))
+        XCTAssertTrue(service.preview(rule: rule, maxSamples: 100)
+            .samples.contains(where: { $0.contentId == contentID }))
     }
 
     func testObsidianUsesVaultTemplateFrontmatterAndRejectsEscape() async throws {
@@ -247,6 +272,68 @@ final class ExportRuleEngineTests: XCTestCase {
                                      params: [ruleId]))
     }
 
+    func testReadyQueueRetainsDisabledPlatformUntilItCanDeliver() async throws {
+        let token = UUID().uuidString
+        let contentId: Int64 = 9_716_101
+        db.execute("DELETE FROM content WHERE id=?", params: [contentId])
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content (id, ctype, guid, source, title, url, content_md)
+            VALUES (?, 'article', ?, 'rss', ?, ?, '# 正文')
+            """, params: [contentId, "ready-retry-\(token)", "Ready Retry \(token)",
+                           "https://test.invalid/ready-retry/\(token)"]))
+
+        let platform = ExportPlatformConfig.shared
+        let oldEnabled = platform.isEnabled("webhook")
+        let oldURL = platform.webhookURL
+        let boardWasEnabled = FeatureBoard.export.enabled
+        FeatureBoard.setEnabled(.export, true)
+        platform.setEnabled("webhook", false)
+        platform.webhookURL = "https://webhook.test.invalid/ready-retry"
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [WebhookURLProtocolStub.self]
+        let session = URLSession(configuration: configuration)
+        service.setWebhookSessionForTesting(session)
+        WebhookURLProtocolStub.handler = { request in
+            let response = try XCTUnwrap(HTTPURLResponse(
+                url: try XCTUnwrap(request.url), statusCode: 204,
+                httpVersion: "HTTP/1.1", headerFields: nil))
+            return (response, Data())
+        }
+
+        var rule = makeRule(name: "ready-retry")
+        rule.triggerOn = "ready"
+        rule.target = "webhook"
+        rule.criteria.keywords = [token]
+        let ruleId = service.saveRule(rule)
+        defer {
+            service.deleteRule(id: ruleId)
+            db.execute("DELETE FROM content WHERE id=?", params: [contentId])
+            WebhookURLProtocolStub.handler = nil
+            service.setWebhookSessionForTesting(nil)
+            session.invalidateAndCancel()
+            FeatureBoard.setEnabled(.export, boardWasEnabled)
+            platform.setEnabled("webhook", oldEnabled)
+            platform.webhookURL = oldURL
+        }
+
+        await service.runPending(trigger: "ready", contentId: contentId)
+        XCTAssertEqual(service.queuedReadyCountForTesting(contentId: contentId), 1)
+        XCTAssertEqual(db.scalarInt(
+            "SELECT attempts FROM export_ready_queue WHERE content_id=?",
+            params: [contentId]), 1)
+        XCTAssertEqual(db.scalarInt(
+            "SELECT COUNT(*) FROM export_record WHERE rule_id=?", params: [ruleId]), 0)
+
+        platform.setEnabled("webhook", true)
+        await service.runPending(trigger: "ready", contentId: contentId)
+        XCTAssertEqual(service.queuedReadyCountForTesting(contentId: contentId), 0)
+        XCTAssertEqual(db.scalarInt("""
+            SELECT COUNT(*) FROM export_record
+            WHERE rule_id=? AND content_id=? AND status='delivered'
+            """, params: [ruleId, contentId]), 1)
+    }
+
     func testConcurrentReadyTriggersAreQueuedInsteadOfDropped() async throws {
         let token = UUID().uuidString
         let contentIds: [Int64] = [9_719_001, 9_719_002]
@@ -323,6 +410,65 @@ final class ExportRuleEngineTests: XCTestCase {
             SELECT COUNT(DISTINCT content_id) FROM export_record
             WHERE rule_id=? AND status='delivered'
             """, params: [ruleId]), 2)
+    }
+
+    func testReadyQueueReexportsAfterContentChanges() async throws {
+        let contentId: Int64 = 9_719_101
+        db.execute("DELETE FROM content WHERE id=?", params: [contentId])
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content (id, ctype, guid, source, title, url, content_md)
+            VALUES (?, 'article', ?, 'rss', 'ready 覆盖测试', ?, '# 第一版')
+            """, params: [contentId, "ready-reexport-\(contentId)",
+                           "https://test.invalid/ready-reexport/\(contentId)"]))
+
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("readboard-ready-\(UUID().uuidString)", isDirectory: true)
+        var rule = makeRule(name: "ready-reexport")
+        rule.triggerOn = "ready"
+        rule.targetConfig = ["dir": output.path]
+        rule.titleTemplate = "ready-{id}"
+        rule.writePolicy = "overwrite"
+        let ruleId = service.saveRule(rule)
+        let boardWasEnabled = FeatureBoard.export.enabled
+        FeatureBoard.setEnabled(.export, true)
+        defer {
+            FeatureBoard.setEnabled(.export, boardWasEnabled)
+            service.deleteRule(id: ruleId)
+            db.execute("DELETE FROM content WHERE id=?", params: [contentId])
+            try? FileManager.default.removeItem(at: output)
+        }
+
+        await service.runPending(trigger: "ready", contentId: contentId)
+        XCTAssertEqual(service.queuedReadyCountForTesting(contentId: contentId), 0)
+        let firstHash = try XCTUnwrap(db.scalarString("""
+            SELECT rendered_hash FROM export_record
+            WHERE rule_id=? AND content_id=? AND revision=1
+            """, params: [ruleId, contentId]))
+
+        XCTAssertTrue(db.execute(
+            "UPDATE content SET content_md='# 第二版' WHERE id=?", params: [contentId]))
+        XCTAssertEqual(service.queuedReadyCountForTesting(contentId: contentId), 1)
+        XCTAssertEqual(db.scalarInt(
+            "SELECT generation FROM export_ready_queue WHERE content_id=?",
+            params: [contentId]), 1)
+
+        // 模拟 Worker 尚未消费时又完成一项处理；同一篇合并为更高 generation。
+        XCTAssertTrue(db.execute(
+            "UPDATE content SET llm_summary='新摘要' WHERE id=?", params: [contentId]))
+        XCTAssertEqual(db.scalarInt(
+            "SELECT generation FROM export_ready_queue WHERE content_id=?",
+            params: [contentId]), 2)
+
+        await service.drainReadyQueueForTesting()
+        XCTAssertEqual(service.queuedReadyCountForTesting(contentId: contentId), 0)
+        let record = try XCTUnwrap(db.queryRows("""
+            SELECT destination, rendered_hash, attempts FROM export_record
+            WHERE rule_id=? AND content_id=? AND revision=1
+            """, params: [ruleId, contentId]).first)
+        XCTAssertNotEqual(record["rendered_hash"], firstHash)
+        XCTAssertEqual(record["attempts"], "2")
+        let destination = try XCTUnwrap(record["destination"])
+        XCTAssertTrue(try String(contentsOfFile: destination, encoding: .utf8).contains("# 第二版"))
     }
 
     func testRevisionCreatesNewDeliveryAndSameHashIsIdempotent() async throws {

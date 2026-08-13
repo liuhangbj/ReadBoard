@@ -38,14 +38,14 @@ public struct ReadBoardFeatureBoardSettingsPane: View {
                 ForEach(ReadBoardFeatureBoardDescriptor.all) { board in
                     HStack(spacing: ReadBoardDesign.Space.md) {
                         Image(systemName: board.icon)
-                            .font(.system(size: 16))
+                            .readBoardTextRole(.item)
                             .foregroundStyle(ReadBoardDesign.C.accent)
                             .frame(width: 24)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(board.title)
-                                .font(.system(size: 13, weight: .semibold))
+                                .readBoardTextRole(.itemTitle)
                             Text(board.subtitle)
-                                .font(.caption)
+                                .readBoardTextRole(.detail)
                                 .foregroundStyle(ReadBoardDesign.C.text2)
                         }
                         Spacer()
@@ -55,9 +55,10 @@ public struct ReadBoardFeatureBoardSettingsPane: View {
                     .padding(.vertical, 4)
                 }
             } header: {
-                Text("功能开关")
+                ReadBoardSettingsSectionTitle("功能开关")
             } footer: {
                 Text("关闭板块后，该板块下的所有自动与手动功能都会停用。")
+                    .readBoardTextRole(.detail)
             }
         }
         .formStyle(.grouped)
@@ -95,17 +96,15 @@ public struct ReadBoardFulltextSettingsPane: View {
     public var body: some View {
         Form {
             Section {
-                HStack {
-                    Toggle("启用 defuddle", isOn: Binding(
+                ReadBoardSettingsToggleRow(
+                    "启用 defuddle",
+                    detail: enabled ? "已开启" : "已关闭",
+                    isOn: Binding(
                         get: { enabled },
                         set: { value in updateEnabled(value) }))
-                    Spacer()
-                    Text(enabled ? "已开启" : "已关闭")
-                        .font(.caption)
-                        .foregroundStyle(ReadBoardDesign.C.text3)
-                }
             } footer: {
                 Text("基于 Node.js 的服务端网页正文提取引擎，与 Obsidian Web Clipper 使用相同核心。")
+                    .readBoardTextRole(.detail)
             }
         }
         .formStyle(.grouped)

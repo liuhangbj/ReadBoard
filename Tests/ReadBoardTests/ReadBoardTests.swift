@@ -128,17 +128,21 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
         XCTAssertEqual(FullTextFetcher.shared.probeMode(forFeed: feed), .feedFull)
     }
 
-    func testBilibiliSubtitleJSONBecomesParagraphMarkdown() throws {
+    func testBilibiliSubtitleJSONPreservesTimelineBoundariesWithoutInventingPunctuation() throws {
         let data = try JSONSerialization.data(withJSONObject: [
             "body": [
-                ["from": 0, "to": 1, "content": "第一句。"],
-                ["from": 1, "to": 2, "content": "第二句。"],
-                ["from": 2, "to": 3, "content": "第二句。"]
+                ["from": 0, "to": 1, "content": "第一句没有标点"],
+                ["from": 1.1, "to": 2, "content": "第二句保留断句"],
+                ["from": 2, "to": 2.5, "content": "第二句保留断句"],
+                ["from": 3.8, "to": 5, "content": "明显停顿后另起一段。"]
             ]
         ])
         let markdown = try XCTUnwrap(BilibiliFetcher.parseSubtitleMarkdown(data))
-        XCTAssertTrue(markdown.contains("第一句。第二句。"))
-        XCTAssertEqual(markdown.components(separatedBy: "第二句。").count - 1, 1)
+        XCTAssertEqual(
+            markdown,
+            "第一句没有标点  \n第二句保留断句\n\n明显停顿后另起一段。")
+        XCTAssertFalse(markdown.contains("第一句没有标点。"))
+        XCTAssertEqual(markdown.components(separatedBy: "第二句保留断句").count - 1, 1)
     }
 
     func testBilibiliDynamicCardUsesModuleAuthorPublishTimestamp() throws {
@@ -190,6 +194,57 @@ final class PlatformSubtitleFetchModeTests: XCTestCase {
         XCTAssertEqual(entry.meta["bilibili_access_state"], "upowerExclusive")
         XCTAssertEqual(entry.meta["bilibili_access_label"], "充电专属")
         XCTAssertEqual(entry.meta["bilibili_access_source"], "dynamic_card")
+    }
+
+    func testBilibiliAppArchiveRecognizesChargingBadgeArrayAtIngest() throws {
+        let entry = try XCTUnwrap(BilibiliFetcher.parseAppArchiveVideo([
+            "bvid": "BV1MpuB65EGJ",
+            "title": "英伟达Rubin服务器最新变化",
+            "author": "机构调研日记",
+            "is_charging_arc": false,
+            "is_ugcpay": false,
+            "ugc_pay": 0,
+            "badges": [["text": "充电专属"]]
+        ]))
+
+        XCTAssertEqual(entry.meta["bilibili_access_state"], "upowerExclusive")
+        XCTAssertEqual(entry.meta["bilibili_access_label"], "充电专属")
+        XCTAssertEqual(entry.meta["bilibili_access_source"], "app_archive_fallback")
+    }
+
+    func testBilibiliChargingBadgeArrayDistinguishesEarlyAccess() {
+        let access = BilibiliFetcher.dynamicVideoAccess(from: [
+            "badges": [["text": "充电抢先看"]]
+        ])
+        XCTAssertEqual(access?.state, .upowerEarlyAccess)
+        XCTAssertEqual(access?.toast, "充电抢先看")
+    }
+
+    func testBilibiliExactPreviewBadgeMeansChargingEarlyAccess() {
+        let access = BilibiliFetcher.dynamicVideoAccess(from: [
+            "badges": [["text": "抢先看"]]
+        ])
+        XCTAssertEqual(access?.state, .upowerEarlyAccess)
+        XCTAssertEqual(access?.state.listLabel, "充电抢先看")
+        XCTAssertEqual(access?.toast, "抢先看")
+    }
+
+    func testBilibiliDescriptivePreviewBadgeIsNotMisclassifiedAsCharging() {
+        let access = BilibiliFetcher.dynamicVideoAccess(from: [
+            "badges": [["text": "新品抢先看"]]
+        ])
+        XCTAssertNil(access)
+    }
+
+    func testBilibiliAppArchiveMarksUnbadgedVideoOpenForExpiryRefresh() throws {
+        let entry = try XCTUnwrap(BilibiliFetcher.parseAppArchiveVideo([
+            "bvid": "BV1ExpiredEarlyAccess",
+            "title": "抢先期结束后的视频",
+            "badges": []
+        ]))
+        XCTAssertEqual(entry.meta["bilibili_access_state"], "open")
+        XCTAssertEqual(entry.meta["bilibili_access_source"], "app_archive_fallback")
+        XCTAssertNotNil(entry.meta["bilibili_access_checked_at"])
     }
 
     func testBilibiliDynamicCardDistinguishesEarlyAccessAndUgcPay() {
@@ -1156,24 +1211,9 @@ final class ContentListFilterTests: XCTestCase {
     }
 }
 
-// MARK: - 原生可选择链接标题
+// MARK: - 正文文本选择
 
-final class SelectableLinkTitleTests: XCTestCase {
-    @MainActor
-    func testNativeTitleRemainsSelectableAndWrapsToAvailableWidth() {
-        let view = RBSelectableLinkTextView()
-        view.configure(
-            text: "这是一段足够长、需要随阅读器宽度自动换行的可选择文章标题",
-            destination: "https://example.com/article",
-            font: .systemFont(ofSize: 24, weight: .bold),
-            normalColor: .labelColor,
-            hoverColor: .controlAccentColor)
-
-        XCTAssertTrue(view.isSelectable)
-        XCTAssertFalse(view.isEditable)
-        XCTAssertGreaterThan(view.requiredHeight(for: 180), view.requiredHeight(for: 600))
-    }
-
+final class MarkdownSelectionTests: XCTestCase {
     @MainActor
     func testNormalMarkdownBlocksShareOneSelectionFlow() {
         let markdown = """

@@ -10,6 +10,10 @@ public enum ReadBoardLibraryCollection: String, CaseIterable, Identifiable, Hash
     case articles
     case podcasts
     case videos
+    case inbox
+    case inboxArticles
+    case inboxPodcasts
+    case inboxVideos
 
     public var id: String { rawValue }
 
@@ -23,6 +27,10 @@ public enum ReadBoardLibraryCollection: String, CaseIterable, Identifiable, Hash
         case .articles: "文章"
         case .podcasts: "播客"
         case .videos: "视频"
+        case .inbox: "收件箱"
+        case .inboxArticles: "收件箱文章"
+        case .inboxPodcasts: "收件箱播客"
+        case .inboxVideos: "收件箱视频"
         }
     }
     public var compactTitle: String {
@@ -42,6 +50,10 @@ public enum ReadBoardLibraryCollection: String, CaseIterable, Identifiable, Hash
         case .articles: "doc.text.fill"
         case .podcasts: "mic.fill"
         case .videos: "play.rectangle.fill"
+        case .inbox: "tray.and.arrow.down.fill"
+        case .inboxArticles: "doc.text"
+        case .inboxPodcasts: "mic"
+        case .inboxVideos: "play.rectangle"
         }
     }
 
@@ -55,9 +67,9 @@ public enum ReadBoardLibraryCollection: String, CaseIterable, Identifiable, Hash
 
     public var initialCategoryFilter: ReadBoardLibraryCategoryFilter {
         switch self {
-        case .articles: .article
-        case .podcasts: .podcast
-        case .videos: .video
+        case .articles, .inboxArticles: .article
+        case .podcasts, .inboxPodcasts: .podcast
+        case .videos, .inboxVideos: .video
         default: .all
         }
     }
@@ -72,6 +84,10 @@ public enum ReadBoardLibraryCollection: String, CaseIterable, Identifiable, Hash
         case .articles: counts.articles
         case .podcasts: counts.podcasts
         case .videos: counts.videos
+        case .inbox: counts.inbox ?? 0
+        case .inboxArticles: counts.inboxArticles ?? 0
+        case .inboxPodcasts: counts.inboxPodcasts ?? 0
+        case .inboxVideos: counts.inboxVideos ?? 0
         }
     }
 
@@ -91,6 +107,14 @@ public enum ReadBoardLibraryCollection: String, CaseIterable, Identifiable, Hash
             (counts.podcastUnread, counts.podcasts)
         case .videos:
             (counts.videoUnread, counts.videos)
+        case .inbox:
+            (counts.inboxUnread ?? 0, counts.inbox ?? 0)
+        case .inboxArticles:
+            (counts.inboxArticleUnread ?? 0, counts.inboxArticles ?? 0)
+        case .inboxPodcasts:
+            (counts.inboxPodcastUnread ?? 0, counts.inboxPodcasts ?? 0)
+        case .inboxVideos:
+            (counts.inboxVideoUnread ?? 0, counts.inboxVideos ?? 0)
         }
     }
 }
@@ -392,16 +416,16 @@ public struct ReadBoardLibraryRow: View {
             VStack(alignment: .leading, spacing: isCompact ? 4 : 6) {
                 HStack(alignment: .top, spacing: 6) {
                     Text(presentation.displayTitle)
-                        .font(.system(
+                        .readBoardInterfaceFont(
                             size: ReadBoardDesign.F.rowTitle * style.scale,
-                            weight: style.unreadBold && !presentation.isRead ? .semibold : .regular))
+                            weight: style.unreadBold && !presentation.isRead ? .semibold : .regular)
                         .foregroundStyle(titleColor)
                         .lineLimit(isCompact ? 1 : 2)
                         .fixedSize(horizontal: false, vertical: true)
                     if item.isStarred {
                         Image(systemName: "star.fill")
                             .foregroundStyle(ReadBoardDesign.C.star)
-                            .font(.system(size: 11 * style.scale))
+                            .readBoardInterfaceFont(size: 11 * style.scale)
                     }
                     Spacer(minLength: 0)
                 }
@@ -412,7 +436,7 @@ public struct ReadBoardLibraryRow: View {
                             ReadBoardRSSIcon(size: 11, color: ReadBoardDesign.C.rss)
                         } else if let icon = presentation.platformIcon {
                             Image(systemName: icon)
-                                .font(.system(size: 11))
+                                .readBoardInterfaceFont(size: 11 * style.scale)
                                 .foregroundStyle(presentation.platformColor)
                         }
                         if style.showSource {
@@ -424,13 +448,13 @@ public struct ReadBoardLibraryRow: View {
                         }
                         Spacer(minLength: 0)
                     }
-                    .font(.system(size: ReadBoardDesign.F.rowMeta * style.scale))
+                    .readBoardInterfaceFont(size: ReadBoardDesign.F.rowMeta * style.scale)
                     .foregroundStyle(ReadBoardDesign.C.text3)
                 }
 
                 if style.excerptLines > 0, let excerpt = presentation.excerpt {
                     Text(excerpt)
-                        .font(.system(size: ReadBoardDesign.F.rowExcerpt * style.scale))
+                        .readBoardInterfaceFont(size: ReadBoardDesign.F.rowExcerpt * style.scale)
                         .foregroundStyle(ReadBoardDesign.C.text2)
                         .lineLimit(style.excerptLines)
                 }
@@ -496,10 +520,10 @@ public struct ReadBoardLibraryRowPlaceholder: View {
     public init() {}
     public var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("正在加载文章标题").font(.system(size: 14, weight: .semibold))
-            Text("内容来源 · 2026-08-09").font(.system(size: 11))
+            Text("正在加载文章标题").readBoardInterfaceFont(size: 14, weight: .semibold)
+            Text("内容来源 · 2026-08-09").readBoardInterfaceFont(size: 11)
             Text("这里会显示文章摘要，帮助快速判断是否值得打开阅读。")
-                .font(.system(size: 12))
+                .readBoardInterfaceFont(size: 12)
         }
         .foregroundStyle(ReadBoardDesign.C.text2)
         .padding(.horizontal, 12).padding(.vertical, 9)
@@ -520,7 +544,7 @@ public struct ReadBoardLibraryPaginationFooter: View {
             ProgressView(isLoading ? "正在加载更多…" : "继续加载")
                 .controlSize(.small)
                 .tint(ReadBoardDesign.C.accent)
-                .font(.system(size: 10))
+                .readBoardInterfaceFont(size: 10)
                 .foregroundStyle(ReadBoardDesign.C.text3)
             Spacer()
         }
@@ -536,6 +560,15 @@ public enum ReadBoardLibraryColumnMetrics {
     public static let listIdeal: CGFloat = 380
     // 中栏不设人为上限；实际可拖范围只由窗口宽度和阅读栏最小宽度决定。
     public static let listMaximum: CGFloat = .greatestFiniteMagnitude
+
+    /// 左栏跟随界面缩放，但采用 50% 阻尼，避免 160% 时机械放大到挤占阅读区。
+    public static func sidebarScale(for interfaceScale: Double) -> Double {
+        min(1.3, max(0.9, 1 + (interfaceScale - 1) * 0.5))
+    }
+
+    public static func scaledSidebarWidth(_ width: CGFloat, interfaceScale: Double) -> CGFloat {
+        width * sidebarScale(for: interfaceScale)
+    }
 }
 
 /// Go 的桌面双栏与 Core 三栏中的中、右两栏共用同一组尺寸和分隔规则。
@@ -599,13 +632,13 @@ public struct ReadBoardLibraryEmptyState: View {
     public var body: some View {
         VStack(spacing: ReadBoardDesign.Space.md) {
             Image(systemName: icon)
-                .font(.system(size: 24, weight: .light))
+                .readBoardInterfaceFont(size: 24, weight: .light)
                 .foregroundStyle(ReadBoardDesign.C.text3)
             Text(title)
-                .font(.system(size: 15, weight: .semibold, design: .serif))
+                .readBoardInterfaceFont(size: 15, weight: .semibold)
                 .foregroundStyle(ReadBoardDesign.C.text2)
             Text(message)
-                .font(.system(size: 11)).foregroundStyle(ReadBoardDesign.C.text3)
+                .readBoardInterfaceFont(size: 11).foregroundStyle(ReadBoardDesign.C.text3)
                 .multilineTextAlignment(.center)
             if let actionTitle, let action {
                 Button(actionTitle, action: action).buttonStyle(ReadBoardSecondaryButtonStyle())
@@ -627,15 +660,15 @@ public struct ReadBoardReaderPlaceholder: View {
                 RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.xl)
                     .fill(ReadBoardDesign.C.surface.opacity(0.7))
                 Image(systemName: "doc.text")
-                    .font(.system(size: 22, weight: .light))
+                    .readBoardInterfaceFont(size: 22, weight: .light)
                     .foregroundStyle(ReadBoardDesign.C.text3)
             }
             .frame(width: 54, height: 54)
             Text("选择一篇文章")
-                .font(.system(size: 16, weight: .semibold, design: .serif))
+                .readBoardInterfaceFont(size: 16, weight: .semibold)
                 .foregroundStyle(ReadBoardDesign.C.text2)
             Text(count.map { "共 \($0) 条内容" } ?? "内容会在这里打开，不离开当前列表。")
-                .font(.system(size: 11)).foregroundStyle(ReadBoardDesign.C.text3)
+                .readBoardInterfaceFont(size: 11).foregroundStyle(ReadBoardDesign.C.text3)
         }
     }
 }
@@ -669,19 +702,19 @@ public struct ReadBoardLibrarySidebarRow<CountContent: View>: View {
 
     public var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
+            HStack(spacing: 8 * scale) {
                 Image(systemName: icon)
-                    .font(.system(size: 12))
+                    .readBoardInterfaceFont(size: 12 * scale)
                     .foregroundStyle(iconColor)
-                    .frame(width: 16)
+                    .frame(width: 16 * scale)
                 Text(title)
-                    .font(.system(size: ReadBoardDesign.F.sidebar * scale))
+                    .readBoardInterfaceFont(size: ReadBoardDesign.F.sidebar * scale)
                     .foregroundStyle(ReadBoardDesign.C.text)
                     .lineLimit(1)
-                Spacer(minLength: 6)
+                Spacer(minLength: 6 * scale)
                 countContent
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 10 * scale)
             .padding(.vertical, 6 * scale)
             .contentShape(Rectangle())
             .readBoardSelected(isSelected)
@@ -718,10 +751,10 @@ public struct ReadBoardLibrarySearchField: View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(ReadBoardDesign.C.text3)
-                .font(.system(size: 12))
+                .readBoardInterfaceFont(size: 12)
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
-                .font(.callout)
+                .readBoardInterfaceFont(size: 13)
                 .focused($isFocused)
                 .onSubmit(onSubmit)
             if !text.isEmpty {

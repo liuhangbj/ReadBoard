@@ -8,6 +8,40 @@ public enum ReadBoardConnectorAuthenticationState: Sendable, Equatable {
     case needsAttention(String)
 }
 
+public struct ReadBoardAutomaticFetchContext: Sendable, Equatable {
+    public let sourceID: Int64
+    public let identifier: String
+    public let configuredIntervalMinutes: Int
+    public let lastFetchedAt: Date?
+    public let recentPublishedAt: [Date]
+    public let now: Date
+    public let manual: Bool
+
+    public init(
+        sourceID: Int64,
+        identifier: String,
+        configuredIntervalMinutes: Int,
+        lastFetchedAt: Date?,
+        recentPublishedAt: [Date],
+        now: Date,
+        manual: Bool
+    ) {
+        self.sourceID = sourceID
+        self.identifier = identifier
+        self.configuredIntervalMinutes = configuredIntervalMinutes
+        self.lastFetchedAt = lastFetchedAt
+        self.recentPublishedAt = recentPublishedAt
+        self.now = now
+        self.manual = manual
+    }
+}
+
+public enum ReadBoardAutomaticFetchDecision: Sendable, Equatable {
+    case useDefault
+    case fetch
+    case skip(nextCheckAt: Date?)
+}
+
 /// 付费模块和后续平台适配器向公开核心交付统一内容的最小协议。
 /// 平台登录态、请求签名、反爬和正文提取均由适配器自己负责。
 public protocol ReadBoardSourceConnector: Sendable {
@@ -24,6 +58,8 @@ public protocol ReadBoardSourceConnector: Sendable {
     var settingsModuleIdentifier: String? { get }
     /// 批量同步同一平台多个源时的最小请求间隔，避免触发平台风控。
     var minimumFetchSpacing: TimeInterval { get }
+    /// 平台接管自动抓取节奏时显示在源管理中，避免通用固定间隔造成误导。
+    var adaptiveFetchDisplayName: String? { get }
 
     func resolveSourceIdentifier(_ input: String) async throws -> String?
     func previewSource(identifier: String) async throws -> ParsedFeed
@@ -48,8 +84,18 @@ public protocol ReadBoardSourceConnector: Sendable {
     func pollAuthentication(challengeID: String) async throws -> PlatformAuthenticationPoll
     func signOut() async throws
 
+    /// 自动抓取前由连接器基于历史发布时间、账号预算和平台退避状态决策。
+    /// 手动操作也会经过该入口，连接器可阻止用户在风控等待期制造重复请求。
+    func automaticFetchDecision(
+        for context: ReadBoardAutomaticFetchContext
+    ) async -> ReadBoardAutomaticFetchDecision
+
     /// 某错误意味着继续抓同平台其余源只会制造重复失败时，暂停本轮该平台。
     func shouldPauseBatch(after error: Error) -> Bool
+    /// 平台已经接管重试时，将源错误标记为黄色“自动恢复”，而不是红色人工故障。
+    func automaticallyRecovers(after error: Error) -> Bool
+    /// 兼容升级前已经写入数据库、尚未带自动恢复前缀的同类错误。
+    func storedErrorAutomaticallyRecovers(_ message: String) -> Bool
 }
 
 public extension ReadBoardSourceConnector {
@@ -61,6 +107,7 @@ public extension ReadBoardSourceConnector {
     var fulltextDisplayName: String { fulltextMode.displayName }
     var settingsModuleIdentifier: String? { nil }
     var minimumFetchSpacing: TimeInterval { 0 }
+    var adaptiveFetchDisplayName: String? { nil }
 
     func resolveSourceIdentifier(_ input: String) async throws -> String? { nil }
 
@@ -82,8 +129,15 @@ public extension ReadBoardSourceConnector {
         throw ReadBoardConnectorError.authenticationNotSupported
     }
     func signOut() async throws { throw ReadBoardConnectorError.authenticationNotSupported }
+    func automaticFetchDecision(
+        for context: ReadBoardAutomaticFetchContext
+    ) async -> ReadBoardAutomaticFetchDecision { .useDefault }
     func shouldPauseBatch(after error: Error) -> Bool { false }
+    func automaticallyRecovers(after error: Error) -> Bool { false }
+    func storedErrorAutomaticallyRecovers(_ message: String) -> Bool { false }
 }
+
+let readBoardAutomaticRecoveryErrorPrefix = "[readboard:auto-recovery]"
 
 public enum ReadBoardConnectorError: LocalizedError {
     case authenticationNotSupported

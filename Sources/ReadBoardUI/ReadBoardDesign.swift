@@ -8,8 +8,22 @@ import UIKit
 
 /// Core 与 Go 共用的纸墨设计系统。产品差异只能通过能力和内容体现，不能再复制一套视觉常量。
 public enum ReadBoardDesign {
+    /// 主阅读窗口内管理类页面的统一内容列宽度。
+    public static let featurePageMaximumWidth: CGFloat = 1120
+
+    #if os(macOS)
+    /// 所有桌面产品都会先解析共享设计色；以此作为统一的应用外观启动点，
+    /// 可覆盖 Go 尚未连接、还未进入共享三栏界面的阶段。
+    private static let applicationAppearanceBootstrap: Void = {
+        Task { @MainActor in
+            ReadBoardDockIconController.shared.start()
+        }
+    }()
+    #endif
+
     public static func dynamic(_ light: String, _ dark: String) -> Color {
         #if os(macOS)
+        _ = applicationAppearanceBootstrap
         return Color(nsColor: NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             return NSColor(readBoardHex: isDark ? dark : light)
@@ -71,14 +85,18 @@ public enum ReadBoardDesign {
     public enum Track { public static let section: CGFloat = 0.8 }
 
     public enum F {
-        public static let rowTitle: CGFloat = 14
-        public static let rowExcerpt: CGFloat = 12
+        public static let rowTitle: CGFloat = 13
+        public static let rowExcerpt: CGFloat = 11
         public static let rowMeta: CGFloat = 11
         public static let badge: CGFloat = 9
         public static let sidebar: CGFloat = 13
         public static let count: CGFloat = 11
-        public static let section: CGFloat = 11
+        public static let section: CGFloat = 13
         public static let pageTitle: CGFloat = 17
+        public static let settingsItem: CGFloat = 13
+        public static let settingsDetail: CGFloat = 11
+        public static let settingsCaption: CGFloat = 9
+        public static let settingsIcon: CGFloat = 13
     }
     /// 迁移期兼容名；Core 现有代码使用 `F`，Go 旧调用使用 `FontSize`。
     public typealias FontSize = F
@@ -88,6 +106,24 @@ public enum ReadBoardDesign {
         public static let floatingOpacity = 0.10
         public static let floatingRadius: CGFloat = 14
         public static let floatingY: CGFloat = 5
+    }
+}
+
+/// 主阅读窗口内管理页的统一居中容器。背景由页面根视图铺满，只有内容列受限。
+public struct ReadBoardFeaturePageContainer<Content: View>: View {
+    private let content: Content
+
+    public init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    public var body: some View {
+        content
+            .frame(
+                maxWidth: ReadBoardDesign.featurePageMaximumWidth,
+                maxHeight: .infinity,
+                alignment: .topLeading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 
@@ -105,12 +141,17 @@ public struct ReadBoardHairline: View {
 
 public struct ReadBoardSectionLabel: View {
     public let text: String
-    public init(text: String) { self.text = text }
+    public let scale: Double
+    public init(text: String, scale: Double = 1) {
+        self.text = text
+        self.scale = scale
+    }
     public var body: some View {
         Text(text)
-            .font(.system(size: ReadBoardDesign.F.section, weight: .medium))
+            .readBoardInterfaceFont(
+                size: ReadBoardDesign.F.section * scale, weight: .medium)
             .foregroundStyle(ReadBoardDesign.C.text3)
-            .tracking(ReadBoardDesign.Track.section)
+            .tracking(ReadBoardDesign.Track.section * scale)
     }
 }
 
@@ -125,7 +166,7 @@ public struct ReadBoardBadge: View {
     }
     public var body: some View {
         Text(text)
-            .font(.system(size: ReadBoardDesign.F.badge * scale, weight: .medium))
+            .readBoardInterfaceFont(size: ReadBoardDesign.F.badge * scale, weight: .medium)
             .foregroundStyle(color)
             .padding(.horizontal, 5)
             .padding(.vertical, 1.5)
@@ -163,10 +204,12 @@ public struct ReadBoardMetricTile: View {
     }
     public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: icon).font(.system(size: 13, weight: .medium)).foregroundStyle(color)
-            Text(value).font(.system(size: 20, weight: .semibold).monospacedDigit())
+            Image(systemName: icon)
+                .readBoardInterfaceFont(size: 13, weight: .medium)
+                .foregroundStyle(color)
+            Text(value).readBoardInterfaceFont(size: 20, weight: .semibold).monospacedDigit()
                 .foregroundStyle(ReadBoardDesign.C.text)
-            Text(title).font(.system(size: 11)).foregroundStyle(ReadBoardDesign.C.text3)
+            Text(title).readBoardInterfaceFont(size: 11).foregroundStyle(ReadBoardDesign.C.text3)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(ReadBoardDesign.Space.md)
@@ -195,10 +238,12 @@ public struct ReadBoardPageHeader<Trailing: View>: View {
         HStack(alignment: .center, spacing: ReadBoardDesign.Space.lg) {
             VStack(alignment: .leading, spacing: ReadBoardDesign.Space.xs) {
                 ReadBoardSectionLabel(text: eyebrow)
-                Text(title).font(.system(size: ReadBoardDesign.F.pageTitle, weight: .semibold))
+                Text(title).readBoardInterfaceFont(
+                    size: ReadBoardDesign.F.pageTitle, weight: .semibold)
                     .foregroundStyle(ReadBoardDesign.C.text)
                 if let subtitle {
-                    Text(subtitle).font(.system(size: 11)).foregroundStyle(ReadBoardDesign.C.text3)
+                    Text(subtitle).readBoardInterfaceFont(size: 11)
+                        .foregroundStyle(ReadBoardDesign.C.text3)
                         .lineLimit(2)
                 }
             }
@@ -218,9 +263,11 @@ public struct ReadBoardQuietButtonStyle: ButtonStyle {
     public init() {}
     public func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12, weight: .medium))
+            .readBoardTextRole(.item)
+            .fontWeight(.medium)
             .foregroundStyle(ReadBoardDesign.C.text2)
-            .padding(.horizontal, 10).padding(.vertical, 6)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .frame(minHeight: ReadBoardSettingsControlMetrics.controlHeight)
             .background(configuration.isPressed ? ReadBoardDesign.C.surface : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.md))
     }
@@ -230,9 +277,11 @@ public struct ReadBoardSecondaryButtonStyle: ButtonStyle {
     public init() {}
     public func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12, weight: .medium))
+            .readBoardTextRole(.item)
+            .fontWeight(.medium)
             .foregroundStyle(ReadBoardDesign.C.text2)
-            .padding(.horizontal, 12).padding(.vertical, 7)
+            .padding(.horizontal, 12).padding(.vertical, 5)
+            .frame(minHeight: ReadBoardSettingsControlMetrics.controlHeight)
             .background(ReadBoardDesign.C.surface.opacity(configuration.isPressed ? 0.75 : 1))
             .clipShape(RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.md))
             .overlay {
@@ -246,12 +295,33 @@ public struct ReadBoardPrimaryButtonStyle: ButtonStyle {
     public init() {}
     public func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 13, weight: .medium))
+            .readBoardTextRole(.item)
+            .fontWeight(.medium)
             .foregroundStyle(ReadBoardDesign.C.onAccent)
-            .padding(.horizontal, 16).padding(.vertical, 9)
-            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 14).padding(.vertical, 6)
+            .frame(minHeight: ReadBoardSettingsControlMetrics.controlHeight)
             .background(ReadBoardDesign.C.accent.opacity(configuration.isPressed ? 0.82 : 1))
             .clipShape(RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.lg))
+    }
+}
+
+public struct ReadBoardDestructiveButtonStyle: ButtonStyle {
+    public init() {}
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .readBoardTextRole(.item)
+            .fontWeight(.medium)
+            .foregroundStyle(ReadBoardDesign.C.scoreLow)
+            .padding(.horizontal, 12).padding(.vertical, 5)
+            .frame(minHeight: ReadBoardSettingsControlMetrics.controlHeight)
+            .background(ReadBoardDesign.C.scoreLow.opacity(configuration.isPressed ? 0.14 : 0.08))
+            .clipShape(RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.md))
+            .overlay {
+                RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.md)
+                    .strokeBorder(
+                        ReadBoardDesign.C.scoreLow.opacity(0.24),
+                        lineWidth: ReadBoardDesign.Line.hair)
+            }
     }
 }
 

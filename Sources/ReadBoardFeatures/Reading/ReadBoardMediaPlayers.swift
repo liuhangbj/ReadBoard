@@ -303,6 +303,7 @@ public struct ReadBoardYouTubePlayerView: View {
     @State private var player: AVPlayer?
     @State private var errorMessage: String?
     @State private var isLoading = false
+    @State private var loadGeneration = 0
 
     public init(videoID: String, title: String, gateway: any MediaPlaybackGateway) {
         self.videoID = videoID
@@ -313,14 +314,14 @@ public struct ReadBoardYouTubePlayerView: View {
     public var body: some View {
         Group {
             if let player {
-                VideoPlayer(player: player)
+                ReadBoardNativeVideoPlayer(player: player)
                     .aspectRatio(16 / 9, contentMode: .fit)
             } else if let errorMessage {
                 ReadBoardArticleEmptyState(
                     title: "视频加载失败",
                     message: errorMessage,
                     icon: "play.slash",
-                    retry: { Task { await load() } })
+                    retry: { Task { await load(videoID: videoID) } })
             } else {
                 ZStack {
                     ReadBoardDesign.C.surface
@@ -341,27 +342,87 @@ public struct ReadBoardYouTubePlayerView: View {
             RoundedRectangle(cornerRadius: ReadBoardDesign.Radius.lg)
                 .strokeBorder(ReadBoardDesign.C.hairline, lineWidth: ReadBoardDesign.Line.hair)
         }
-        .task(id: videoID) { await load() }
-        .onDisappear { player?.pause() }
+        .task(id: videoID) {
+            await load(videoID: videoID, replacesCurrentVideo: true)
+        }
+        .onDisappear {
+            loadGeneration += 1
+            player?.pause()
+            player = nil
+        }
     }
 
     @MainActor
-    private func load() async {
+    private func load(videoID requestedVideoID: String, replacesCurrentVideo: Bool = false) async {
+        if replacesCurrentVideo {
+            loadGeneration += 1
+            player?.pause()
+            player = nil
+            errorMessage = nil
+            isLoading = false
+        }
         guard player == nil, !isLoading else { return }
+        loadGeneration += 1
+        let generation = loadGeneration
         isLoading = true
         errorMessage = nil
-        defer { isLoading = false }
+        defer {
+            if loadGeneration == generation {
+                isLoading = false
+            }
+        }
         do {
-            let source = try await gateway.youtubeStream(videoID: videoID)
-            guard !Task.isCancelled, let url = URL(string: source.url) else { return }
+            let source = try await gateway.youtubeStream(videoID: requestedVideoID)
+            guard !Task.isCancelled,
+                  loadGeneration == generation,
+                  requestedVideoID == videoID,
+                  let url = URL(string: source.url) else { return }
             player = AVPlayer(url: url)
         } catch is CancellationError {
             return
         } catch {
-            errorMessage = error.localizedDescription
+            if loadGeneration == generation, requestedVideoID == videoID {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 }
+
+// macOS 26.1 的 SwiftUI VideoPlayer 在从占位视图切换到播放器时，可能在
+// _AVKit_SwiftUI 的 NSViewRepresentable 元数据初始化中递归并 SIGABRT。
+// macOS 直接桥接系统 AVPlayerView，避开有问题的 SwiftUI 包装层；iOS 继续
+// 使用 VideoPlayer。AVPlayer 仍由上层 SwiftUI 状态持有。
+#if os(macOS)
+private struct ReadBoardNativeVideoPlayer: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .inline
+        view.videoGravity = .resizeAspect
+        view.player = player
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        if view.player !== player {
+            view.player = player
+        }
+    }
+
+    static func dismantleNSView(_ view: AVPlayerView, coordinator: Void) {
+        view.player = nil
+    }
+}
+#else
+private struct ReadBoardNativeVideoPlayer: View {
+    let player: AVPlayer
+
+    var body: some View {
+        VideoPlayer(player: player)
+    }
+}
+#endif
 
 public struct ReadBoardBilibiliPlayerView: View {
     public let bvid: String

@@ -25,50 +25,59 @@ public struct ReadBoardGeneralSettingsPane: View {
 
     public var body: some View {
         Form {
-            Section("订阅源自动刷新") {
-                Toggle("自动周期抓取", isOn: $autoSyncEnabled)
+            Section {
+                ReadBoardSettingsToggleRow("自动周期抓取", isOn: $autoSyncEnabled)
                     .onChange(of: autoSyncEnabled) { _, value in
                         saveSync(enabled: value, minutes: intervalMinutes)
                     }
                 if autoSyncEnabled {
-                    Picker("抓取间隔", selection: $intervalMinutes) {
-                        Text("15 分钟").tag(15)
-                        Text("30 分钟").tag(30)
-                        Text("1 小时").tag(60)
-                        Text("2 小时").tag(120)
-                        Text("4 小时").tag(240)
-                        Text("8 小时").tag(480)
-                        Text("12 小时").tag(720)
-                        Text("24 小时").tag(1440)
+                    ReadBoardSettingsPickerRow("抓取间隔", selection: $intervalMinutes) {
+                            Text("15 分钟").tag(15)
+                            Text("30 分钟").tag(30)
+                            Text("1 小时").tag(60)
+                            Text("2 小时").tag(120)
+                            Text("4 小时").tag(240)
+                            Text("8 小时").tag(480)
+                            Text("12 小时").tag(720)
+                            Text("24 小时").tag(1440)
                     }
                     .onChange(of: intervalMinutes) { _, value in
                         saveSync(enabled: autoSyncEnabled, minutes: value)
                     }
                 }
+            } header: {
+                ReadBoardSettingsSectionTitle("订阅源自动刷新")
             }
 
-            Section("网络代理") {
-                Toggle("使用 HTTP 代理", isOn: $proxyEnabled)
+            Section {
+                ReadBoardSettingsToggleRow("使用 HTTP 代理", isOn: $proxyEnabled)
                     .onChange(of: proxyEnabled) { _, value in
                         if !value { proxyURL = "" }
                         saveProxy()
                     }
                 if proxyEnabled {
-                    TextField("http://127.0.0.1:7890", text: $proxyURL)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit(saveProxy)
-                    Button("保存代理", action: saveProxy)
-                        .buttonStyle(ReadBoardSecondaryButtonStyle())
+                    ReadBoardSettingsInputRow("代理地址") {
+                        HStack(spacing: 8) {
+                            TextField("http://127.0.0.1:7890", text: $proxyURL)
+                                .readBoardSettingsInput()
+                                .onSubmit(saveProxy)
+                            Button("保存", action: saveProxy)
+                                .buttonStyle(ReadBoardSecondaryButtonStyle())
+                                .readBoardSettingsButton(.inline)
+                        }
+                    }
                 }
                 Text("代理只作用于 ReadBoard 服务端的抓取和外部接口请求。")
-                    .font(.caption)
+                    .readBoardTextRole(.detail)
                     .foregroundStyle(ReadBoardDesign.C.text3)
+            } header: {
+                ReadBoardSettingsSectionTitle("网络代理")
             }
 
             if let statusMessage {
                 Section {
                     Label(statusMessage, systemImage: "checkmark.circle")
-                        .font(.caption)
+                        .readBoardTextRole(.detail)
                         .foregroundStyle(ReadBoardDesign.C.scoreHigh)
                 }
             }
@@ -125,7 +134,6 @@ public struct ReadBoardReaderSettingsPane: View {
     public init() {}
 
     public var body: some View {
-        ReadBoardReadingSettingsView()
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        ReadBoardReadingSettingsView(presentation: .settingsPane)
     }
 }

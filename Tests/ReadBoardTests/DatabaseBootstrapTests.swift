@@ -1,5 +1,6 @@
 import XCTest
 @testable import ReadBoard
+import ReadBoardContract
 
 /// 必须配合 READBOARD_DB 指向隔离临时路径运行，验证全新安装能只靠 App 资源建库。
 final class DatabaseBootstrapTests: XCTestCase {
@@ -8,10 +9,11 @@ final class DatabaseBootstrapTests: XCTestCase {
             throw XCTSkip("需要 READBOARD_DB 指向临时数据库；跳过以免触碰真实库")
         }
         XCTAssertTrue(Database.shared.open())
-        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 32)
+        XCTAssertEqual(Database.shared.scalarInt("PRAGMA user_version;"), 35)
 
         let requiredColumns = ["deleted_at", "llm_translated_md", "llm_transcript_md",
-                               "first_image_url"]
+                               "first_image_url", "visibility_state", "ingest_origin",
+                               "ingest_request_id"]
         let columns = Set(Database.shared.queryRows("PRAGMA table_info(content);")
             .compactMap { $0["name"] })
         for column in requiredColumns {
@@ -21,7 +23,8 @@ final class DatabaseBootstrapTests: XCTestCase {
             .compactMap { $0["name"] })
         for index in ["idx_content_worker_score", "idx_content_worker_translate",
                       "idx_content_worker_summarize", "idx_content_worker_transcribe",
-                      "idx_content_active_published", "idx_content_active_type_published"] {
+                      "idx_content_active_published", "idx_content_active_type_published",
+                      "idx_content_inbox", "idx_content_inbox_request", "idx_content_inbox_url"] {
             XCTAssertTrue(indexes.contains(index), "全新数据库缺少内容处理索引 \(index)")
         }
         XCTAssertFalse(columns.contains("is_archived"), "归档状态字段应已从当前数据库结构移除")
@@ -29,6 +32,82 @@ final class DatabaseBootstrapTests: XCTestCase {
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='content_processing_ignore';"), 1)
         XCTAssertEqual(Database.shared.scalarInt(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='content_fts';"), 1)
+        XCTAssertEqual(Database.shared.scalarInt(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='export_ready_queue';"), 1)
+    }
+
+    @MainActor
+    func testInboxItemsWithoutSourceAreFilterableAndVisibleToPipeline() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let contentID: Int64 = 9_260_001
+        cleanup(ids: [contentID], sourceIds: [])
+        defer { cleanup(ids: [contentID], sourceIds: []) }
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content
+                (id, ctype, guid, source, source_id, title, url, content_md,
+                 fetch_status, auto_score, auto_translate, auto_summarize, auto_transcribe,
+                 visibility_state, ingest_origin, ingest_request_id)
+            VALUES (?, 'article', ?, 'example.com', NULL, '收件箱测试', ?, ?,
+                    2, 1, 0, 0, 0, 'visible', 'inbox', ?)
+            """, params: [contentID, "inbox-test-\(contentID)",
+                           "https://example.com/inbox-test-\(contentID)",
+                           String(repeating: "正文", count: 400), "request-\(contentID)"]))
+
+        let items = db.fetchContents(inboxOnly: true, limit: 20)
+        XCTAssertTrue(items.contains(where: { $0.id == contentID }))
+        let counts = db.libraryCounts()
+        XCTAssertGreaterThanOrEqual(counts.inbox, 1)
+        let pendingIDs = PipelineWorker.shared.pendingTaskIdsForTesting(
+            ignoreWatermark: false, onlySourceId: nil)
+        XCTAssertTrue(pendingIDs.contains(contentID))
+    }
+
+    @MainActor
+    func testInboxImportReusesContentAndPersistsPerItemTargets() async throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let suite = "ReadBoardInboxTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let gateway = LocalInboxGateway(database: db, defaults: defaults)
+        let configuration = InboxConfiguration(
+            podcastTargets: .init(fulltext: false, score: true, summary: true,
+                                  translate: false, transcribe: true),
+            markNewItemsUnread: true,
+            allowAutomaticExport: false)
+        try await gateway.updateConfiguration(configuration)
+        let requestID = "inbox-import-\(UUID().uuidString)"
+        let result = try await gateway.importURL(InboxImportRequest(
+            requestID: requestID,
+            url: "https://media.example.invalid/episode.mp3?utm_source=test"))
+        defer { db.execute("DELETE FROM content WHERE id=?", params: [result.contentID]) }
+
+        XCTAssertEqual(result.disposition, .created)
+        XCTAssertEqual(result.kind, .podcast)
+        let row = try XCTUnwrap(db.queryRows("""
+            SELECT ctype, source_id, ingest_origin, url, auto_score, auto_summarize,
+                   auto_translate, auto_transcribe, meta
+            FROM content WHERE id=?
+            """, params: [result.contentID]).first)
+        XCTAssertEqual(row["ctype"], "podcast")
+        XCTAssertNil(row["source_id"])
+        XCTAssertEqual(row["ingest_origin"], "inbox")
+        XCTAssertEqual(row["url"], "https://media.example.invalid/episode.mp3")
+        XCTAssertEqual(row["auto_score"], "1")
+        XCTAssertEqual(row["auto_summarize"], "1")
+        XCTAssertEqual(row["auto_translate"], "0")
+        XCTAssertEqual(row["auto_transcribe"], "1")
+        XCTAssertTrue(row["meta"]?.contains(#""inbox_fulltext_target":"false""#) == true)
+        XCTAssertTrue(row["meta"]?.contains(#""inbox_allow_export":"false""#) == true)
+
+        let repeated = try await gateway.importURL(InboxImportRequest(
+            requestID: requestID,
+            url: "https://media.example.invalid/episode.mp3"))
+        XCTAssertEqual(repeated.disposition, .existing)
+        XCTAssertEqual(repeated.contentID, result.contentID)
     }
 
     func testLightweightListCategoryCountsAndExactMarkReadScope() throws {
@@ -162,7 +241,7 @@ final class DatabaseBootstrapTests: XCTestCase {
         SourceStore.shared.reload()
 
         await SourceStore.shared.syncAll(manual: false)
-        XCTAssertTrue(SourceStore.shared.lastSyncMessage.contains("后台排队"))
+        XCTAssertTrue(SourceStore.shared.lastSyncMessage.contains("智能调度"))
 
         var completed = false
         for _ in 0..<40 {
@@ -176,6 +255,36 @@ final class DatabaseBootstrapTests: XCTestCase {
         XCTAssertTrue(completed)
         XCTAssertNil(db.scalarString("SELECT error FROM content_source WHERE id = ?",
                                      params: [sid]))
+        XCTAssertFalse(SourceStore.shared.isExternalSyncing)
+    }
+
+    @MainActor
+    func testExternalConnectorCanSkipAutomaticFetch() async throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_210_052
+        cleanup(ids: [], sourceIds: [sid])
+        defer { cleanup(ids: [], sourceIds: [sid]) }
+
+        let connector = SkippingExternalConnector()
+        ReadBoardSourceConnectorRegistry.shared.register(connector)
+        defer { ReadBoardSourceConnectorRegistry.shared.unregister(sourceType: connector.sourceType) }
+        SourceStore.shared.stopAutoSync()
+        defer { SourceStore.shared.stopAutoSync() }
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config, enabled)
+            VALUES (?, ?, '智能调度跳过', 'skip-test', '{}', 1);
+            """, params: [sid, connector.sourceType]))
+        SourceStore.shared.reload()
+
+        SourceStore.shared.startAutoSync()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertNil(db.scalarString(
+            "SELECT last_fetched_at FROM content_source WHERE id = ?", params: [sid]))
+        let scheduledAt = try XCTUnwrap(SourceStore.shared.adaptiveSyncScheduledAtForTesting)
+        XCTAssertEqual(scheduledAt.timeIntervalSinceNow, 3600, accuracy: 5)
         XCTAssertFalse(SourceStore.shared.isExternalSyncing)
     }
 
@@ -220,6 +329,56 @@ final class DatabaseBootstrapTests: XCTestCase {
             params: [sid]).first)
         XCTAssertEqual(succeeded["fetch_status"], "2")
         XCTAssertTrue((succeeded["content_md"] ?? "").count >= 40)
+    }
+
+    @MainActor
+    func testMetadataOnlyExternalEntryStaysHiddenUntilFulltextSucceeds() async throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_210_062
+        cleanup(ids: [], sourceIds: [sid])
+
+        let connector = AwaitingContentExternalConnector()
+        db.execute("DELETE FROM content WHERE source=?", params: [connector.sourceType])
+        defer {
+            db.execute("DELETE FROM content WHERE source=?", params: [connector.sourceType])
+            cleanup(ids: [], sourceIds: [sid])
+        }
+        ReadBoardSourceConnectorRegistry.shared.register(connector)
+        defer { ReadBoardSourceConnectorRegistry.shared.unregister(sourceType: connector.sourceType) }
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config, enabled)
+            VALUES (?, ?, '元数据空壳测试', 'awaiting-test',
+                    '{"fetch_mode":"external_fulltext"}', 1);
+            """, params: [sid, connector.sourceType]))
+        SourceStore.shared.reload()
+        let source = try XCTUnwrap(SourceStore.shared.sources.first { $0.id == sid })
+
+        let added = try await SourceStore.shared.syncOne(source)
+        XCTAssertEqual(added, 1)
+        let contentID = try XCTUnwrap(db.scalarInt(
+            "SELECT id FROM content WHERE source_id=? AND guid='awaiting'", params: [sid]))
+        XCTAssertEqual(db.scalarString(
+            "SELECT visibility_state FROM content WHERE id=?", params: [contentID]),
+            ContentVisibilityState.awaitingContent)
+        XCTAssertTrue(db.fetchContents(sourceId: sid).isEmpty)
+
+        let before = db.libraryCounts()
+        XCTAssertEqual(before.total, db.scalarInt("""
+            SELECT COUNT(*) FROM content
+            WHERE is_duplicate=0 AND deleted_at IS NULL AND visibility_state='visible'
+            """))
+
+        FullTextFetcher.shared.storeExternalMarkdown(
+            contentId: Int64(contentID),
+            markdown: String(repeating: "正文已经取回。", count: 20),
+            engine: "\(connector.sourceType)_connector")
+
+        XCTAssertEqual(db.scalarString(
+            "SELECT visibility_state FROM content WHERE id=?", params: [contentID]),
+            ContentVisibilityState.visible)
+        XCTAssertEqual(db.fetchContents(sourceId: sid).map(\.id), [Int64(contentID)])
     }
 
     func testUnmetProcessingViewUsesItemStandardsInsteadOfWorkerSnapshot() throws {
@@ -689,6 +848,71 @@ final class DatabaseBootstrapTests: XCTestCase {
         XCTAssertTrue(meta.contains("30:50"))
     }
 
+    @MainActor
+    func testExistingBilibiliEarlyAccessLabelClearsWhenSourceReportsOpen() throws {
+        try requireIsolatedDatabase()
+        let db = Database.shared
+        XCTAssertTrue(db.open())
+        let sid: Int64 = 9_270_031
+        cleanup(ids: [], sourceIds: [sid])
+        defer {
+            db.execute("DELETE FROM content WHERE source_id = ?", params: [sid])
+            cleanup(ids: [], sourceIds: [sid])
+        }
+
+        XCTAssertTrue(db.execute("""
+            INSERT INTO content_source (id, stype, name, identifier, config)
+            VALUES (?, 'bilibili', 'early-access-expiry-test', ?, '{}');
+            """, params: [sid, "9270031"]))
+        let guid = "BV1ExpiredEarlyAccess"
+        let first = ParsedEntry(
+            guid: guid,
+            title: "充电抢先看",
+            url: "https://www.bilibili.com/video/\(guid)",
+            published: nil,
+            html: "",
+            author: "测试 UP 主",
+            meta: [
+                "video_id": guid,
+                "bilibili_access_state": "upowerEarlyAccess",
+                "bilibili_access_label": "充电抢先看",
+                "bilibili_access_toast": "试看中",
+                "bilibili_access_privilege_type": "20",
+                "bilibili_partial_transcript": "1"
+            ]
+        )
+        let inserted = SourceStore.shared.upsertContentForTesting(
+            source: "bilibili", sourceId: sid, entry: first)
+        let contentId = try XCTUnwrap(inserted)
+
+        let refreshed = ParsedEntry(
+            guid: guid,
+            title: "已免费开放",
+            url: "https://www.bilibili.com/video/\(guid)",
+            published: nil,
+            html: "",
+            author: "测试 UP 主",
+            meta: [
+                "video_id": guid,
+                "bilibili_access_state": "open",
+                "bilibili_access_source": "app_archive_fallback"
+            ]
+        )
+        let refreshResult = SourceStore.shared.upsertContentForTesting(
+            source: "bilibili", sourceId: sid, entry: refreshed)
+        XCTAssertNil(refreshResult)
+
+        let meta = try XCTUnwrap(db.scalarString(
+            "SELECT meta FROM content WHERE id = ?", params: [contentId]))
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(meta.utf8)) as? [String: Any])
+        XCTAssertEqual(object["bilibili_access_state"] as? String, "open")
+        XCTAssertNil(object["bilibili_access_label"])
+        XCTAssertNil(object["bilibili_access_toast"])
+        XCTAssertNil(object["bilibili_access_privilege_type"])
+        XCTAssertEqual(object["bilibili_partial_transcript"] as? String, "1")
+    }
+
     func testTranscriptFieldDrivesExportRenderingAndFilter() throws {
         try requireIsolatedDatabase()
         let db = Database.shared
@@ -1061,5 +1285,40 @@ private struct ThrowingExternalFulltextConnector: ReadBoardSourceConnector {
     func contentMarkdown(for entry: ParsedEntry) async throws -> String? {
         if entry.guid == "failed" { throw ExpectedFailure() }
         return String(repeating: "可用正文", count: 20)
+    }
+}
+
+private struct AwaitingContentExternalConnector: ReadBoardSourceConnector {
+    struct ExpectedFailure: LocalizedError {
+        var errorDescription: String? { "模拟访问校验" }
+    }
+
+    let sourceType = "test_external_awaiting"
+    let fulltextMode = FetchMode.externalFulltext
+
+    func fetch(identifier: String, configuration: String) async throws -> ParsedFeed {
+        ParsedFeed(title: "元数据空壳测试", siteURL: nil, entries: [
+            ParsedEntry(
+                guid: "awaiting", title: "只有标题", url: "https://test.invalid/awaiting",
+                published: nil, html: "", author: nil)
+        ])
+    }
+
+    func contentMarkdown(for entry: ParsedEntry) async throws -> String? {
+        throw ExpectedFailure()
+    }
+}
+
+private struct SkippingExternalConnector: ReadBoardSourceConnector {
+    let sourceType = "test_external_schedule"
+
+    func fetch(identifier: String, configuration: String) async throws -> ParsedFeed {
+        ParsedFeed(title: "不应抓取", siteURL: nil, entries: [])
+    }
+
+    func automaticFetchDecision(
+        for context: ReadBoardAutomaticFetchContext
+    ) async -> ReadBoardAutomaticFetchDecision {
+        .skip(nextCheckAt: context.now.addingTimeInterval(3600))
     }
 }

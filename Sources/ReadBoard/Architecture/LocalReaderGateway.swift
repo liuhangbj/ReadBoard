@@ -61,6 +61,7 @@ public final class LocalReaderGateway: LibraryGateway, @unchecked Sendable {
                 processedFilters: processed,
                 contentCategory: filter.category?.rawValue,
                 unmetProcessingOnly: filter.unmetProcessingOnly,
+                inboxOnly: filter.inboxOnly == true,
                 sortOrder: query.sort.rawValue,
                 limit: pageSize,
                 offset: offset
@@ -92,7 +93,15 @@ public final class LocalReaderGateway: LibraryGateway, @unchecked Sendable {
                     podcasts: counts.podcasts,
                     podcastUnread: counts.podcastUnread,
                     videos: counts.videos,
-                    videoUnread: counts.videoUnread
+                    videoUnread: counts.videoUnread,
+                    inbox: counts.inbox,
+                    inboxUnread: counts.inboxUnread,
+                    inboxArticles: counts.inboxArticles,
+                    inboxArticleUnread: counts.inboxArticleUnread,
+                    inboxPodcasts: counts.inboxPodcasts,
+                    inboxPodcastUnread: counts.inboxPodcastUnread,
+                    inboxVideos: counts.inboxVideos,
+                    inboxVideoUnread: counts.inboxVideoUnread
                 )
             )
         }.value
@@ -161,7 +170,8 @@ public final class LocalReaderGateway: LibraryGateway, @unchecked Sendable {
                 exportedOnly: filter.exportedOnly,
                 processedFilters: processed,
                 contentCategory: filter.category?.rawValue,
-                unmetProcessingOnly: filter.unmetProcessingOnly
+                unmetProcessingOnly: filter.unmetProcessingOnly,
+                inboxOnly: filter.inboxOnly == true
             )
         }.value
         await MainActor.run { PipelineWorker.shared.requestPendingRefresh() }

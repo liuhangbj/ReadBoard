@@ -151,6 +151,17 @@ public struct ReadBoardHTTPRouter: Sendable {
             case ("POST", "/api/v1/content/detail"):
                 let value = try decode(RemoteContentIDRequest.self, request.body)
                 return json(try await services.contentDetail.detail(contentID: value.contentID))
+            case ("GET", "/api/v1/inbox/configuration"):
+                return json(try await services.inbox.configuration())
+            case ("POST", "/api/v1/inbox/configuration"):
+                try await services.inbox.updateConfiguration(
+                    try decode(InboxConfiguration.self, request.body))
+                return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/inbox/import"):
+                return json(try await services.inbox.importURL(
+                    try decode(InboxImportRequest.self, request.body)), status: 201)
+            case ("POST", "/api/v1/inbox/retarget"):
+                return json(try await services.inbox.applyCurrentTargetsToExistingItems())
             case ("POST", "/api/v1/media/youtube/stream"):
                 let value = try decode(MediaPlaybackRequest.self, request.body)
                 return json(try await services.mediaPlayback.youtubeStream(videoID: value.videoID))
@@ -244,7 +255,7 @@ public struct ReadBoardHTTPRouter: Sendable {
             case ("POST", "/api/v1/sources/retention"):
                 let value = try decode(RemoteSourceRetentionRequest.self, request.body)
                 try await services.sourceManagement.setMaximumRetainedContent(
-                    sourceID: value.sourceID, count: value.count)
+                    scope: value.scope, count: value.count)
                 return json(RemoteAcknowledgement())
             case ("POST", "/api/v1/sources/refetch-fulltext"):
                 let value = try decode(RemoteSourceRefetchRequest.self, request.body)
@@ -374,6 +385,10 @@ public struct ReadBoardHTTPRouter: Sendable {
                 let value = try decode(RemoteMoveRequest.self, request.body)
                 await services.configuration.moveLLMProfile(from: value.from, to: value.to)
                 return json(RemoteAcknowledgement())
+            case ("POST", "/api/v1/configuration/llm/api-key"):
+                let value = try decode(RemoteIntIDRequest.self, request.body)
+                return json(RemoteStringValue(
+                    try await services.configuration.llmAPIKey(profileID: value.id) ?? ""))
             case ("POST", "/api/v1/configuration/llm/test"):
                 return json(await services.configuration.testLLMProfile(
                     try decode(LLMProfileUpdate.self, request.body)))
@@ -455,6 +470,8 @@ public struct ReadBoardHTTPRouter: Sendable {
                 .contains(path) ? .updateReadingState : .readLibrary
         }
         if path.hasPrefix("/api/v1/media/") { return .readLibrary }
+        if path == "/api/v1/inbox/import" { return .updateReadingState }
+        if path.hasPrefix("/api/v1/inbox/") { return .manageConfiguration }
         if path.hasPrefix("/api/v1/processing/") {
             return path == "/api/v1/processing/capabilities" ? .manageOperations : .runProcessing
         }

@@ -13,6 +13,8 @@ public struct ReadBoardSourcesFeatureView: View {
     @State private var showImporter = false
     @State private var showExporter = false
     @State private var exportDocument = ReadBoardOPMLDocument(text: "")
+    @AppStorage("ReadBoard.Sources.CollapsedFolderIDs")
+    private var collapsedFolderIDsRaw = ""
 
     private let environment: ReadBoardFeatureEnvironment
 
@@ -21,14 +23,26 @@ public struct ReadBoardSourcesFeatureView: View {
         _model = State(initialValue: ReadBoardSourcesFeatureModel(environment: environment))
     }
 
+    init(
+        environment: ReadBoardFeatureEnvironment,
+        model: ReadBoardSourcesFeatureModel
+    ) {
+        self.environment = environment
+        _model = State(initialValue: model)
+    }
+
     public var body: some View {
-        VStack(spacing: 0) {
-            header
-            ReadBoardHairline()
-            content
+        ReadBoardFeaturePageContainer {
+            VStack(spacing: 0) {
+                header
+                ReadBoardHairline()
+                content
+            }
         }
         .background(ReadBoardDesign.C.bg)
-        .task { await model.load() }
+        .task {
+            if model.snapshot == nil { await model.load() }
+        }
         .sheet(isPresented: $showAddSource) {
             ReadBoardAddSourceSheet(model: model)
         }
@@ -71,7 +85,7 @@ public struct ReadBoardSourcesFeatureView: View {
     private var header: some View {
         ReadBoardPageHeader(
             eyebrow: "服务",
-            title: "订阅源",
+            title: "订阅管理",
             subtitle: headerSubtitle
         ) {
             Menu {
@@ -168,44 +182,71 @@ public struct ReadBoardSourcesFeatureView: View {
                         Text(snapshot.lastSyncMessage.isEmpty
                             ? "服务端正在刷新订阅内容"
                             : snapshot.lastSyncMessage)
-                            .font(.system(size: 11))
+                            .readBoardInterfaceFont(size: 11)
                             .foregroundStyle(ReadBoardDesign.C.text2)
                     }
                     .padding(.vertical, 4)
                 }
             }
 
-            ForEach(snapshot.folders) { folder in
+            ForEach(model.listPresentation.folderGroups) { group in
+                let isCollapsed = isFolderCollapsed(group.id)
                 Section {
-                    ForEach(snapshot.sources.filter { $0.folderID == folder.id }) { source in
-                        ReadBoardSourceFeatureRow(
-                            source: source,
-                            folders: snapshot.folders,
-                            model: model)
-                            .padding(.leading, 18)
+                    if !isCollapsed {
+                        ForEach(group.sources) { source in
+                            ReadBoardSourceFeatureRow(
+                                source: source,
+                                folders: snapshot.folders,
+                                model: model)
+                                .equatable()
+                                .padding(.leading, 18)
+                        }
                     }
                 } header: {
                     ReadBoardSourceFolderHeader(
-                        folder: folder,
-                        sources: snapshot.sources.filter { $0.folderID == folder.id },
-                        model: model)
+                        folder: group.folder,
+                        sources: group.sources,
+                        model: model,
+                        isCollapsed: isCollapsed,
+                        toggleCollapsed: { toggleFolder(group.id) })
                 }
             }
 
-            let ungrouped = snapshot.sources.filter { $0.folderID == nil }
-            if !ungrouped.isEmpty {
+            if !model.listPresentation.ungroupedSources.isEmpty {
                 Section(snapshot.folders.isEmpty ? "全部订阅源" : "未分组") {
-                    ForEach(ungrouped) { source in
+                    ForEach(model.listPresentation.ungroupedSources) { source in
                         ReadBoardSourceFeatureRow(
                             source: source,
                             folders: snapshot.folders,
                             model: model)
+                            .equatable()
                     }
                 }
             }
         }
         .listStyle(.inset)
         .refreshable { await model.load() }
+    }
+
+    private func isFolderCollapsed(_ folderID: Int64) -> Bool {
+        Self.collapsedFolderIDs(from: collapsedFolderIDsRaw).contains(folderID)
+    }
+
+    private func toggleFolder(_ folderID: Int64) {
+        var ids = Self.collapsedFolderIDs(from: collapsedFolderIDsRaw)
+        if ids.contains(folderID) { ids.remove(folderID) }
+        else { ids.insert(folderID) }
+        withAnimation(.easeInOut(duration: 0.16)) {
+            collapsedFolderIDsRaw = Self.collapsedFolderIDsRaw(ids)
+        }
+    }
+
+    nonisolated static func collapsedFolderIDs(from rawValue: String) -> Set<Int64> {
+        Set(rawValue.split(separator: ",").compactMap { Int64($0) })
+    }
+
+    nonisolated static func collapsedFolderIDsRaw(_ ids: Set<Int64>) -> String {
+        ids.sorted().map(String.init).joined(separator: ",")
     }
 
     private var headerSubtitle: String {
@@ -224,7 +265,7 @@ public struct ReadBoardSourcesFeatureView: View {
                 Button { model.clearStatus() } label: { Image(systemName: "xmark") }
                     .buttonStyle(.plain)
             }
-            .font(.system(size: 11))
+            .readBoardInterfaceFont(size: 11)
             .foregroundStyle(ReadBoardDesign.C.text)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)

@@ -172,6 +172,12 @@ public struct ReadBoardLibraryQueryState: Equatable, Sendable {
                 message: "试试更换关键词或减少筛选条件。",
                 systemImage: "magnifyingglass")
         }
+        if [.inbox, .inboxArticles, .inboxPodcasts, .inboxVideos].contains(collection) {
+            return .init(
+                title: "收件箱为空",
+                message: "通过系统分享或“添加链接”保存零散内容。",
+                systemImage: "tray.and.arrow.down")
+        }
         return .init(
             title: "暂无内容",
             message: "ReadBoard 抓取的新内容会显示在这里。",

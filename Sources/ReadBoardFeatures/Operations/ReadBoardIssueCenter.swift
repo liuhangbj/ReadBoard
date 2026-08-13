@@ -92,11 +92,14 @@ public final class ReadBoardIssueCenterModel {
 
         for group in Dictionary(grouping: sources.filter { $0.hasError || $0.isStale }, by: \.sourceType) {
             let failures = group.value
+            let groupRepairing = repairing || failures.allSatisfy(\.isRecovering)
             result.append(ReadBoardIssue(
                 id: "sources.\(group.key)", category: .sources,
-                severity: repairing ? .repairing : .needsAttention,
+                severity: groupRepairing ? .repairing : .needsAttention,
                 title: "\(platformName(group.key))抓取异常",
-                detail: repairing ? "系统正在自动重试。" : (failures.first?.error ?? "超过 48 小时没有成功更新记录。"),
+                detail: groupRepairing
+                    ? (failures.first?.error ?? "系统正在自动重试。")
+                    : (failures.first?.error ?? "超过 48 小时没有成功更新记录。"),
                 affectedCount: failures.count,
                 actionTitle: "查看订阅源", action: .openSources))
         }
@@ -225,8 +228,8 @@ public struct ReadBoardIssueCenterView: View {
         HStack(spacing: 10) {
             Circle().fill(statusColor).frame(width: 10, height: 10)
             VStack(alignment: .leading, spacing: 2) {
-                Text("问题中心").font(.headline)
-                Text(model.statusText).font(.caption).foregroundStyle(ReadBoardDesign.C.text3)
+                Text("问题中心").readBoardInterfaceFont(size: 14, weight: .semibold)
+                Text(model.statusText).readBoardInterfaceFont(size: 12).foregroundStyle(ReadBoardDesign.C.text3)
             }
             Spacer()
             Button { Task { await model.refresh() } } label: {
@@ -244,12 +247,14 @@ public struct ReadBoardIssueCenterView: View {
                 .foregroundStyle(issueColor(issue)).frame(width: 20)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 7) {
-                    Text(issue.title).font(.system(size: 13, weight: .semibold))
+                    Text(issue.title).readBoardInterfaceFont(size: 13, weight: .semibold)
                     if issue.affectedCount > 1 {
-                        Text("\(issue.affectedCount) 项").font(.caption2.monospacedDigit())
+                        Text("\(issue.affectedCount) 项")
+                            .readBoardInterfaceFont(size: 10)
+                            .monospacedDigit()
                     }
                 }
-                Text(issue.detail).font(.caption).foregroundStyle(ReadBoardDesign.C.text3).lineLimit(3)
+                Text(issue.detail).readBoardInterfaceFont(size: 12).foregroundStyle(ReadBoardDesign.C.text3).lineLimit(3)
             }
             Spacer(minLength: 12)
             if let title = issue.actionTitle, let target = issue.action {

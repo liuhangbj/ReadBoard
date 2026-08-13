@@ -1,6 +1,7 @@
 import AppKit
 import CoreImage.CIFilterBuiltins
 import ReadBoardContract
+import ReadBoardUI
 import SwiftUI
 
 public struct RemoteAccessPane: View {
@@ -24,54 +25,54 @@ public struct RemoteAccessPane: View {
 
     public var body: some View {
         Form {
-            Section("服务状态") {
+            Section {
                 HStack(spacing: 10) {
                     Circle().fill(statusColor).frame(width: 10, height: 10)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(statusTitle).font(.system(size: 13, weight: .semibold))
+                        Text(statusTitle).readBoardTextRole(.itemTitle)
                         if let error = snapshot.lastError, !error.isEmpty {
-                            Text(error).font(.caption).foregroundStyle(Color.rbScoreLow)
+                            Text(error).readBoardTextRole(.detail).foregroundStyle(Color.rbScoreLow)
                         }
                     }
                     Spacer()
                     Button("刷新") { Task { await refresh(forceConfiguration: false) } }
-                        .controlSize(.small)
+                        .buttonStyle(ReadBoardSecondaryButtonStyle())
+                        .readBoardSettingsButton(.inline)
                 }
 
                 if snapshot.serviceURLs.isEmpty {
                     Text("服务启动后会在这里显示可连接地址。")
-                        .font(.caption).foregroundStyle(Color.rbText3)
+                        .readBoardTextRole(.detail).foregroundStyle(Color.rbText3)
                 } else {
                     ForEach(snapshot.serviceURLs, id: \.self) { url in
-                        LabeledContent("连接地址") {
+                        ReadBoardSettingsInputRow("连接地址") {
                             HStack(spacing: 6) {
-                                Text(url).font(.system(.caption, design: .monospaced))
+                                Text(url).readBoardTextRole(.detail, design: .monospaced)
                                     .textSelection(.enabled)
                                 Button {
                                     NSPasteboard.general.clearContents()
                                     NSPasteboard.general.setString(url, forType: .string)
                                     message = "已复制连接地址"; messageIsError = false
                                 } label: { Image(systemName: "doc.on.doc") }
-                                    .buttonStyle(.quiet).help("复制")
+                                    .buttonStyle(ReadBoardQuietButtonStyle())
+                                    .readBoardSettingsButton(.icon)
+                                    .help("复制")
                             }
                         }
                     }
                 }
+            } header: {
+                ReadBoardSettingsSectionTitle("服务状态")
             }
 
-            Section("监听设置") {
-                Toggle("启用远程访问服务", isOn: configBinding(\.enabled))
-                    .tint(Color.rbAccent)
-                Toggle("允许局域网设备连接", isOn: configBinding(\.allowLAN))
-                    .tint(Color.rbAccent)
+            Section {
+                ReadBoardSettingsToggleRow("启用远程访问服务", isOn: configBinding(\.enabled))
+                ReadBoardSettingsToggleRow("允许局域网设备连接", isOn: configBinding(\.allowLAN))
                     .disabled(!editing.enabled)
-                HStack {
-                    Text("端口")
-                    Spacer()
+                ReadBoardSettingsInputRow("端口") {
                     TextField("7331", text: $portText)
-                        .textFieldStyle(.roundedBorder)
+                        .readBoardSettingsInput(.numeric)
                         .multilineTextAlignment(.trailing)
-                        .frame(width: 90)
                         .disabled(!editing.enabled)
                         .onChange(of: portText) { _, _ in dirty = true }
                 }
@@ -79,53 +80,59 @@ public struct RemoteAccessPane: View {
                     Text(editing.allowLAN
                          ? "将监听 0.0.0.0，局域网设备可访问。"
                          : "仅监听 127.0.0.1，其他设备无法访问。")
-                        .font(.caption).foregroundStyle(Color.rbText3)
+                        .readBoardTextRole(.detail).foregroundStyle(Color.rbText3)
                     Spacer()
                     Button(busy ? "应用中…" : "应用") { applyConfiguration() }
-                        .buttonStyle(.primaryCapsule).controlSize(.small)
+                        .buttonStyle(ReadBoardPrimaryButtonStyle())
+                        .readBoardSettingsButton(.inline)
                         .disabled(!dirty || busy || validatedPort == nil)
                 }
+            } header: {
+                ReadBoardSettingsSectionTitle("监听设置")
             }
 
             Section {
-                LabeledContent("密码登录") {
-                    Text(snapshot.passwordConfigured ? "已启用" : "尚未设置")
-                        .foregroundStyle(snapshot.passwordConfigured
-                            ? Color.rbScoreHigh : Color.rbScoreMid)
+                ReadBoardSettingsValueRow(
+                    "密码登录",
+                    value: snapshot.passwordConfigured ? "已启用" : "尚未设置")
+                ReadBoardSettingsInputRow(snapshot.passwordConfigured ? "新密码" : "访问密码") {
+                    ReadBoardSettingsPasswordField(
+                        snapshot.passwordConfigured ? "输入新密码" : "设置访问密码",
+                        text: $newPassword,
+                        hasStoredSecret: snapshot.passwordConfigured)
                 }
-                SecureField(snapshot.passwordConfigured ? "输入新密码" : "设置访问密码",
-                            text: $newPassword)
-                    .textFieldStyle(.roundedBorder)
-                SecureField("再次输入", text: $confirmPassword)
-                    .textFieldStyle(.roundedBorder)
+                ReadBoardSettingsInputRow("确认密码") {
+                    ReadBoardSettingsPasswordField("再次输入", text: $confirmPassword)
+                }
                 HStack {
                     Text("至少 10 个字符。修改密码不会自动撤销已登录设备。")
-                        .font(.caption).foregroundStyle(Color.rbText3)
+                        .readBoardTextRole(.detail).foregroundStyle(Color.rbText3)
                     Spacer()
                     Button(snapshot.passwordConfigured ? "更新密码" : "启用密码登录") {
                         setAccessPassword()
                     }
-                    .buttonStyle(.primaryCapsule).controlSize(.small)
+                    .buttonStyle(ReadBoardPrimaryButtonStyle())
+                    .readBoardSettingsButton(.inline)
                     .disabled(busy || newPassword.count < 10 || newPassword != confirmPassword)
                 }
                 if let name = snapshot.bonjourServiceName {
-                    LabeledContent("局域网发现名称", value: name)
+                    ReadBoardSettingsValueRow("局域网发现名称", value: name)
                 }
                 if let fingerprint = snapshot.certificateFingerprint {
-                    LabeledContent("TLS 证书指纹") {
+                    ReadBoardSettingsInputRow("TLS 证书指纹") {
                         Text(formattedFingerprint(fingerprint))
-                            .font(.system(.caption2, design: .monospaced))
+                            .readBoardTextRole(.micro, design: .monospaced)
                             .textSelection(.enabled)
                     }
                 }
             } header: {
-                Text("访问密码与 HTTPS")
+                ReadBoardSettingsSectionTitle("访问密码与 HTTPS")
             } footer: {
                 Text("ReadBoard Go 首次连接时固定此证书指纹；登录后只保存可单独撤销的设备令牌。")
-                    .font(.caption).foregroundStyle(Color.rbText3)
+                    .readBoardTextRole(.detail).foregroundStyle(Color.rbText3)
             }
 
-            Section("设备配对") {
+            Section {
                 if let challenge, challenge.expiresAt > Date().timeIntervalSince1970 {
                     HStack(alignment: .top, spacing: 18) {
                         if let image = qrImage(challenge.qrPayload) {
@@ -137,56 +144,59 @@ public struct RemoteAccessPane: View {
                         }
                         VStack(alignment: .leading, spacing: 10) {
                             Text("使用 ReadBoard Go 扫描二维码")
-                                .font(.system(size: 13, weight: .semibold))
+                                .readBoardTextRole(.itemTitle)
                             Text("或手动输入配对码")
-                                .font(.caption).foregroundStyle(Color.rbText3)
+                                .readBoardTextRole(.detail).foregroundStyle(Color.rbText3)
                             Text(challenge.code)
-                                .font(.system(size: 22, weight: .semibold, design: .monospaced))
+                                .readBoardInterfaceFont(size: 17, weight: .semibold, design: .monospaced)
                                 .textSelection(.enabled)
                             Text("5 分钟内有效，仅可使用一次。")
-                                .font(.caption).foregroundStyle(Color.rbScoreMid)
+                                .readBoardTextRole(.detail).foregroundStyle(Color.rbScoreMid)
                             Button("取消配对") { cancelPairing() }
-                                .controlSize(.small)
+                                .buttonStyle(ReadBoardSecondaryButtonStyle())
+                                .readBoardSettingsButton(.inline)
                         }
                     }
                     .padding(.vertical, 6)
                 } else {
                     VStack(alignment: .leading, spacing: 10) {
-                        Picker("访问权限", selection: $pairingPreset) {
-                            Text("仅阅读").tag(RemoteAccessPreset.reader)
-                            Text("日常操作").tag(RemoteAccessPreset.operatorAccess)
-                            Text("管理员").tag(RemoteAccessPreset.administrator)
+                        ReadBoardSettingsPickerRow("访问权限", selection: $pairingPreset) {
+                                Text("仅阅读").tag(RemoteAccessPreset.reader)
+                                Text("日常操作").tag(RemoteAccessPreset.operatorAccess)
+                                Text("管理员").tag(RemoteAccessPreset.administrator)
                         }
-                        .pickerStyle(.segmented)
                         HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("添加阅读设备")
-                                .font(.system(size: 13, weight: .semibold))
+                                .readBoardTextRole(.itemTitle)
                             Text("每台设备获得独立令牌，可以单独撤销。")
-                                .font(.caption).foregroundStyle(Color.rbText3)
+                                .readBoardTextRole(.detail).foregroundStyle(Color.rbText3)
                         }
                         Spacer()
                         Button("生成配对二维码") { beginPairing() }
-                            .buttonStyle(.primaryCapsule).controlSize(.small)
+                            .buttonStyle(ReadBoardPrimaryButtonStyle())
+                            .readBoardSettingsButton(.inline)
                             .disabled(snapshot.state != .running || busy)
                         }
                     }
                 }
+            } header: {
+                ReadBoardSettingsSectionTitle("设备配对")
             }
 
             Section {
                 if snapshot.devices.isEmpty {
                     Text("尚未配对任何设备")
-                        .font(.caption).foregroundStyle(Color.rbText3)
+                        .readBoardTextRole(.detail).foregroundStyle(Color.rbText3)
                 } else {
                     ForEach(snapshot.devices) { device in
                         HStack(spacing: 10) {
                             Image(systemName: "laptopcomputer.and.iphone")
                                 .foregroundStyle(Color.rbAccent).frame(width: 22)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(device.name).font(.system(size: 13, weight: .medium))
+                                Text(device.name).readBoardTextRole(.itemTitle)
                                 Text(deviceDetail(device))
-                                    .font(.caption2).foregroundStyle(Color.rbText3)
+                                    .readBoardTextRole(.detail).foregroundStyle(Color.rbText3)
                             }
                             Spacer()
                             Button("撤销", role: .destructive) {
@@ -202,20 +212,21 @@ public struct RemoteAccessPane: View {
                                     }
                                 }
                             }
-                            .buttonStyle(.quiet).controlSize(.small)
+                            .buttonStyle(ReadBoardDestructiveButtonStyle())
+                            .readBoardSettingsButton(.inline)
                         }
                     }
                 }
             } header: {
-                Text("已配对设备")
+                ReadBoardSettingsSectionTitle("已配对设备")
             } footer: {
                 Text("设备令牌只在登录或配对成功时返回一次；服务端仅保存 SHA-256 哈希。")
-                    .font(.caption).foregroundStyle(Color.rbText3)
+                    .readBoardTextRole(.detail).foregroundStyle(Color.rbText3)
             }
 
             if !message.isEmpty {
                 Section {
-                    Text(message).font(.caption)
+                    Text(message).readBoardTextRole(.detail)
                         .foregroundStyle(messageIsError ? Color.rbScoreLow : Color.rbScoreHigh)
                 }
             }

@@ -214,7 +214,8 @@ public struct ReadBoardServiceHealthSummary: Equatable, Sendable {
         runtime: RuntimeStatusSnapshot,
         authentications: [PlatformAuthenticationStatus],
         problems: OperationalProblemCounts,
-        sourceIssues: Int = 0
+        sourceIssues: Int = 0,
+        recoveringSourceIssues: Int = 0
     ) {
         let manualAuth = authentications.filter {
             [.needsAttention, .signedOut, .expired].contains($0.phase)
@@ -231,9 +232,10 @@ public struct ReadBoardServiceHealthSummary: Equatable, Sendable {
             phase = .needsAttention
             issueCount = manualProblems
             message = "有 \(manualProblems) 项需要手动处理"
-        } else if runtime.isRunning || repairingAuth > 0 || problems.fullTextFailures > 0 {
+        } else if runtime.isRunning || repairingAuth > 0 || problems.fullTextFailures > 0
+                    || recoveringSourceIssues > 0 {
             phase = .repairing
-            issueCount = repairingAuth + problems.fullTextFailures
+            issueCount = repairingAuth + problems.fullTextFailures + recoveringSourceIssues
             message = "系统正在自动处理问题"
         } else {
             phase = .healthy
@@ -271,11 +273,14 @@ public final class ReadBoardServiceHealthMonitorModel {
                 message: "无法获取服务状态")
             return
         }
-        let sourceIssues = catalog.sources.filter { $0.hasError || $0.isStale }.count
+        let sourceProblems = catalog.sources.filter { $0.hasError || $0.isStale }
+        let sourceIssues = sourceProblems.filter { !$0.isRecovering }.count
+        let recoveringSourceIssues = sourceProblems.filter(\.isRecovering).count
         summary = ReadBoardServiceHealthSummary(
             runtime: runtime,
             authentications: auth,
             problems: problems,
-            sourceIssues: sourceIssues)
+            sourceIssues: sourceIssues,
+            recoveringSourceIssues: recoveringSourceIssues)
     }
 }

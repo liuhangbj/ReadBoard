@@ -117,9 +117,41 @@ public struct RemoteSourceEnabledRequest: Codable, Equatable, Sendable {
 }
 
 public struct RemoteSourceRetentionRequest: Codable, Equatable, Sendable {
-    public let sourceID: Int64
+    public let scope: SourceScope
     public let count: Int
-    public init(sourceID: Int64, count: Int) { self.sourceID = sourceID; self.count = count }
+
+    public init(scope: SourceScope, count: Int) {
+        self.scope = scope
+        self.count = count
+    }
+
+    /// 兼容尚未升级的 Go 客户端所发送的 sourceID 负载。
+    public init(sourceID: Int64, count: Int) {
+        self.init(scope: SourceScope(kind: .source, id: sourceID), count: count)
+    }
+
+    private enum CodingKeys: String, CodingKey { case scope, sourceID, count }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        count = try container.decode(Int.self, forKey: .count)
+        if let value = try container.decodeIfPresent(SourceScope.self, forKey: .scope) {
+            scope = value
+        } else {
+            scope = SourceScope(
+                kind: .source,
+                id: try container.decode(Int64.self, forKey: .sourceID))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(scope, forKey: .scope)
+        try container.encode(count, forKey: .count)
+        if scope.kind == .source {
+            try container.encode(scope.id, forKey: .sourceID)
+        }
+    }
 }
 
 public struct RemoteSourceRefetchRequest: Codable, Equatable, Sendable {

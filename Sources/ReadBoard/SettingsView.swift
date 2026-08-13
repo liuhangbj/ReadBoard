@@ -36,6 +36,7 @@ public struct SettingsView: View {
                     ?? AnyView(ContentUnavailableView(
                         "仅能在服务端设置远程访问", systemImage: "server.rack"))
             case .reader: AnyView(ReadBoardReaderSettingsPane())
+            case .inbox: AnyView(ReadBoardInboxSettingsPane(inbox: services.inbox))
             case .llm: AnyView(ReadBoardLLMSettingsPane(
                 configuration: services.configuration))
             case .deps: AnyView(ReadBoardDependencySettingsPane(

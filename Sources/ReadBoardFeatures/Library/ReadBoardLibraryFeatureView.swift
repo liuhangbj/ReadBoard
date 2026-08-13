@@ -23,6 +23,7 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
 
     private let automaticallyMarksRead: Bool
     private let loadsDetail: Bool
+    private let playbackNavigationRequest: ReadBoardPlaybackNavigationRequest?
     private let detail: (
         ContentSummary,
         ReadBoardLibraryFeatureModel,
@@ -34,6 +35,7 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
         location: ReadBoardLibraryLocation = .collection(.all),
         automaticallyMarksRead: Bool = true,
         loadsDetail: Bool = true,
+        playbackNavigationRequest: ReadBoardPlaybackNavigationRequest? = nil,
         @ViewBuilder detail: @escaping (
             ContentSummary,
             ReadBoardLibraryFeatureModel,
@@ -44,6 +46,7 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
             environment: environment, location: location))
         self.automaticallyMarksRead = automaticallyMarksRead
         self.loadsDetail = loadsDetail
+        self.playbackNavigationRequest = playbackNavigationRequest
         self.detail = detail
     }
 
@@ -62,6 +65,13 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
                     await model.refreshNavigation()
                 }
             }
+        .task(id: playbackNavigationRequest?.id) {
+            guard let request = playbackNavigationRequest else { return }
+            await model.open(
+                request.summary,
+                automaticallyMarksRead: automaticallyMarksRead,
+                loadsDetail: loadsDetail)
+        }
     }
 
     #if os(macOS)
@@ -192,7 +202,7 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
 
             ReadBoardFlowLayout(horizontalSpacing: 6, verticalSpacing: 6) {
                 Text("处理")
-                    .font(.system(size: 11))
+                    .readBoardInterfaceFont(size: 11)
                     .foregroundStyle(ReadBoardDesign.C.text3)
                 processingFilterChip(.fulltext)
                 processingFilterChip(.score)
@@ -211,7 +221,7 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
                 Spacer()
                 Button { Task { await model.markCurrentLocationRead() } } label: {
                     Label("全部已读", systemImage: "checkmark.circle")
-                        .font(.system(size: 11))
+                        .readBoardInterfaceFont(size: 11)
                 }
                 .buttonStyle(ReadBoardQuietButtonStyle())
             }
@@ -223,11 +233,11 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
     private var scoreFilterControls: some View {
         HStack(spacing: 5) {
             Text("评分")
-                .font(.system(size: 11))
+                .readBoardInterfaceFont(size: 11)
                 .foregroundStyle(ReadBoardDesign.C.text3)
             scoreField(placeholder: "0", value: minimumScoreBinding)
             Text("–")
-                .font(.system(size: 11))
+                .readBoardInterfaceFont(size: 11)
                 .foregroundStyle(ReadBoardDesign.C.text3)
             scoreField(placeholder: "100", value: maximumScoreBinding)
             if model.queryState.minimumScore > 0 || model.queryState.maximumScore < 100 {
@@ -245,7 +255,8 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
     private func scoreField(placeholder: String, value: Binding<Int>) -> some View {
         TextField(placeholder, value: value, format: .number)
             .textFieldStyle(.plain)
-            .font(.system(size: 11, design: .monospaced))
+            .readBoardInterfaceFont(size: 11)
+            .monospacedDigit()
             .multilineTextAlignment(.trailing)
             .frame(width: 30)
             .padding(.horizontal, 6)
@@ -276,12 +287,12 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 9))
+                        .readBoardInterfaceFont(size: 9)
                         .foregroundStyle(ReadBoardDesign.C.text3)
                     Text(model.queryState.sortOption.compactTitle)
-                        .font(.system(size: 11))
+                        .readBoardInterfaceFont(size: 11)
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 7, weight: .bold))
+                        .readBoardInterfaceFont(size: 7, weight: .bold)
                         .foregroundStyle(ReadBoardDesign.C.text3)
                 }
                 .foregroundStyle(ReadBoardDesign.C.text2)
@@ -325,9 +336,9 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
             foreground = ReadBoardDesign.C.accent
             border = ReadBoardDesign.C.accent.opacity(0.35)
         case .incomplete:
-            background = ReadBoardDesign.C.translate.opacity(0.16)
-            foreground = ReadBoardDesign.C.translate
-            border = ReadBoardDesign.C.translate.opacity(0.40)
+            background = ReadBoardDesign.C.scoreLow.opacity(0.16)
+            foreground = ReadBoardDesign.C.scoreLow
+            border = ReadBoardDesign.C.scoreLow.opacity(0.40)
         case nil:
             background = ReadBoardDesign.C.surface
             foreground = ReadBoardDesign.C.text2
@@ -335,7 +346,7 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
         }
         return Button(action: action) {
             Text(label)
-                .font(.system(size: 11))
+                .readBoardInterfaceFont(size: 11)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3.5)
                 .background(background)
@@ -416,7 +427,7 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
                 Text(message).lineLimit(2)
                 Spacer()
             }
-            .font(.system(size: 11))
+            .readBoardInterfaceFont(size: 11)
             .foregroundStyle(ReadBoardDesign.C.scoreMid)
             .padding(ReadBoardDesign.Space.md)
         }
@@ -674,8 +685,8 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
         if model.permissions.allows(.runProcessing, capability: .processing) {
             Divider()
             Menu("内容处理", systemImage: "gearshape.2") {
-                processingButton("全部已启用处理", icon: "sparkles", operation: .allEnabled, item: item)
-                processingButton("重新提取全文", icon: "doc.text.magnifyingglass", operation: .fulltext, item: item)
+                processingButton("重新处理", icon: "arrow.triangle.2.circlepath", operation: .allEnabled, item: item)
+                Divider()
                 processingButton("AI 评分", icon: "number", operation: .score, item: item)
                 processingButton("AI 摘要", icon: "text.quote", operation: .summarize, item: item)
                 processingButton("AI 翻译", icon: "character.bubble", operation: .translate, item: item)
@@ -687,6 +698,11 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
                     processingButton("删除转录稿", icon: "trash", operation: .deleteTranscript, item: item)
                 }
             }
+            processingButton(
+                "重新提取全文",
+                icon: "doc.text.magnifyingglass",
+                operation: .fulltext,
+                item: item)
         }
 
         if model.permissions.allows(.manageExports, capability: .export) {
@@ -722,7 +738,7 @@ public struct ReadBoardLibraryFeatureView<Detail: View>: View {
                 }
                 .buttonStyle(.plain)
             }
-            .font(.system(size: 11))
+            .readBoardInterfaceFont(size: 11)
             .foregroundStyle(ReadBoardDesign.C.text)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -746,18 +762,22 @@ public extension ReadBoardLibraryFeatureView where Detail == ReadBoardArticleDet
     init(
         environment: ReadBoardFeatureEnvironment,
         location: ReadBoardLibraryLocation = .collection(.all),
-        automaticallyMarksRead: Bool = true
+        automaticallyMarksRead: Bool = true,
+        mediaPlayer: ReadBoardGlobalMediaPlayer? = nil,
+        playbackNavigationRequest: ReadBoardPlaybackNavigationRequest? = nil
     ) {
         self.init(
             environment: environment,
             location: location,
             automaticallyMarksRead: automaticallyMarksRead,
-            loadsDetail: true
+            loadsDetail: true,
+            playbackNavigationRequest: playbackNavigationRequest
         ) { summary, model, _ in
             ReadBoardArticleDetailFeatureView(
                 summary: summary,
                 model: model,
-                environment: environment)
+                environment: environment,
+                mediaPlayer: mediaPlayer)
         }
     }
 }

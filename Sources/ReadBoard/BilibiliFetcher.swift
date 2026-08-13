@@ -100,14 +100,14 @@ public enum BilibiliFetcher {
         } catch {
             guard isRiskControlError(error) else { throw error }
             do {
-                return try await fetchWBIArchiveFeed(
+                // App 投稿列表会返回结构化 badges（充电专属/抢先看），是动态流
+                // 风控后的首选降级；WBI 投稿列表没有这些字段，只能做最后元数据兜底。
+                return try await fetchAppArchiveFeed(
                     uid: uid, historyScope: historyScope, sessdata: sessdata)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                // WBI 与动态流都属于 Web 风控域，可能同时返回 412。移动端投稿
-                // 列表使用独立 App 签名，保留标题、发布时间和 UGC 付费标记。
-                return try await fetchAppArchiveFeed(
+                return try await fetchWBIArchiveFeed(
                     uid: uid, historyScope: historyScope, sessdata: sessdata)
             }
         }
@@ -338,6 +338,11 @@ public enum BilibiliFetcher {
             meta["bilibili_access_state"] = access.state.rawValue
             meta["bilibili_access_label"] = access.state.listLabel
             meta["bilibili_access_checked_at"] = ISO8601DateFormatter().string(from: Date())
+        } else {
+            // 移动端投稿列表会为当前受限内容返回结构化 badges；没有付费徽章
+            // 表示当前列表状态已开放。显式写 open，刷新旧条目时才能撤销已到期的抢先看标签。
+            meta["bilibili_access_state"] = BilibiliAccessState.open.rawValue
+            meta["bilibili_access_checked_at"] = ISO8601DateFormatter().string(from: Date())
         }
         return ParsedEntry(
             guid: bvid,
@@ -528,23 +533,35 @@ public enum BilibiliFetcher {
     /// 动态流的视频卡在入库前已经返回付费类型。这里做内容类型识别，不判断当前账号
     /// 是否已购买；完整播放权限会在转录时由 player/wbi/v2 再精确覆盖。
     static func dynamicVideoAccess(from archive: [String: Any]) -> BilibiliVideoAccess? {
-        let badgeText: String? = {
-            if let value = archive["elec_arc_badge"] as? String, !value.isEmpty { return value }
+        let badgeTexts: [String] = {
+            var values: [String] = []
+            if let value = archive["elec_arc_badge"] as? String, !value.isEmpty { values.append(value) }
             if let badge = archive["badge"] as? [String: Any],
-               let value = badge["text"] as? String, !value.isEmpty { return value }
-            if let value = archive["badge"] as? String, !value.isEmpty { return value }
-            return nil
+               let value = badge["text"] as? String, !value.isEmpty { values.append(value) }
+            if let value = archive["badge"] as? String, !value.isEmpty { values.append(value) }
+            if let badges = archive["badges"] as? [[String: Any]] {
+                values.append(contentsOf: badges.compactMap { badge in
+                    guard let value = badge["text"] as? String, !value.isEmpty else { return nil }
+                    return value
+                })
+            }
+            return values
         }()
+        let badgeText = badgeTexts.first
+        let chargingBadge = badgeTexts.first { text in
+            text.contains("充电专属") || text.contains("充电抢先") || text == "抢先看"
+        }
         let chargingType = flexibleInt(archive["elec_arc_type"]) ?? 0
-        if flexibleFlag(archive["is_charging_arc"]) || chargingType > 0 {
-            let state: BilibiliAccessState = chargingType == 2 || badgeText?.contains("抢先") == true
+        if flexibleFlag(archive["is_charging_arc"]) || chargingType > 0 || chargingBadge != nil {
+            let isEarlyAccess = badgeTexts.contains { $0.contains("抢先") }
+            let state: BilibiliAccessState = chargingType == 2 || isEarlyAccess
                 ? .upowerEarlyAccess
                 : .upowerExclusive
             let level = (archive["charging_pay"] as? [String: Any])
                 .flatMap { flexibleInt($0["level"]) }
             return BilibiliVideoAccess(
                 state: state,
-                toast: badgeText,
+                toast: chargingBadge ?? badgeText,
                 privilegeType: level,
                 jumpURL: nil,
                 isPartial: false
@@ -586,7 +603,22 @@ public enum BilibiliFetcher {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let body = root["body"] as? [[String: Any]] else { return nil }
         let lines = body.compactMap { $0["content"] as? String }
+        let timedLines = body.compactMap { item -> SubtitleTextFormatter.TimedLine? in
+            guard let text = item["content"] as? String,
+                  let start = subtitleTimestamp(item["from"]),
+                  let end = subtitleTimestamp(item["to"]) else { return nil }
+            return .init(start: start, end: max(start, end), text: text)
+        }
+        if timedLines.count == lines.count {
+            return SubtitleTextFormatter.markdown(from: timedLines)
+        }
         return SubtitleTextFormatter.markdown(from: lines)
+    }
+
+    private static func subtitleTimestamp(_ value: Any?) -> TimeInterval? {
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let text = value as? String { return TimeInterval(text) }
+        return nil
     }
 
     private static func extractBVID(from input: String) -> String? {
@@ -659,6 +691,10 @@ public enum BilibiliFetcher {
             if let privilegeType = access.privilegeType {
                 meta["bilibili_access_privilege_type"] = String(privilegeType)
             }
+            meta["bilibili_access_source"] = "dynamic_card"
+            meta["bilibili_access_checked_at"] = ISO8601DateFormatter().string(from: Date())
+        } else {
+            meta["bilibili_access_state"] = BilibiliAccessState.open.rawValue
             meta["bilibili_access_source"] = "dynamic_card"
             meta["bilibili_access_checked_at"] = ISO8601DateFormatter().string(from: Date())
         }

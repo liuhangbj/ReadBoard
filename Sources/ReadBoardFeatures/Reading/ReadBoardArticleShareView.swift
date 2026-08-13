@@ -20,9 +20,9 @@ struct ReadBoardArticleShareView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("分享 / 后处理")
-                    .font(.system(size: 15, weight: .semibold))
+                    .readBoardInterfaceFont(size: 15, weight: .semibold)
                 Text(item.title)
-                    .font(.system(size: 12))
+                    .readBoardInterfaceFont(size: 12)
                     .foregroundStyle(ReadBoardDesign.C.text3)
                     .lineLimit(2)
             }
@@ -61,7 +61,7 @@ struct ReadBoardArticleShareView: View {
 
             if !message.isEmpty {
                 Text(message)
-                    .font(.system(size: 11))
+                    .readBoardInterfaceFont(size: 11)
                     .foregroundStyle(ReadBoardDesign.C.scoreHigh)
                     .padding(.horizontal, 16)
                     .padding(.top, 4)
@@ -91,7 +91,7 @@ struct ReadBoardArticleShareView: View {
                 Text(title)
                 Spacer()
             }
-            .font(.system(size: 13))
+            .readBoardInterfaceFont(size: 13)
             .foregroundStyle(ReadBoardDesign.C.text)
             .padding(.horizontal, 8)
             .padding(.vertical, 7)
